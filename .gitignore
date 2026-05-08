@@ -56,3 +56,6 @@ config.local.toml
 /gfsk8-modem-clean*/
 /gfsk8/
 
+
+# Build output (build.sh writes intermediate artifacts here)
+/output/

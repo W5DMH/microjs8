@@ -1,14 +1,19 @@
 # MiniJS8
-
-A self-contained JS8 transceiver controller for amateur radio. Runs on a
+<p align="center">
+  <img src="images/screen1.jpg" alt="MiniJS8 device screen — main view" width="280">
+  <img src="images/screen2.jpg" alt="MiniJS8 device screen — secondary view" width="280">
+</p>
+A Raspberry Pi Zero 2w complete image that creates a self-contained JS8 transceiver controller for amateur radio. Runs on a
 Raspberry Pi Zero 2W with a 240Ã—240 SPI display, two GPIO buttons, and a
-USB keyboard. Drives any radio paired with a DigiRig (QDX, G90, etc.) â€”
+USB keyboard. Drives any radio paired with a QRP LABS QDX Transceiver or DigiRig (G90, Baofeng, etc) â€”
 RTS for PTT, USB audio for I/Q.
 
 JS8 is great for low-power messaging but JS8Call wants a full laptop.
 This is a headless appliance: power up, navigate the screen ring with
 arrow keys, type messages with the keyboard, hold both GPIO buttons to
 shut down.
+
+Single button touch or keyboard arrows to switch screens, keyboard TAB key to switch fields in a screen and keyboard arrows for navigating drop downs. 
 
 ## Hardware
 
