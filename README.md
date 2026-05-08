@@ -94,7 +94,7 @@ GPL-3.0 matches the gfsk8 fork. See `LICENSE`.
 
 ## Acknowledgments
 
-- **JS8Call** by Jordan Sherer KN4CRD — the protocol and the original
+- **JS8Call** by Jordan Sherer KN4CRD the protocol and the original
   reference implementation. MiniJS8 is a re-target of those ideas to
   embedded hardware, not an independent codebase.
 - **GFSK8**  modem core extracted from JS8Call for non-Qt use. https://github.com/jfrancis42/gfsk8-modem-clean
