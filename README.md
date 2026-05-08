@@ -28,7 +28,7 @@ Single button touch or keyboard arrows to switch screens, keyboard TAB key to sw
 
 ## Screens
 
-Cycle with >ê/ < Arrow keys on the keyboard:
+Cycle with > or < Arrow keys on the keyboard:
 
 `HOME | HEARD | DIRECTED | INBOX | COMPOSE |  ALLCALL | DIRECTED MENU | EMERGENCY | SETUP`
 
