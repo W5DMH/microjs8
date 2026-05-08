@@ -1,0 +1,64 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "minijs8"
+version = "0.1.0"
+description = "JS8 transceiver application for Raspberry Pi (Pi Zero 2W)."
+readme = "README.md"
+requires-python = ">=3.11"
+license = "LicenseRef-Proprietary"
+authors = [{name = "MiniJS8 project"}]
+
+# Step 2 + 3 + 4 + 5 deps:
+#   Pillow                                   — image composition for screens
+#   adafruit-circuitpython-rgb-display       — ST7789 driver
+#   adafruit-blinka                          — provides board / digitalio modules
+#   gpiozero                                 — buttons + backlight
+#   lgpio                                    — gpiozero backend on Bookworm
+#   evdev                                    — USB keyboard reader (Step 3)
+#   numpy                                    — audio ring buffer + decimation (Step 5)
+#   sounddevice                              — PortAudio wrapper for QDX capture (Step 5)
+#
+# Subsequent steps will add: pyserial (CAT control). The GFSK8 .so is
+# built and installed by build.sh — NOT a pip package — because there's
+# no upstream wheel and CMake-based pybind11 builds in chroot give us
+# guaranteed ABI match.
+dependencies = [
+    "Pillow>=10.0",
+    "adafruit-circuitpython-rgb-display>=3.13",
+    "adafruit-blinka>=8.0",
+    "gpiozero>=2.0",
+    "lgpio>=0.2.2.0",
+    "evdev>=1.6",
+    "numpy>=1.24",
+    "sounddevice>=0.4.6",
+    # pyserial for direct RTS-PTT toggling (DigiRig path). The QDX
+    # path goes through rigctld so doesn't need pyserial, but the
+    # daemon's RtsPttClient imports it lazily at port-open time so
+    # the dependency cost is one-time-at-import for QDX users too.
+    "pyserial>=3.5",
+]
+
+[project.optional-dependencies]
+# Host-side dev tools, installed only on the Pi 4 build host (not in
+# the image). These let us run unit tests against the pure-Python
+# subset of the codebase without flashing.
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+]
+
+[project.scripts]
+minijs8 = "minijs8.__main__:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"

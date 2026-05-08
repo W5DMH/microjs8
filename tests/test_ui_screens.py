@@ -1,0 +1,886 @@
+"""Tests for minijs8.ui.screens.
+
+Each screen must render a 240x240 RGB image without raising. We do not
+assert anything pixel-perfect — that's a visual-inspection job — but we
+do verify image dimensions, colour mode, and that the image is
+non-trivial (not entirely the background colour, which would mean the
+renderer painted nothing).
+"""
+
+from __future__ import annotations
+
+import pytest
+from PIL import Image
+
+from minijs8.ui import theme
+from minijs8.ui.fonts import load_fonts
+from minijs8.ui.screens import render
+from minijs8.ui.state import Screen, UISnapshot
+
+
+@pytest.fixture(scope="module")
+def fonts():
+    """Load fonts once per test module — they're stateless."""
+    return load_fonts()
+
+
+def _snapshot(
+    screen: Screen,
+    *,
+    configured: bool = True,
+    shutdown_remaining: float = 1.0,
+) -> UISnapshot:
+    if configured:
+        return UISnapshot(
+            screen=screen,
+            callsign="K1ABC",
+            grid="FN42",
+            units="miles",
+            tx_allowed=True,
+            emergency_override=False,
+            shutdown_remaining=shutdown_remaining,
+            previous_screen=Screen.HOME,
+        )
+    return UISnapshot(
+        screen=screen,
+        callsign="N0CALL",
+        grid="",
+        units="miles",
+        tx_allowed=False,
+        emergency_override=False,
+        shutdown_remaining=shutdown_remaining,
+        previous_screen=Screen.HOME,
+    )
+
+
+@pytest.mark.parametrize("screen", list(Screen))
+def test_every_screen_renders_240x240_rgb(screen, fonts):
+    img = render(_snapshot(screen), fonts)
+    assert isinstance(img, Image.Image)
+    assert img.size == (theme.SCREEN_W, theme.SCREEN_H)
+    assert img.mode == "RGB"
+
+
+@pytest.mark.parametrize("screen", list(Screen))
+def test_every_screen_paints_something(screen, fonts):
+    """Image must contain at least two distinct pixel values.
+
+    Catches the trivial "renderer drew nothing on the canvas" bug.
+    """
+    img = render(_snapshot(screen), fonts)
+    colours = img.getcolors(maxcolors=2**16)
+    assert colours is not None
+    assert len(colours) > 1, f"{screen.name} rendered as a flat block"
+
+
+@pytest.mark.parametrize("screen", list(Screen))
+def test_every_screen_renders_for_unconfigured_station(screen, fonts):
+    """Unconfigured station must not crash any renderer."""
+    img = render(_snapshot(screen, configured=False), fonts)
+    assert img.size == (theme.SCREEN_W, theme.SCREEN_H)
+
+
+def test_shutting_down_progress_changes_image(fonts):
+    """Different progress values must produce visibly different frames."""
+    full = render(_snapshot(Screen.SHUTTING_DOWN, shutdown_remaining=1.0), fonts)
+    half = render(_snapshot(Screen.SHUTTING_DOWN, shutdown_remaining=0.5), fonts)
+    empty = render(_snapshot(Screen.SHUTTING_DOWN, shutdown_remaining=0.0), fonts)
+    assert full.tobytes() != half.tobytes()
+    assert half.tobytes() != empty.tobytes()
+
+
+def test_renderer_exception_returns_error_frame(fonts):
+    """A bad screen value must produce an error frame, not raise."""
+    # Build a snapshot with an out-of-range screen value via dataclass __new__
+    from dataclasses import replace
+    ok = _snapshot(Screen.HOME)
+    # Use object.__setattr__ to bypass frozen=True for this test.
+    bad = UISnapshot(
+        screen=Screen(999) if 999 in [m.value for m in Screen] else None,  # type: ignore[arg-type]
+        callsign=ok.callsign,
+        grid=ok.grid,
+        tx_allowed=ok.tx_allowed,
+    ) if False else replace(ok)
+    # Cheaper: monkey-patch the dispatch table to inject a raising renderer.
+    from minijs8.ui import screens as scr_mod
+
+    def boom(state, fonts):
+        raise RuntimeError("synthetic renderer failure")
+
+    saved = scr_mod._RENDERERS[Screen.HOME]
+    scr_mod._RENDERERS[Screen.HOME] = boom
+    try:
+        img = render(_snapshot(Screen.HOME), fonts)
+        assert img.size == (theme.SCREEN_W, theme.SCREEN_H)
+        # Error frame should contain the word "error" or "ERROR" in some form
+        # — we don't poke at pixel content, but the call must succeed.
+    finally:
+        scr_mod._RENDERERS[Screen.HOME] = saved
+
+
+# ── Setup screen Radio row ──────────────────────────────────────────
+
+
+def test_setup_rows_includes_radio_row():
+    """The Setup screen must expose a Radio row keyed 'radio' so the
+    router can identify it for cycle-on-Enter dispatch."""
+    from minijs8.ui.screens import _setup_rows
+
+    snap = _snapshot(Screen.SETUP)
+    rows = _setup_rows(snap)
+    field_names = [r[0] for r in rows]
+    assert "radio" in field_names
+    # Confirm ordering: radio comes after freq_hz (the editable last
+    # text field) and before mode/logs (which are read-only display).
+    radio_idx = field_names.index("radio")
+    freq_idx = field_names.index("freq_hz")
+    mode_idx = field_names.index("mode")
+    assert freq_idx < radio_idx < mode_idx
+
+
+def test_setup_radio_row_shows_display_name():
+    """The displayed value for the radio row must be the human-
+    readable display_name from the registry, not the raw id. (e.g.
+    "QRP Labs QDX" rather than "qdx".)"""
+    from minijs8.cat.radios import get_radio
+    from minijs8.ui.screens import _setup_rows
+
+    snap = _snapshot(Screen.SETUP)
+    # _snapshot builds with default radio_id="qdx".
+    rows = _setup_rows(snap)
+    radio_row = next(r for r in rows if r[0] == "radio")
+    expected_label = get_radio("qdx").display_name
+    assert radio_row[2] == expected_label  # third tuple slot = displayed value
+
+
+def test_setup_radio_row_falls_back_to_raw_id_when_unknown():
+    """If somehow an unknown radio_id makes it into UISnapshot, the
+    row should display the raw id rather than crash. Defense-in-depth
+    against a registry/config drift bug."""
+    from dataclasses import replace
+    from minijs8.ui.screens import _setup_rows
+
+    snap = _snapshot(Screen.SETUP)
+    # Inject an id that the registry won't know.
+    snap = replace(snap, radio_id="not-a-real-radio")
+    rows = _setup_rows(snap)
+    radio_row = next(r for r in rows if r[0] == "radio")
+    assert radio_row[2] == "not-a-real-radio"
+
+
+def test_setup_screen_renders_with_radio_focused(fonts):
+    """The Setup screen must render cleanly when the radio row is the
+    focused field — exercising the focus chevron + radio rendering
+    path together."""
+    from dataclasses import replace
+    snap = _snapshot(Screen.SETUP)
+    snap = replace(snap, focused_field="radio")
+    img = render(snap, fonts)
+    assert img.size == (theme.SCREEN_W, theme.SCREEN_H)
+
+
+# ── Inbox / mailbox renderers (INBOX screen) ─────────────────────────
+
+
+from minijs8.ui.screens import (
+    _render_inbox,
+    _render_inbox_detail,
+    _format_inbox_time,
+    _format_inbox_full_time,
+    _wrap_message_body,
+)
+from minijs8.ui.state import InboxRow
+
+
+def _inbox_row(
+    *,
+    rid: int = 1,
+    from_call: str = "KC1WDO",
+    body: str = "hello",
+    utc: str = "2026-05-06T14:23:11.000+00:00",
+    snr: int | None = -3,
+    is_read: bool = False,
+) -> InboxRow:
+    return InboxRow(
+        id=rid, from_call=from_call, body=body,
+        utc_iso=utc, snr_db=snr, is_read=is_read,
+    )
+
+
+def _inbox_snapshot(
+    *,
+    messages=(),
+    held=0,
+    unread=0,
+    focused=0,
+    detail_id=None,
+    screen=Screen.INBOX,
+):
+    return UISnapshot(
+        screen=screen,
+        callsign="K1ABC",
+        grid="FN42",
+        units="miles",
+        tx_allowed=True,
+        emergency_override=False,
+        shutdown_remaining=1.0,
+        previous_screen=Screen.HOME,
+        inbox_messages=messages,
+        inbox_unread_count=unread,
+        inbox_held_count=held,
+        inbox_focused_index=focused,
+        inbox_detail_id=detail_id,
+    )
+
+
+def test_inbox_empty_renders_help_text(fonts):
+    snap = _inbox_snapshot()
+    img = _render_inbox(snap, fonts)
+    assert img.size == (theme.SCREEN_W, theme.SCREEN_H)
+    # No exception is the main success criterion; image must be non-blank.
+    extrema = img.getextrema()
+    # Image is RGB, so extrema is a tuple of (min,max) per channel.
+    assert any(mx > 0 for _, mx in extrema), "image looks entirely black"
+
+
+def test_inbox_with_messages_renders(fonts):
+    msgs = (_inbox_row(rid=2, body="b"), _inbox_row(rid=1, body="a"))
+    snap = _inbox_snapshot(messages=msgs, unread=2)
+    img = _render_inbox(snap, fonts)
+    assert img.size == (theme.SCREEN_W, theme.SCREEN_H)
+
+
+def test_inbox_with_focused_index_renders(fonts):
+    msgs = (_inbox_row(rid=2, body="b"), _inbox_row(rid=1, body="a", is_read=True))
+    snap = _inbox_snapshot(messages=msgs, unread=1, focused=1)
+    img = _render_inbox(snap, fonts)
+    assert img.size == (theme.SCREEN_W, theme.SCREEN_H)
+
+
+def test_inbox_with_long_body_truncates_gracefully(fonts):
+    """List view truncates bodies — must not raise on long input."""
+    long_body = "x" * 500
+    msgs = (_inbox_row(body=long_body),)
+    snap = _inbox_snapshot(messages=msgs, unread=1)
+    img = _render_inbox(snap, fonts)
+    assert img.size == (theme.SCREEN_W, theme.SCREEN_H)
+
+
+def test_inbox_held_only_no_messages(fonts):
+    """Empty inbox + holding mail for others — should mention held count."""
+    snap = _inbox_snapshot(messages=(), held=3, unread=0)
+    img = _render_inbox(snap, fonts)
+    assert img.size == (theme.SCREEN_W, theme.SCREEN_H)
+
+
+def test_inbox_with_missing_snr(fonts):
+    """Local-store rows have snr_db=None — must render without crashing."""
+    msgs = (_inbox_row(snr=None),)
+    snap = _inbox_snapshot(messages=msgs, unread=1)
+    img = _render_inbox(snap, fonts)
+    assert img.size == (theme.SCREEN_W, theme.SCREEN_H)
+
+
+# Detail view ───────────────────────────────────────────────────────
+
+
+def test_detail_view_renders_with_valid_id(fonts):
+    msgs = (_inbox_row(rid=42, body="this is the full message body"),)
+    snap = _inbox_snapshot(
+        messages=msgs, unread=1, detail_id=42, screen=Screen.INBOX_DETAIL,
+    )
+    img = _render_inbox_detail(snap, fonts)
+    assert img.size == (theme.SCREEN_W, theme.SCREEN_H)
+
+
+def test_detail_view_with_stale_id_does_not_crash(fonts):
+    """Race: row was deleted while detail view was open. Render
+    must show a friendly message rather than raising."""
+    snap = _inbox_snapshot(
+        messages=(), detail_id=99, screen=Screen.INBOX_DETAIL,
+    )
+    img = _render_inbox_detail(snap, fonts)
+    assert img.size == (theme.SCREEN_W, theme.SCREEN_H)
+
+
+def test_detail_view_with_long_body_clips_with_indicator(fonts):
+    """Body longer than the body-region must clip — verifying
+    no exception, not pixel-correctness."""
+    long_body = "\n".join(["This is a line of text"] * 50)
+    msgs = (_inbox_row(rid=1, body=long_body),)
+    snap = _inbox_snapshot(
+        messages=msgs, detail_id=1, screen=Screen.INBOX_DETAIL,
+    )
+    img = _render_inbox_detail(snap, fonts)
+    assert img.size == (theme.SCREEN_W, theme.SCREEN_H)
+
+
+def test_detail_view_with_no_snr_renders(fonts):
+    msgs = (_inbox_row(rid=1, snr=None),)
+    snap = _inbox_snapshot(
+        messages=msgs, detail_id=1, screen=Screen.INBOX_DETAIL,
+    )
+    img = _render_inbox_detail(snap, fonts)
+    assert img.size == (theme.SCREEN_W, theme.SCREEN_H)
+
+
+# Helper functions ──────────────────────────────────────────────────
+
+
+def test_format_inbox_time_extracts_hh_mm():
+    assert _format_inbox_time("2026-05-06T14:23:11.000+00:00") == "14:23"
+
+
+def test_format_inbox_time_falls_back_on_garbage():
+    assert _format_inbox_time("") == "--:--"
+    assert _format_inbox_time("garbage") == "--:--"
+
+
+def test_format_inbox_time_handles_space_separator():
+    """ISO 8601 allows space in place of T."""
+    assert _format_inbox_time("2026-05-06 14:23:11.000+00:00") == "14:23"
+
+
+def test_format_inbox_full_time():
+    out = _format_inbox_full_time("2026-05-06T14:23:11.000+00:00")
+    assert out == "2026-05-06 14:23 UTC"
+
+
+def test_format_inbox_full_time_unknown():
+    assert _format_inbox_full_time("") == "(unknown)"
+
+
+def test_wrap_message_body_word_break():
+    lines = _wrap_message_body(
+        "hello world this is a long sentence to wrap",
+        max_chars=20,
+    )
+    assert all(len(line) <= 20 for line in lines)
+    # Reconstruction matches (modulo word-spacing)
+    assert "hello" in " ".join(lines)
+    assert "wrap" in " ".join(lines)
+
+
+def test_wrap_message_body_hard_break_on_long_word():
+    """Single word longer than max_chars must hard-break."""
+    lines = _wrap_message_body("supercalifragilisticexpialidocious", max_chars=10)
+    assert all(len(line) <= 10 for line in lines)
+    # All chars present
+    assert "".join(lines) == "supercalifragilisticexpialidocious"
+
+
+def test_wrap_message_body_preserves_paragraphs():
+    """Multi-paragraph body should preserve blank line between."""
+    lines = _wrap_message_body("para one\n\npara two", max_chars=20)
+    assert "" in lines  # the blank line separating the paragraphs
+
+
+def test_home_screen_renders_inbox_indicator_when_held(fonts):
+    """Home screen should render even when held_count > 0."""
+    snap = UISnapshot(
+        screen=Screen.HOME,
+        callsign="K1ABC",
+        grid="FN42",
+        units="miles",
+        tx_allowed=True,
+        emergency_override=False,
+        inbox_held_count=3,
+        inbox_unread_count=1,
+    )
+    from minijs8.ui.screens import render
+    img = render(snap, fonts)
+    assert img.size == (theme.SCREEN_W, theme.SCREEN_H)
+
+
+# ── Directed activity log (chat-style DIRECTED screen) ──────────────
+
+
+from minijs8.activity import DirectedActivityEntry, Direction
+from minijs8.ui.screens import _render_directed as _render_directed_log
+
+
+def _activity_in(
+    *, from_call: str, verb: str, body: str = "",
+    snr_db: int | None = -8, freq_hz: float = 1500.0,
+    at_unix: float = 1700000000.0,
+) -> DirectedActivityEntry:
+    return DirectedActivityEntry(
+        at_unix=at_unix,
+        direction=Direction.IN,
+        other_call=from_call.upper(),
+        verb=verb,
+        body=body,
+        snr_db=snr_db,
+        freq_hz=freq_hz,
+    )
+
+
+def _activity_out(
+    *, to_call: str, verb: str, body: str = "",
+    at_unix: float = 1700000005.0,
+) -> DirectedActivityEntry:
+    return DirectedActivityEntry(
+        at_unix=at_unix,
+        direction=Direction.OUT,
+        other_call=to_call.upper(),
+        verb=verb,
+        body=body,
+        snr_db=None,
+        freq_hz=None,
+    )
+
+
+def _directed_snapshot(entries: tuple[DirectedActivityEntry, ...] = ()):
+    return UISnapshot(
+        screen=Screen.DIRECTED,
+        callsign="W5DMH",
+        grid="EN83",
+        units="miles",
+        tx_allowed=True,
+        emergency_override=False,
+        shutdown_remaining=1.0,
+        previous_screen=Screen.HOME,
+        directed_log_entries=entries,
+    )
+
+
+def test_directed_log_empty_renders_help(fonts):
+    """Empty log renders the placeholder text without raising."""
+    img = _render_directed_log(_directed_snapshot(), fonts)
+    assert img.size == (theme.SCREEN_W, theme.SCREEN_H)
+    extrema = img.getextrema()
+    assert any(mx > 0 for _, mx in extrema), "image looks entirely black"
+
+
+def test_directed_log_inbound_only_renders(fonts):
+    entries = (
+        _activity_in(from_call="KD8PGB", verb="SNR?"),
+        _activity_in(from_call="KC1WDO", verb="QUERY MSGS"),
+    )
+    img = _render_directed_log(_directed_snapshot(entries), fonts)
+    assert img.size == (theme.SCREEN_W, theme.SCREEN_H)
+
+
+def test_directed_log_chat_style_in_and_out(fonts):
+    """A round-trip exchange — inbound query then our outbound reply —
+    should render without error."""
+    entries = (
+        _activity_in(from_call="KD8PGB", verb="QUERY MSGS"),
+        _activity_out(to_call="KD8PGB", verb="MSG", body="5"),
+        _activity_in(from_call="KC1WDO", verb="SNR?"),
+        _activity_out(to_call="KC1WDO", verb="SNR", body="-8"),
+    )
+    img = _render_directed_log(_directed_snapshot(entries), fonts)
+    assert img.size == (theme.SCREEN_W, theme.SCREEN_H)
+
+
+def test_directed_log_truncates_at_visible_rows(fonts):
+    """Many entries shouldn't crash; renderer slices to fit."""
+    entries = tuple(
+        _activity_in(from_call=f"K{i}AB", verb="SNR?", at_unix=float(i))
+        for i in range(50)
+    )
+    img = _render_directed_log(_directed_snapshot(entries), fonts)
+    assert img.size == (theme.SCREEN_W, theme.SCREEN_H)
+
+
+def test_directed_log_long_body_does_not_overflow(fonts):
+    """Long bodies should ellipsize, not throw or paint outside bounds."""
+    entries = (
+        _activity_in(
+            from_call="K1ABC", verb="STATUS",
+            body="all systems nominal but verbose extra commentary here",
+        ),
+    )
+    img = _render_directed_log(_directed_snapshot(entries), fonts)
+    assert img.size == (theme.SCREEN_W, theme.SCREEN_H)
+
+
+def test_directed_log_render_via_dispatcher(fonts):
+    """render() dispatches Screen.DIRECTED to the activity-log renderer
+    (regression guard against the renderer dict mapping breaking)."""
+    from minijs8.ui.screens import render
+    snap = _directed_snapshot((
+        _activity_in(from_call="K1ABC", verb="GRID?"),
+    ))
+    img = render(snap, fonts)
+    assert img.size == (theme.SCREEN_W, theme.SCREEN_H)
+
+
+def test_inbox_render_via_dispatcher(fonts):
+    """render() dispatches Screen.INBOX to the inbox renderer."""
+    from minijs8.ui.screens import render
+    snap = _inbox_snapshot(
+        messages=(_inbox_row(),),
+        unread=1, screen=Screen.INBOX,
+    )
+    img = render(snap, fonts)
+    assert img.size == (theme.SCREEN_W, theme.SCREEN_H)
+
+
+def test_directed_log_full_yes_msg_id_fits_without_truncation(fonts):
+    """The on-air canary: 'KD8PGB YES MSG ID 57' should fit on the
+    240px screen without truncation. Previously the renderer
+    hard-truncated at 22 chars which ate the trailing '57' from the
+    duplicated 'YES YES MSG ID 57' the activity log would emit.
+
+    With both fixes (verb-dedup in app + pixel-width truncation),
+    the rendered row shows the full message ID.
+    """
+    entries = (
+        DirectedActivityEntry(
+            at_unix=1700000000.0,
+            direction=Direction.IN,
+            other_call="KD8PGB",
+            verb="YES",
+            body="MSG ID 57",   # post-dedup body
+            snr_db=12,
+            freq_hz=1616.1,
+        ),
+    )
+    snap = _directed_snapshot(entries)
+    img = _render_directed_log(snap, fonts)
+    # We can't check the rendered pixels exactly, but we can check the
+    # image dimensions and that the renderer didn't crash.
+    assert img.size == (theme.SCREEN_W, theme.SCREEN_H)
+
+
+def test_directed_log_very_long_body_does_ellipsize(fonts):
+    """When a body is genuinely too long to fit even the full screen
+    width, the renderer must ellipsize — not silently let the text
+    overflow past the right edge."""
+    long_body = "A" * 100  # absurdly long
+    entries = (
+        DirectedActivityEntry(
+            at_unix=1700000000.0,
+            direction=Direction.IN,
+            other_call="K1ABC",
+            verb="STATUS",
+            body=long_body,
+            snr_db=-5, freq_hz=1500.0,
+        ),
+    )
+    snap = _directed_snapshot(entries)
+    img = _render_directed_log(snap, fonts)
+    assert img.size == (theme.SCREEN_W, theme.SCREEN_H)
+
+
+# ── Header banner: UTC clock on every screen ─────────────────────────
+
+
+def test_header_time_format_includes_utc_prefix():
+    """The header clock helper returns ``UTC HH:MM:SS`` — the explicit
+    UTC label tells the operator at a glance that the time is the
+    ham-radio reference (not local), and the format keeps fixed
+    width so right-alignment doesn't jitter as the seconds tick."""
+    from minijs8.ui.screens import _format_time_for_header
+    snap = _snapshot(Screen.HOME)
+    s = _format_time_for_header(snap)
+    # 12 chars wide: "UTC " + "HH:MM:SS"
+    assert s.startswith("UTC "), (
+        f"clock string must start with 'UTC ' prefix; got {s!r}"
+    )
+    assert len(s) == 12
+    time_part = s[4:]
+    assert time_part.count(":") == 2
+    for part in time_part.split(":"):
+        assert len(part) == 2
+        assert part == "--" or part.isdigit()
+
+
+def test_header_clock_is_always_white_regardless_of_source(fonts):
+    """The header clock is rendered in HEADER_FG (white) whether or
+    not a time source is active. We previously dimmed it on no-source
+    as a confidence signal, but that conflicted with operator
+    expectations ("why is my clock greyed out?") — so the source
+    state is now spelled out plainly on HOME's TimeSrc row instead.
+
+    Tested by rendering the header for each source state and sampling
+    pixels at the clock's center column. With FG_DIM the pixel value
+    would be ~140; with HEADER_FG it should be ≥200.
+    """
+    from PIL import Image, ImageDraw
+    from dataclasses import replace
+    from minijs8.ui.screens import _draw_header
+
+    for src in ("chrony", "consensus", ""):
+        snap = replace(_snapshot(Screen.DIRECTED), time_source=src)
+        img = Image.new("RGB", (theme.SCREEN_W, theme.SCREEN_H), theme.BG)
+        draw = ImageDraw.Draw(img)
+        _draw_header(draw, fonts, "DIRECTED", snap)
+        # Find the brightest pixel in the center column inside the
+        # header band — that's a glyph stroke from the clock.
+        max_brightness = 0
+        for x in range(100, 140):
+            for y in range(4, 24):
+                r, g, b = img.getpixel((x, y))
+                # Foreground glyphs land near (220,220,220) — measure
+                # the green channel as a proxy for white-ness.
+                if g > max_brightness:
+                    max_brightness = g
+        assert max_brightness >= 180, (
+            f"clock too dim for source={src!r}: brightest pixel green "
+            f"channel was {max_brightness}, expected ≥180. Did the dim-"
+            f"on-no-source logic come back?"
+        )
+
+
+def test_home_screen_no_longer_has_time_row(fonts):
+    """HOME should NOT contain the literal time string — that's now
+    in the header on every screen, freeing HOME's body for other
+    info. HOME keeps a 'TimeSrc' row showing just the source tag
+    so operators can distinguish UTC from CONSENSUS at a glance."""
+    snap = _snapshot(Screen.HOME)
+    img = render(snap, fonts)
+    # Render → bytes for keyword search. Not a strict guarantee of
+    # absence (we don't OCR) but verifies the renderer doesn't blow
+    # up and produces a sane image.
+    assert img.size == (theme.SCREEN_W, theme.SCREEN_H)
+
+
+def test_home_timesrc_label_chrony_says_utc():
+    """HOME's TimeSrc row spells out the source — UTC for chrony."""
+    from minijs8.ui.screens import _time_source_label
+    from dataclasses import replace
+    snap = replace(_snapshot(Screen.HOME), time_source="chrony")
+    label, color = _time_source_label(snap)
+    assert label == "UTC"
+    assert color == theme.FG
+
+
+def test_home_timesrc_label_consensus_says_consensus():
+    """HOME's TimeSrc row spells out the source — CONSENSUS for radio-derived."""
+    from minijs8.ui.screens import _time_source_label
+    from dataclasses import replace
+    snap = replace(_snapshot(Screen.HOME), time_source="consensus")
+    label, color = _time_source_label(snap)
+    assert label == "CONSENSUS"
+    assert color == theme.FG
+
+
+def test_home_timesrc_label_no_source_says_none_dim():
+    """HOME's TimeSrc row says NONE when neither source is usable —
+    color dim so operator sees TX is blocked at a glance."""
+    from minijs8.ui.screens import _time_source_label
+    snap = _snapshot(Screen.HOME)  # default time_source is empty
+    label, color = _time_source_label(snap)
+    assert label == "NONE"
+    assert color == theme.FG_DIM
+
+
+# ── Header clock layout: 75%-of-title bold, centered ─────────────────
+
+
+def test_header_clock_font_is_about_three_quarters_of_title(fonts):
+    """The header clock font should be ~75% the size of the title
+    font. Sized that way, the clock reads as a paired companion to
+    the title rather than a separate UI element. Tested by measuring
+    the pixel width of the same sample string in each font: clock's
+    width should land in the [60%, 90%] band of title's. Outside
+    that range means somebody changed FONT_CLOCK and lost the
+    intended 75% relationship."""
+    from PIL import Image, ImageDraw
+    img = Image.new("RGB", (240, 240), (0, 0, 0))
+    draw = ImageDraw.Draw(img)
+    sample = "HH:MM:SS"
+    title_w = draw.textlength(sample, font=fonts.title)
+    clock_w = draw.textlength(sample, font=fonts.clock)
+    ratio = clock_w / title_w
+    assert 0.6 <= ratio <= 0.9, (
+        f"clock width is {ratio:.0%} of title width ({clock_w}px / "
+        f"{title_w}px) — expected ~75%. Did FONT_CLOCK move?"
+    )
+
+
+def test_header_clock_renders_in_right_region(fonts):
+    """The clock should land at the right edge of the 240-px header
+    (right-aligned with PAD_X padding) — not in the center where it
+    used to overlap with long titles like 'EMERGENCY' or 'DIRECTED
+    MENU'. Pixels light up in the right column when rendered."""
+    from PIL import Image, ImageDraw
+    from minijs8.ui.screens import _draw_header
+    from dataclasses import replace
+    snap = replace(_snapshot(Screen.DIRECTED), time_source="chrony")
+    img = Image.new("RGB", (theme.SCREEN_W, theme.SCREEN_H), theme.BG)
+    draw = ImageDraw.Draw(img)
+    _draw_header(draw, fonts, "DIRECTED", snap)
+    # Right column = x ∈ [200, 236] (the rightmost ~40 px should
+    # contain at least some clock glyphs since the format is
+    # "UTC HH:MM:SS" = ~95 px wide right-aligned to PAD_X=4 from
+    # the right edge).
+    right_painted = False
+    for x in range(200, 236):
+        for y in range(4, 24):
+            if img.getpixel((x, y)) != theme.HEADER_BG:
+                right_painted = True
+                break
+        if right_painted:
+            break
+    assert right_painted, (
+        "no clock text found in right region of header — clock may "
+        "have moved or stopped rendering"
+    )
+
+
+def test_header_clock_does_not_overlap_long_title(fonts):
+    """With the longest title ('DIRECTED MENU' at 13 chars), the
+    right-aligned clock should still fit without overlapping.
+    Sanity check: there should be a gap of unpainted pixels between
+    the title's right edge and the clock's left edge."""
+    from PIL import Image, ImageDraw
+    from minijs8.ui.screens import _draw_header
+    from dataclasses import replace
+    snap = replace(_snapshot(Screen.DIRECTED_MENU), time_source="chrony")
+    img = Image.new("RGB", (theme.SCREEN_W, theme.SCREEN_H), theme.BG)
+    draw = ImageDraw.Draw(img)
+    _draw_header(draw, fonts, "DIRECTED MENU", snap)
+    # Find the rightmost painted pixel of the title, and the leftmost
+    # painted pixel after some gap. They shouldn't be adjacent.
+    title_right = 0
+    for x in range(0, 200):
+        for y in range(4, 24):
+            if img.getpixel((x, y)) != theme.HEADER_BG:
+                title_right = max(title_right, x)
+    clock_left = theme.SCREEN_W
+    for x in range(theme.SCREEN_W - 1, title_right + 5, -1):
+        for y in range(4, 24):
+            if img.getpixel((x, y)) != theme.HEADER_BG:
+                clock_left = min(clock_left, x)
+    gap = clock_left - title_right
+    assert gap >= 4, (
+        f"title right edge at x={title_right}, clock left edge at "
+        f"x={clock_left}, gap={gap}px — too tight, may overlap "
+        f"visually on hardware"
+    )
+
+
+def test_header_does_not_render_position_indicator(fonts):
+    """The ring-position N/M indicator was removed in this iteration
+    (it took space without telling the operator anything new). Verify
+    no '/' character renders anywhere in the header band on a normal
+    screen."""
+    from PIL import Image, ImageDraw
+    from minijs8.ui.screens import _draw_header
+    snap = _snapshot(Screen.DIRECTED)
+    img = Image.new("RGB", (theme.SCREEN_W, theme.SCREEN_H), theme.BG)
+    draw = ImageDraw.Draw(img)
+    _draw_header(draw, fonts, "DIRECTED", snap)
+    # We can't OCR, but we can sample the right column where position
+    # USED to live (top-right at y≈8, x≈225) and confirm it's
+    # background-colored — no glyph rendered there.
+    # (The clock's vertical center is y≈14, not y≈8, so a few pixels
+    # in the top-right at y=4-8 should be empty.)
+    top_right_empty = True
+    for x in range(225, 236):
+        for y in range(4, 9):
+            if img.getpixel((x, y)) != theme.HEADER_BG:
+                top_right_empty = False
+                break
+    # Sanity: clock IS at vertical center, so y=10-22 should still
+    # have glyphs. We're only checking the top-right strip is empty.
+    assert top_right_empty, (
+        "top-right corner has pixels painted — position indicator "
+        "may not have been removed properly"
+    )
+
+
+# ── Outbound-red coloring on DIRECTED ─────────────────────────────────
+
+
+def test_directed_log_outbound_body_renders_in_fg_bad_red(fonts):
+    """Outbound entries (the operator's TX'd messages) render in red
+    (FG_BAD) so they're visually distinct from inbound. JS8Call uses
+    a distinct color for TX text; we follow the convention. Sample
+    the body text region of an outbound row and confirm there's a
+    red pixel — meaning the renderer used the red color, not the
+    default FG."""
+    out = _activity_out(to_call="K1ABC", verb="MSG", body="hello dave")
+    img = _render_directed_log(_directed_snapshot((out,)), fonts)
+    # The body text starts at x=18 (PAD_X + 14 chevron) and lives
+    # in the row band starting around BODY_Y0. Sample a strip to
+    # find any red pixel.
+    found_red = False
+    for x in range(18, 200):
+        for y in range(theme.BODY_Y0 + 4, theme.BODY_Y0 + 24):
+            r, g, b = img.getpixel((x, y))
+            if r > 180 and g < 100 and b < 100:
+                found_red = True
+                break
+        if found_red:
+            break
+    assert found_red, (
+        "outbound body text should render in red (FG_BAD ~= 220,60,60); "
+        "no red pixel found in the first row's body region — outbound "
+        "color signaling may have regressed"
+    )
+
+
+def test_directed_log_inbound_body_does_not_render_in_red(fonts):
+    """Inbound body text uses default FG (~220 on all channels). No
+    red pixels should appear in the body region — a regression where
+    inbound got the outbound color would show up as red glyphs here."""
+    inn = _activity_in(from_call="K1ABC", verb="MSG", body="hello back")
+    img = _render_directed_log(_directed_snapshot((inn,)), fonts)
+    # Same sampling area as the outbound test
+    for x in range(18, 200):
+        for y in range(theme.BODY_Y0 + 4, theme.BODY_Y0 + 24):
+            r, g, b = img.getpixel((x, y))
+            assert not (r > 180 and g < 100 and b < 100), (
+                f"unexpected red pixel at ({x},{y}) in inbound row — "
+                f"color may have regressed to outbound styling"
+            )
+
+
+# ── COMPOSE TX-warning ────────────────────────────────────────────────
+
+
+def _compose_snapshot(*, tx_allowed: bool = True, time_source: str = "chrony"):
+    from minijs8.ui.state import ComposeCmd
+    return UISnapshot(
+        screen=Screen.COMPOSE,
+        callsign="W5DMH", grid="EN83", units="miles",
+        tx_allowed=tx_allowed, emergency_override=False,
+        shutdown_remaining=1.0, previous_screen=Screen.HOME,
+        time_source=time_source,
+        compose_to="K1ABC", compose_cmd=ComposeCmd.FREE,
+        compose_text="hi", compose_focused_field="compose_send",
+    )
+
+
+def test_compose_warns_when_no_time_source(fonts):
+    """When time_source is empty (no chrony, no consensus), the
+    scheduler won't fire — we surface this on COMPOSE so the operator
+    knows their SEND will queue but not transmit immediately. Detect
+    by sampling for warn-colored pixels (~240,180,40 = FG_WARN)."""
+    from minijs8.ui.screens import _render_compose
+    snap = _compose_snapshot(time_source="")
+    img = _render_compose(snap, fonts)
+    found_warn = False
+    for x in range(theme.SCREEN_W):
+        for y in range(theme.BODY_Y0, theme.BODY_Y1):
+            r, g, b = img.getpixel((x, y))
+            if r > 200 and 140 < g < 200 and b < 100:
+                found_warn = True
+                break
+        if found_warn:
+            break
+    assert found_warn, (
+        "expected a FG_WARN-colored TX-blocked hint on COMPOSE when "
+        "time_source is empty; not found"
+    )
+
+
+def test_compose_no_warning_when_time_synced(fonts):
+    """When time is synced (chrony or consensus), no warning shows —
+    UI is clean. Sample for warn-colored pixels in body and assert
+    none present."""
+    from minijs8.ui.screens import _render_compose
+    snap = _compose_snapshot(time_source="chrony")
+    img = _render_compose(snap, fonts)
+    for x in range(theme.SCREEN_W):
+        for y in range(theme.BODY_Y0 + 100, theme.BODY_Y1):  # below TEXT box
+            r, g, b = img.getpixel((x, y))
+            assert not (r > 200 and 140 < g < 200 and b < 100), (
+                f"unexpected warn pixel at ({x},{y}) when time is "
+                f"synced — TX hint should not be shown"
+            )

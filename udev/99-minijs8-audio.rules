@@ -1,0 +1,31 @@
+# MiniJS8 — QDX USB audio device
+# ================================
+# Tags the QDX's USB sound card with a stable ALSA name so we have a
+# predictable identifier. We don't actually USE the ALSA name (the
+# Python code finds the device by sounddevice index + name match), but
+# tagging makes it easier to identify in `arecord -L` and on the
+# eventual DigiRig migration.
+#
+# QRP Labs QDX USB sound card VID:PID — confirmed via lsusb in the
+# Step-0 prototype.
+#
+# When this rule fires:
+#   - The card is bound to ALSA with the friendly name "QDX"
+#   - Members of the `audio` group can read/write
+#
+# The minijs8 service user is in the `audio` group via build.sh.
+
+ACTION!="add|change", GOTO="minijs8_qdx_audio_end"
+SUBSYSTEM!="sound", GOTO="minijs8_qdx_audio_end"
+KERNEL!="card?", GOTO="minijs8_qdx_audio_end"
+
+# QRP Labs QDX (the prototype hardware). VID is 1209 (pid_codes openmoko
+# allocation); PID confirmed via lsusb on actual hardware. Match by
+# product name string (more reliable than guessing PID since QDX firmware
+# updates have changed PID in the past).
+ATTRS{idVendor}=="1209", ATTRS{product}=="QDX*", ATTR{id}="QDX"
+
+# Generic CM108-based DigiRig Mobile (future hardware support).
+ATTRS{idVendor}=="0d8c", ATTRS{idProduct}=="012c", ATTR{id}="DigiRig"
+
+LABEL="minijs8_qdx_audio_end"

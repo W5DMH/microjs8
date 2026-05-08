@@ -1,0 +1,170 @@
+#!/bin/bash
+# minijs8-rigctld-launcher
+# ========================
+#
+# Selects rigctld command-line arguments based on the configured
+# radio in /etc/minijs8/config.toml, then execs rigctld.
+#
+# The systemd unit invokes this script instead of calling rigctld
+# directly. That way, the same systemd unit works for all CAT-using
+# radios (QDX, G90+DigiRig, etc.) — only the launcher needs to know
+# which arguments to pass for each radio.
+#
+# Radios with cat_required=False (e.g. DigiRig RTS-only) result in
+# the launcher exiting 0 — rigctld is NOT started for those radios
+# because PTT is handled directly by the daemon's RtsPttService and
+# there's no CAT to control.
+#
+# This script is intentionally simple and explicit (a giant case
+# statement) rather than reading the radios.py registry from Python.
+# Reasons:
+#   1. A shell script is auditable by the operator at a glance.
+#   2. No Python startup cost (~150 ms on a Pi Zero 2W) before
+#      rigctld actually launches — that would push CAT readiness
+#      well past sound.target.
+#   3. If the daemon's Python install is broken, rigctld still works.
+#
+# Synced with: src/minijs8/cat/radios.py — when a new radio is added
+# to the registry, add a corresponding case here.
+#
+# Diagnostic
+# ----------
+# Run by hand to see what would launch:
+#     /usr/local/bin/minijs8-rigctld-launcher --dry-run
+#
+# Operators can talk directly to rigctld once running:
+#     rigctl -m 2 -r localhost:4532 f          # query frequency
+#     rigctl -m 2 -r localhost:4532 F 7078000  # set frequency
+#     rigctl -m 2 -r localhost:4532 T 1        # PTT on
+#     rigctl -m 2 -r localhost:4532 T 0        # PTT off
+
+set -euo pipefail
+
+# Default config path. We read /var/minijs8/config.toml — the LIVE
+# config that the daemon also reads — NOT /etc/minijs8/config.toml,
+# which is the shipped TEMPLATE copied to /var on first boot. The
+# distinction matters because the operator's UI cycle saves to
+# /var (via paths.config_path() in config.py); reading /etc here
+# would silently use the wrong radio_id whenever the live config
+# diverged from the template.
+#
+# Override is supported for testing — set MINIJS8_CONFIG to point
+# at a different file. Production use should always be the default.
+CONFIG_FILE="${MINIJS8_CONFIG:-/var/minijs8/config.toml}"
+DRY_RUN=0
+
+if [[ "${1:-}" == "--dry-run" ]]; then
+    DRY_RUN=1
+fi
+
+# Default to QDX if no config or no radio_id field. Matches
+# config.py's default so behavior is identical.
+RADIO_ID="qdx"
+if [[ -r "$CONFIG_FILE" ]]; then
+    # Extract id field from the [radio] table.
+    #
+    # Strategy: extract the [radio] section first, then grep for the
+    # `id =` line within it. We use sed range addressing rather than
+    # awk to avoid regex-dialect surprises (gawk vs mawk vs busybox
+    # awk all parse \s and similar differently).
+    #
+    # Step 1: extract from "[radio]" line up to the next "[..." line
+    #         (or EOF).
+    # Step 2: skip lines that start with "#" or are blank.
+    # Step 3: take the first remaining "id = ..." line and strip the
+    #         quotes.
+    #
+    # NOTE: the trailing ``|| true`` is critical. Without it, a config
+    # missing the [radio] section (or missing the id = line within it)
+    # makes grep return exit-1, which under ``set -e`` aborts the whole
+    # script — meaning a config with no [radio] section produces an
+    # error rather than falling back to the qdx default we intend.
+    # ``|| true`` swallows the no-match case so we land at the
+    # ``[[ -n "$extracted" ]]`` check below.
+    extracted="$(
+        sed -n '/^[[:space:]]*\[radio\]/,/^[[:space:]]*\[/{
+            /^[[:space:]]*\[/d
+            /^[[:space:]]*#/d
+            /^[[:space:]]*$/d
+            p
+        }' "$CONFIG_FILE" \
+        | grep -E '^[[:space:]]*id[[:space:]]*=' \
+        | head -1 \
+        | sed -E 's/^[[:space:]]*id[[:space:]]*=[[:space:]]*//; s/^["'"'"']//; s/["'"'"'][[:space:]]*$//' \
+        || true
+    )"
+    if [[ -n "$extracted" ]]; then
+        RADIO_ID="$extracted"
+    fi
+fi
+
+# Diagnostic — visible in the journal so operators can confirm which
+# radio the launcher picked. Printed only when running for real
+# (skipped on --dry-run since the dry-run output line shows the args
+# directly).
+if [[ "$DRY_RUN" -eq 0 ]]; then
+    echo "minijs8-rigctld-launcher: config=$CONFIG_FILE radio_id=$RADIO_ID" >&2
+fi
+
+# Pick rigctld args for the configured radio. Keep this list in sync
+# with the RadioDef definitions in src/minijs8/cat/radios.py.
+case "$RADIO_ID" in
+    qdx)
+        # QRP Labs QDX — TS-480 emulation, builtin USB audio + PTT.
+        # Stable by-id path (interface 00 = CAT, 01 = debug).
+        # We never close the rigctld stream during QDX TX, but rigctld
+        # itself logs every CAT command so we keep -vvvvv off in
+        # production (would be /dev/null but JS8Call's monitor wants
+        # access).
+        DEVICE="/dev/serial/by-id/usb-QRP_Labs_QDX_Transceiver-if00"
+        if [[ "$DRY_RUN" -eq 0 && ! -e "$DEVICE" ]]; then
+            echo "minijs8-rigctld-launcher: QDX not present at $DEVICE" >&2
+            exit 1
+        fi
+        ARGS=(-m 2028 -r "$DEVICE" -s 9600 -t 4532)
+        ;;
+    xiegu-g90-digirig)
+        # G90 over DigiRig — CAT and PTT both on the same DigiRig
+        # serial port. rigctld handles RTS-PTT internally via -P RTS,
+        # so the application sends "T 1" / "T 0" and rigctld toggles
+        # the line rather than sending a CAT command.
+        # Hamlib model 3088 = Xiegu G90 (verified against hamlib 4.5
+        # supported-radios wiki — not 3087, that's the X6100).
+        DEVICE="/dev/digirig"
+        if [[ "$DRY_RUN" -eq 0 && ! -e "$DEVICE" ]]; then
+            echo "minijs8-rigctld-launcher: DigiRig not present at $DEVICE" >&2
+            echo "  Check udev rule: 99-minijs8-digirig.rules" >&2
+            exit 1
+        fi
+        ARGS=(
+            -m 3088
+            -r "$DEVICE"
+            -s 19200
+            -p "$DEVICE"   # PTT port = same port
+            -P RTS         # PTT method = RTS line toggle
+            -t 4532
+        )
+        ;;
+    digirig-rts-only)
+        # No CAT — rigctld is NOT started for this radio. The daemon
+        # uses RtsPttService directly. Exit cleanly so systemd records
+        # a successful one-shot completion rather than a failure.
+        echo "minijs8-rigctld-launcher: radio=$RADIO_ID — no CAT, " \
+             "rigctld not needed" >&2
+        exit 0
+        ;;
+    *)
+        echo "minijs8-rigctld-launcher: unknown radio id $RADIO_ID" >&2
+        echo "  Known: qdx, xiegu-g90-digirig, digirig-rts-only" >&2
+        exit 2
+        ;;
+esac
+
+if [[ "$DRY_RUN" -eq 1 ]]; then
+    echo "Would exec: rigctld ${ARGS[*]}"
+    exit 0
+fi
+
+# exec replaces this process with rigctld so systemd tracks rigctld
+# directly (PID, restart-on-failure semantics, etc).
+exec /usr/bin/rigctld "${ARGS[@]}"

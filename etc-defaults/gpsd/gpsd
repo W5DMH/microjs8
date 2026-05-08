@@ -1,0 +1,27 @@
+# MiniJS8 — gpsd defaults
+# ========================
+# Installed at /etc/default/gpsd by build.sh.
+#
+# We point gpsd at the stable /dev/gps symlink (created by our udev rule
+# for u-blox 7 dongles) so it doesn't matter which physical USB port the
+# operator chose. gpsd starts automatically on boot and listens on the
+# default 127.0.0.1:2947, where the MiniJS8 daemon and chrony both read
+# from it.
+
+# Default device path. udev creates /dev/gps for u-blox 7.
+# If the dongle isn't plugged in at boot, gpsd will start with no device
+# and pick it up when the dongle is hot-plugged (USB hot-plug rules in
+# /lib/udev/rules.d/60-gpsd.rules).
+DEVICES="/dev/gps"
+
+# Don't sniff /dev/ttyUSB* etc — we know exactly which device we want,
+# and aggressive auto-discovery interferes with QDX (also a USB-CDC
+# device) by trying to send GPS init strings to it.
+USBAUTO="false"
+
+# Always run, even when no client is attached (so chrony has data
+# the moment a fix arrives, not when minijs8 happens to query).
+GPSD_OPTIONS="-n"
+
+# Listen only on localhost — no remote access.
+GPSD_SOCKET="/var/run/gpsd.sock"

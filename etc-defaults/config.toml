@@ -1,0 +1,41 @@
+# MiniJS8 — Default configuration
+# ================================
+#
+# This file is shipped with the image at /etc/minijs8/config.toml and
+# copied to /var/minijs8/config.toml on first boot if no live config
+# exists. Edit the live copy, not this one — this one is on the
+# read-only root partition.
+#
+# After editing the live config, restart the daemon:
+#   sudo systemctl restart minijs8
+#
+# To validate the config without starting the daemon:
+#   /opt/minijs8/venv/bin/python -m minijs8 --check-config
+
+# ── Top-level options ────────────────────────────────────────────────────────
+# (Top-level TOML keys MUST come before any [section] header.)
+
+# Distance display preference. "miles" or "km".
+units_distance = "miles"
+
+# ── [station] — operator identity ────────────────────────────────────────────
+[station]
+# Your amateur radio callsign. The sentinel "N0CALL" disables transmit.
+# Set this to your real callsign before transmitting.
+callsign = "N0CALL"
+
+# Your Maidenhead grid locator (4 or 6 character). Empty disables transmit.
+# Examples: "EN82" (4-char), "EN82dj" (6-char).
+grid = ""
+
+# ── [radio] — radio hardware (Step 6) ────────────────────────────────────────
+[radio]
+# Radio identity. The id selects the hamlib model + baud rate + PTT
+# method from the embedded registry in minijs8.cat.radios.
+#
+# Currently supported:
+#   "qdx"  — QRP Labs QDX, hamlib model 2084 (Kenwood TS-480 emulation)
+#
+# DigiRig RTS-PTT-only support (for radios without USB CAT) is planned
+# for a later step.
+id = "qdx"

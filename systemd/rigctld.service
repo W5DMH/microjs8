@@ -1,0 +1,93 @@
+[Unit]
+# rigctld — hamlib radio CAT control daemon
+# ==========================================
+#
+# Owns the configured radio's CAT serial port and exposes a TCP
+# protocol on localhost:4532. Our minijs8 daemon connects to this
+# and issues PTT / frequency commands.
+#
+# Multi-radio support
+# -------------------
+# As of the DigiRig commit, this unit runs the launcher script
+# ``/usr/local/bin/minijs8-rigctld-launcher`` which inspects
+# /etc/minijs8/config.toml and picks the right rigctld arguments
+# for the configured radio:
+#
+#   * qdx              → rigctld -m 2028 -r /dev/serial/by-id/...QDX...
+#                        (TS-480 emulation, USB CDC ACM)
+#   * xiegu-g90-digirig → rigctld -m 3088 -r /dev/digirig -s 19200
+#                        -p /dev/digirig -P RTS
+#                        (G90 driver, RTS-PTT on same serial port)
+#   * digirig-rts-only → launcher exits 0 (no rigctld needed; the
+#                        daemon's RtsPttService handles PTT directly)
+#
+# This is why ConditionPathExists no longer pins us to the QDX
+# specifically — the launcher does device-availability checks per
+# radio and exits cleanly if the configured radio's hardware isn't
+# present yet.
+#
+# Hot-plug strategy
+# -----------------
+# Restart=on-failure with RestartSec=2 — if rigctld dies (USB unplug,
+# the launcher couldn't find the device, etc), systemd retries every
+# 2 s. Once the operator plugs the radio back in, rigctld comes back
+# up and the daemon's CAT reconnect loop reattaches.
+#
+# Diagnostic
+# ----------
+# Test the launcher's args without actually starting rigctld:
+#     /usr/local/bin/minijs8-rigctld-launcher --dry-run
+#
+# Operators can talk directly to rigctld from any shell when this
+# service is running:
+#     rigctl -m 2 -r localhost:4532 f          # query frequency
+#     rigctl -m 2 -r localhost:4532 F 7078000  # set frequency
+#     rigctl -m 2 -r localhost:4532 T 1        # PTT on
+#     rigctl -m 2 -r localhost:4532 T 0        # PTT off
+#
+# When this service is running, do NOT also run rigctld manually or
+# from another process — only one process can own the serial port.
+
+Description=Hamlib rigctld daemon (CAT control for radio)
+Documentation=https://hamlib.sourceforge.net/manuals/4.5/rigctld.html
+
+[Service]
+Type=simple
+
+# The launcher reads /etc/minijs8/config.toml and execs rigctld with
+# the right args. The launcher itself can also exit 0 without ever
+# starting rigctld — for radios that don't need CAT (like the
+# DigiRig RTS-only path). Type=simple + that exit pattern means
+# systemd will treat the unit as "started successfully and finished"
+# in the no-CAT case, which is what we want.
+ExecStart=/usr/local/bin/minijs8-rigctld-launcher
+
+# Run as the minijs8 user — same group ownership as our daemon, so
+# we only have to give one user permission to /dev/serial/by-id/...
+# and /dev/digirig.
+User=minijs8
+Group=dialout
+
+# Restart aggressively. If rigctld dies mid-session (USB unplug,
+# kernel hiccup), we want it to be ready to come back as soon as
+# the device returns.
+Restart=on-failure
+RestartSec=2
+
+# Don't infinite-loop if the launcher can't find the device (e.g.
+# wrong permissions, wrong radio in config). 5 failures in 60 s and
+# we give up — operator must fix the underlying issue and
+# `systemctl reset-failed rigctld`.
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+# Defense in depth: if rigctld dies mid-TX, the radio's CAT timeout
+# will eventually unkey PTT on its own (QDX has this; G90 also).
+# Don't rely on that — our application's PTT watchdog is the primary
+# mitigation.
+
+[Install]
+# multi-user.target = "starts at boot, after networking and most
+# other system services". The launcher's own device-availability
+# check handles the no-radio-present case cleanly.
+WantedBy=multi-user.target
