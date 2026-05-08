@@ -3,7 +3,8 @@
   <img src="images/screen1.jpg" alt="MiniJS8 device screen — main view" width="280">
   <img src="images/screen2.jpg" alt="MiniJS8 device screen — secondary view" width="280">
 </p>
-A Raspberry Pi Zero 2w complete image that creates a self-contained JS8 transceiver controller for amateur radio. Runs on a
+A Raspberry Pi Zero 2w complete image https://github.com/W5DMH/minijs8/releases that 
+creates a self-contained JS8 transceiver controller for amateur radio. Runs on a
 Raspberry Pi Zero 2W with a 240—240 TFT SPI display, two GPIO buttons, and a
 USB keyboard. Drives any radio paired with a QRP LABS QDX Transceiver or DigiRig (G90, Baofeng, etc)
 RTS for PTT, USB audio for I/Q.
@@ -21,9 +22,9 @@ Single button touch or keyboard arrows to switch screens, keyboard TAB key to sw
 |---|---|
 | SBC | Raspberry Pi Zero 2W (Bookworm 64-bit) |
 | Display | ST7789 240—240 TFT SPI |
-| Sound + PTT | DigiRig (USB audio + RTS keying) |
-| Radio | QDX (tested), G90, or any rig DigiRig speaks to |
-| GPS | gpsd-compatible (for grid + slot-time when chrony is unavailable) |
+| Sound + PTT | DigiRig (USB audio + RTS keying) OR QDX Transciever |
+| Radio | QDX (Tested), G90 w/DigiRig (Tested) Baofeng UV5R w/DigiRig (Tested) |
+| GPS | gpsd-compatible Glonass U-blox7 Recommended  |
 | Input | USB keyboard, 2— GPIO buttons (backlight / shutdown gesture) |
 
 ## Screens
@@ -32,11 +33,13 @@ Cycle with > or < Arrow keys on the keyboard:
 
 `HOME | HEARD | DIRECTED | INBOX | COMPOSE |  ALLCALL | DIRECTED MENU | EMERGENCY | SETUP`
 
+- **HOME** basic information about your station, emergency beacon button starts beacon every 3min "EMERGENCY SEND HELP - <GPS LOCATION>" 
 - **HEARD** recently-heard stations with SNR, distance, bearing
 - **DIRECTED** chat-style activity log (inbound white, outbound red)
 - **INBOX**  buffered MSG mailbox (Enter to read, Del to delete)
 - **COMPOSE** TO / CMD (FREE/MSG/STORE/AGN?/SNR?/GRID/QUERY/MYLOC) / TEXT / SEND
 - **EMERGENCY** bypasses unconfigured-station TX lock for life-safety traffic
+- **SETUP** Set callsign, grid, units, transceiver, Heartbeat tx rate. 
 
 ## Software stack
 
