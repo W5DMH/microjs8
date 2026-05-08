@@ -4,8 +4,8 @@
   <img src="images/screen2.jpg" alt="MiniJS8 device screen � secondary view" width="280">
 </p>
 A Raspberry Pi Zero 2w complete image that creates a self-contained JS8 transceiver controller for amateur radio. Runs on a
-Raspberry Pi Zero 2W with a 240×240 SPI display, two GPIO buttons, and a
-USB keyboard. Drives any radio paired with a QRP LABS QDX Transceiver or DigiRig (G90, Baofeng, etc) —
+Raspberry Pi Zero 2W with a 240�240 TFT SPI display, two GPIO buttons, and a
+USB keyboard. Drives any radio paired with a QRP LABS QDX Transceiver or DigiRig (G90, Baofeng, etc)
 RTS for PTT, USB audio for I/Q.
 
 JS8 is great for low-power messaging but JS8Call wants a full laptop.
@@ -20,28 +20,28 @@ Single button touch or keyboard arrows to switch screens, keyboard TAB key to sw
 | Component | Notes |
 |---|---|
 | SBC | Raspberry Pi Zero 2W (Bookworm 64-bit) |
-| Display | ST7789 240×240 SPI |
+| Display | ST7789 240�240 TFT SPI |
 | Sound + PTT | DigiRig (USB audio + RTS keying) |
 | Radio | QDX (tested), G90, or any rig DigiRig speaks to |
 | GPS | gpsd-compatible (for grid + slot-time when chrony is unavailable) |
-| Input | USB keyboard, 2× GPIO buttons (backlight / shutdown gesture) |
+| Input | USB keyboard, 2� GPIO buttons (backlight / shutdown gesture) |
 
 ## Screens
 
-Cycle with ← / → on the keyboard:
+Cycle with >�/ < Arrow keys on the keyboard:
 
-`HOME · HEARD · DIRECTED · INBOX · COMPOSE · ALLCALL · DIRECTED MENU · EMERGENCY · SETUP`
+`HOME | HEARD | DIRECTED | INBOX | COMPOSE |  ALLCALL | DIRECTED MENU | EMERGENCY | SETUP`
 
-- **HEARD** — recently-heard stations with SNR, distance, bearing
-- **DIRECTED** — chat-style activity log (inbound white, outbound red)
-- **INBOX** — buffered MSG mailbox (Enter to read, Del to delete)
-- **COMPOSE** — TO / CMD (FREE/MSG/STORE/AGN?/SNR?/GRID/QUERY/MYLOC) / TEXT / SEND
-- **EMERGENCY** — bypasses unconfigured-station TX lock for life-safety traffic
+- **HEARD** recently-heard stations with SNR, distance, bearing
+- **DIRECTED** chat-style activity log (inbound white, outbound red)
+- **INBOX**  buffered MSG mailbox (Enter to read, Del to delete)
+- **COMPOSE** TO / CMD (FREE/MSG/STORE/AGN?/SNR?/GRID/QUERY/MYLOC) / TEXT / SEND
+- **EMERGENCY** bypasses unconfigured-station TX lock for life-safety traffic
 
 ## Software stack
 
 - Python 3.11 async event loop
-- [gfsk8 fork](https://github.com/W5DMH/gfsk8-modem-clean) — JS8 modem core (separated from JS8Call's Qt UI)
+- [gfsk8 fork](https://github.com/W5DMH/gfsk8-modem-clean) JS8 modem core (separated from JS8Call's Qt UI)
 - SQLite for outbound queue, inbox, and message store
 - chrony OR multi-frame consensus for slot-time alignment (operator never has to set the clock)
 
@@ -87,13 +87,13 @@ build.sh                   # image build recipe
 
 ## License
 
-GPL-3.0 — matches the gfsk8 fork. See `LICENSE`.
+GPL-3.0 matches the gfsk8 fork. See `LICENSE`.
 
 ## Acknowledgments
 
 - **JS8Call** by Jordan Sherer KN4CRD — the protocol and the original
   reference implementation. MiniJS8 is a re-target of those ideas to
   embedded hardware, not an independent codebase.
-- **gfsk8** — modem core extracted from JS8Call for non-Qt use.
+- **GFSK8**  modem core extracted from JS8Call for non-Qt use.
 
-73 de W5DMH
+
