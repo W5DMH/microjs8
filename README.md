@@ -33,7 +33,7 @@ Cycle with > or < Arrow keys on the keyboard:
 
 `HOME | HEARD | DIRECTED | INBOX | COMPOSE |  ALLCALL | DIRECTED MENU | EMERGENCY | SETUP`
 
-- **HOME** basic station info, emergency beacon button starts beacon every 3min "EMERGENCY SEND HELP - GPS LOCATION" 
+- **HOME** basic station info, emergency button starts beacon every 3min "EMERGENCY SEND HELP - GPS LOCATION" 
 - **HEARD** recently-heard stations with SNR, distance, bearing
 - **DIRECTED** chat-style activity log (inbound white, outbound red)
 - **INBOX**  buffered MSG mailbox (Enter to read, Del to delete)
