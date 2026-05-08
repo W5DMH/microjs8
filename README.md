@@ -66,7 +66,7 @@ pip install -e '.[dev]'
 pytest
 ```
 
-The test suite is host-runnable — no Pi hardware needed. The audio,
+The test suite is host-runnable no Pi hardware needed. The audio,
 display, GPIO, and gfsk8 layers all have headless stubs.
 
 ## Project layout
