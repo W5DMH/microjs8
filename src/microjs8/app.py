@@ -254,7 +254,9 @@ class MicroJS8App:
         except Exception:
             _log.exception(
                 "could not initialise display — daemon continuing headless. "
-                "check SPI is enabled and the panel is seated firmly."
+                "check that the framebuffer 'fb_st7789v' is enumerated in "
+                "/proc/fb and that the microjs8 user has read/write access "
+                "to /dev/fb<N> (typically via the video group)."
             )
             return
         try:
