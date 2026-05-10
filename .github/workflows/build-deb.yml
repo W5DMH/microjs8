@@ -1,0 +1,101 @@
+name: Build .deb
+
+# Build a Debian package on:
+#   - Every push to main (sanity gate)
+#   - Every PR (so the .deb diffs are reviewable)
+#   - Every tag matching v*  → also attach to a Release
+#
+# Why arch is "all" and we don't need a runner matrix: MicroJS8 is
+# pure Python (Phase 5 dropped the Adafruit / SPI native deps). The
+# .deb has no compiled artifacts, so the same package installs on any
+# arch the apt deps support — including aarch64 (the CardputerZero).
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+
+permissions:
+  contents: write   # needed to attach assets to a Release on tag push
+
+jobs:
+  build:
+    name: Build microjs8.deb
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Sanity — lint shell scripts
+        # Catches obvious sh syntax errors in postinst/prerm/postrm
+        # before a user runs them as root on their device.
+        run: |
+          for f in packaging/postinst.sh packaging/prerm.sh packaging/postrm.sh; do
+            sh -n "$f" || (echo "syntax error in $f" >&2; exit 1)
+          done
+
+      - name: Sanity — validate the systemd unit
+        # systemd-analyze verify catches typos in directive names and
+        # malformed unit syntax. Doesn't require running systemd.
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends systemd
+          # systemd-analyze loads the unit; we point it at the .in
+          # template since the build hasn't run yet.
+          systemd-analyze verify --no-pager packaging/microjs8.service.in \
+            2> verify.log || true
+          if grep -E '^(Failed|.*Unknown lvalue)' verify.log; then
+            echo "systemd unit has fatal errors" >&2
+            cat verify.log
+            exit 1
+          fi
+
+      - name: Build .deb
+        run: |
+          python3 scripts/build_deb.py --output-dir dist
+          ls -la dist/
+
+      - name: Inspect .deb
+        # Print the package metadata + file inventory to the job log
+        # so reviewers can eyeball changes without downloading.
+        run: |
+          DEB=$(ls dist/*.deb | head -1)
+          echo "## Package metadata" >> "$GITHUB_STEP_SUMMARY"
+          dpkg-deb -I "$DEB" >> "$GITHUB_STEP_SUMMARY"
+          echo "## File inventory" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          dpkg-deb -c "$DEB" | awk '{print $1, $6}' >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Lint .deb with lintian
+        # lintian catches Debian-policy violations — wrong file
+        # permissions, missing essential fields, etc. We don't fail
+        # the build on lintian warnings (some are aspirational for
+        # an unsigned dev-built .deb), but we surface them so the
+        # operator can see what'd need fixing for an official upload.
+        run: |
+          sudo apt-get install -y --no-install-recommends lintian
+          DEB=$(ls dist/*.deb | head -1)
+          lintian --no-tag-display-limit "$DEB" || true
+
+      - name: Upload artifact (PRs and main)
+        if: github.event_name != 'push' || github.ref != 'refs/tags/v*'
+        uses: actions/upload-artifact@v4
+        with:
+          name: microjs8-deb
+          path: dist/*.deb
+          retention-days: 30
+
+      - name: Attach to Release (tag push)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*.deb
+          generate_release_notes: true

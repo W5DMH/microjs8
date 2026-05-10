@@ -1,0 +1,10 @@
+[Desktop Entry]
+Name=MicroJS8
+GenericName=JS8 Transceiver
+Comment=Self-contained JS8 transceiver for amateur radio
+Exec=/usr/share/APPLaunch/bin/microjs8
+Terminal=false
+Icon=/usr/share/APPLaunch/share/images/microjs8.png
+Type=Application
+Categories=HamRadio;Network;
+Keywords=ham;amateur;radio;js8;hf;digital;

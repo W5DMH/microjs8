@@ -1,0 +1,74 @@
+[Unit]
+Description=MicroJS8 — JS8 transceiver daemon for M5Stack CardputerZero
+Documentation=https://github.com/W5DMH/microjs8
+After=local-fs.target sound.target time-sync.target gpsd.socket rigctld.service
+Wants=time-sync.target gpsd.socket rigctld.service
+
+# Cap restart loop: 5 restarts in 5 minutes covers genuine crashes
+# without giving up on intentional Setup-driven exits (radio cycle).
+# These directives belong in [Unit], NOT [Service] — putting them in
+# [Service] makes systemd silently ignore them. Verified on Bookworm
+# (systemd 252).
+StartLimitBurst=5
+StartLimitIntervalSec=300
+
+[Service]
+Type=simple
+User=microjs8
+Group=microjs8
+
+# Group memberships (Phase 7, post Phase-3/5/6 retargeting):
+#   audio    — /dev/snd/* for radio audio capture (ALSA / PortAudio)
+#   dialout  — /dev/serial/* for radio CAT serial port
+#   video    — /dev/fb<N> for the CardputerZero ST7789v3 framebuffer (Phase 5)
+#   i2c      — /dev/i2c-* for BQ27220 fuel gauge (Phase 6)
+#   input    — /dev/input/event* for the TCA8418 keyboard (Phase 3)
+#
+# Dropped from MiniJS8: gpio (no buttons after Phase 3) and spi (no
+# Adafruit ST7789 driver after Phase 5).
+SupplementaryGroups=audio dialout video i2c input
+
+# /var/lib/microjs8 follows the Debian convention for daemon state.
+# rigctld and the daemon both read /etc/microjs8/config.toml; mutable
+# state (heard list cache, mailbox sqlite, retention bookkeeping)
+# lives in /var/lib/microjs8.
+WorkingDirectory=/var/lib/microjs8
+
+# System Python with apt-installed packages — Phase 5 dropped the
+# Adafruit deps that forced the bundled venv on MiniJS8. -u disables
+# stdout/stderr buffering so journald sees log lines in real time
+# instead of waiting for the buffer to flush.
+#
+# The launcher script sets PYTHONPATH to /usr/share/APPLaunch/lib so
+# `python3 -m microjs8` finds the package shipped by this .deb.
+ExecStart=/usr/share/APPLaunch/bin/microjs8
+
+# Restart on ANY exit. The daemon runs forever in normal operation
+# (asyncio loop driven until SIGTERM), so this only fires for two
+# reasons: a real crash, and an INTENTIONAL clean exit triggered by
+# the operator changing the radio profile in Setup.
+Restart=always
+RestartSec=5
+
+# Graceful stop: deliver SIGTERM, give the process up to TimeoutStopSec
+# to handle it, then SIGKILL. The daemon's asyncio handler honors
+# SIGTERM and shuts down within ~2s.
+KillMode=mixed
+KillSignal=SIGTERM
+TimeoutStopSec=10
+
+# Sandboxing — moderate, not paranoid. We need /dev access for audio,
+# serial, framebuffer, i2c, and input devices, so PrivateDevices=yes
+# is NOT set. NoNewPrivileges and ProtectHome are safe and free.
+NoNewPrivileges=yes
+ProtectHome=yes
+ProtectSystem=strict
+ReadWritePaths=/var/lib/microjs8 /sys/class/backlight
+
+# Stdout / stderr go to journald.
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=microjs8
+
+[Install]
+WantedBy=multi-user.target

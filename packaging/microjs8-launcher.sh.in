@@ -1,0 +1,25 @@
+#!/bin/sh
+# microjs8 — launcher script for the JS8 transceiver daemon.
+#
+# Installed as /usr/share/APPLaunch/bin/microjs8 by the .deb package.
+# Both the systemd unit and the APPLaunch .desktop entry exec this.
+#
+# The Python package itself lives at /usr/share/APPLaunch/lib/microjs8/
+# (per the M5Stack APPLaunch convention's INSTALL_PREFIX). We add that
+# directory to PYTHONPATH and let `python3 -m microjs8` find it.
+#
+# All passed arguments forward to the daemon's argparse handler:
+#   microjs8                       # normal start
+#   microjs8 --check-config        # validate config and exit
+#   microjs8 --headless            # no display / input thread
+#
+# The exec keeps the daemon as PID 1 of the cgroup, so systemd's
+# TERM/KILL signals reach it directly without an intermediate shell.
+
+set -eu
+
+PYTHONPATH="/usr/share/APPLaunch/lib${PYTHONPATH:+:$PYTHONPATH}"
+export PYTHONPATH
+
+# -u  unbuffered stdout/stderr — journald sees log lines in real time.
+exec /usr/bin/python3 -u -m microjs8 "$@"
