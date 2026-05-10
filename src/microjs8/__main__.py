@@ -38,6 +38,14 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
         help="validate the configuration and exit without entering the run loop",
     )
     parser.add_argument(
+        "--doctor",
+        action="store_true",
+        help=(
+            "run a hardware + configuration diagnostic and exit. "
+            "Useful as the first thing to run on a fresh install."
+        ),
+    )
+    parser.add_argument(
         "--headless",
         action="store_true",
         help=(
@@ -53,6 +61,14 @@ def main(argv: list[str] | None = None) -> int:
 
     logging_setup.setup()
     log = logging.getLogger("microjs8.main")
+
+    # --doctor runs BEFORE config.load() so the diagnostic still
+    # produces a useful report even when the config is broken.
+    # The doctor's check_config() does its own config.load() and
+    # surfaces the failure as a structured FAIL line.
+    if args.doctor:
+        from microjs8 import doctor
+        return doctor.run_diagnostic_report()
 
     try:
         cfg = config.load()
