@@ -1305,7 +1305,7 @@ def test_classifier_safety_net_rescues_misclassified_query(queue):
     on-air loop can never recur regardless of what kind got persisted.
 
     Reproduces the exact scenario from the bench-test log:
-        sudo -u microjs8 sqlite3 /var/microjs8/messages.db
+        sudo -u microjs8 sqlite3 /var/lib/microjs8/messages.db
         INSERT INTO outbound (kind, text, to_call, ...)
         VALUES ('DIRECTED', 'KD8PGB QUERY MSGS', 'KD8PGB', ...)
     """

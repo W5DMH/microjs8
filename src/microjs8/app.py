@@ -370,7 +370,7 @@ class MicroJS8App:
         """Open the SQLite message store.
 
         Database lives at ``$MICROJS8_DATA_DIR/messages.db`` (typically
-        /var/microjs8/messages.db). Failure to open is logged but does
+        /var/lib/microjs8/messages.db). Failure to open is logged but does
         not abort the daemon — we'll just have no decode persistence
         and the heard list / directed list will be empty.
         """
@@ -388,7 +388,7 @@ class MicroJS8App:
         """Open the inbox / mailbox SQLite database.
 
         Lives at ``$MICROJS8_DATA_DIR/inbox.db`` (typically
-        /var/microjs8/inbox.db), separate from messages.db so the two
+        /var/lib/microjs8/inbox.db), separate from messages.db so the two
         have independent retention policies. Schema is JS8Call-
         compatible (see store/inbox.py).
 

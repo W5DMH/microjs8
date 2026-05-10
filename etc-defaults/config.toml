@@ -2,7 +2,7 @@
 # ================================
 #
 # This file is shipped with the image at /etc/microjs8/config.toml and
-# copied to /var/microjs8/config.toml on first boot if no live config
+# copied to /var/lib/microjs8/config.toml on first boot if no live config
 # exists. Edit the live copy, not this one — this one is on the
 # read-only root partition.
 #
@@ -10,7 +10,10 @@
 #   sudo systemctl restart microjs8
 #
 # To validate the config without starting the daemon:
-#   /opt/microjs8/venv/bin/python -m microjs8 --check-config
+#   microjs8 --check-config
+#
+# To run a hardware + configuration diagnostic:
+#   microjs8 --doctor
 
 # ── Top-level options ────────────────────────────────────────────────────────
 # (Top-level TOML keys MUST come before any [section] header.)

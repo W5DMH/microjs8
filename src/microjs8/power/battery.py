@@ -56,7 +56,7 @@ DEFAULT_NAME_FRAGMENT: Final = "bq27"
 # §6.11 thresholds. Intentionally on this module rather than scattered
 # at every check-site so a future config override has one place to
 # look. The 5%/15% pair are the proposed defaults from the build spec;
-# can be overridden in [battery] of /var/microjs8/config.toml in a
+# can be overridden in [battery] of /var/lib/microjs8/config.toml in a
 # later phase (open question §1 of the build spec).
 LOW_BATTERY_PCT: Final = 15
 CRITICAL_BATTERY_PCT: Final = 5

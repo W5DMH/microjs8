@@ -3,7 +3,7 @@
 This module manages the operator's mailbox — a persistent store of
 inbound directed messages (UNREAD/READ), held mail we're storing for
 other stations (STORE), and delivered held mail (DELIVERED). Stored
-in a separate SQLite database (``/var/microjs8/inbox.db``) from the
+in a separate SQLite database (``/var/lib/microjs8/inbox.db``) from the
 decode log so the two have independent lifetimes and retention rules.
 
 Schema design philosophy
