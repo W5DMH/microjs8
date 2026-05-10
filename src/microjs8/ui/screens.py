@@ -692,7 +692,13 @@ def _render_inbox(state: UISnapshot, fonts: Fonts) -> Image.Image:
 
         # Body — single-line preview, truncated with ellipsis
         body = row.body
-        max_chars = 28
+        # Per-row body wrap. The DIRECTED screen rows are rendered in
+        # FONT_SMALL; on the 320×170 CardputerZero panel that fits about
+        # 38 characters comfortably (vs MiniJS8's 28 on the narrower
+        # 240px-wide panel). Anything longer truncates with an ellipsis;
+        # the operator can hit Enter to open the full INBOX_DETAIL view
+        # for buffered MSG bodies.
+        max_chars = 38
         wrapped = body if len(body) <= max_chars else body[: max_chars - 1] + "…"
         draw.text((text_x + 4, y), wrapped, font=fonts.small, fill=color)
         y += 18
@@ -798,10 +804,11 @@ def _render_inbox_detail(state: UISnapshot, fonts: Fonts) -> Image.Image:
     # ── Body section ─────────────────────────────────────────────
     # Wrap the body to the panel width, leaving the footer reserved.
     # Word-wrap if possible; if a single token is longer than the
-    # max line, hard-wrap it. ~32 monospace characters fits the
-    # 240px wide body region with body_mono font.
+    # max line, hard-wrap it. ~42 monospace characters fits the
+    # 320px-wide CardputerZero body region with body_mono font (vs
+    # 32 on MiniJS8's 240px panel).
     body_text = target_row.body or "(empty body)"
-    lines = _wrap_message_body(body_text, max_chars=32)
+    lines = _wrap_message_body(body_text, max_chars=42)
     body_color = theme.FG
     body_y = y
     max_y = theme.BODY_Y1 - 16
@@ -914,7 +921,12 @@ def _render_compose(state: UISnapshot, fonts: Fonts) -> Image.Image:
     focused = state.compose_focused_field
     label_w = 44
 
-    y = theme.BODY_Y0 + 6
+    # Phase 4: 320×170 retune. The TO/CMD/TEXT/SEND stack used to fit
+    # comfortably in MiniJS8's 192px body; the CardputerZero's 128px
+    # body forces tighter spacing and a 2-line TEXT box (was 3). The
+    # TEXT label is now inline-left of the box (matching the docstring
+    # diagram above) so we don't burn a full row on the label.
+    y = theme.BODY_Y0 + 4
 
     # ── TO row ──────────────────────────────────────────────────────
     is_to_focus = (focused == "compose_to")
@@ -937,7 +949,7 @@ def _render_compose(state: UISnapshot, fonts: Fonts) -> Image.Image:
         font=fonts.body,
         fill=theme.FG if state.compose_to else theme.FG_DIM,
     )
-    y += 22
+    y += 18
 
     # ── CMD row ─────────────────────────────────────────────────────
     is_cmd_focus = (focused == "compose_cmd")
@@ -961,19 +973,17 @@ def _render_compose(state: UISnapshot, fonts: Fonts) -> Image.Image:
         font=fonts.body,
         fill=theme.FG,
     )
-    y += 22
+    y += 18
 
     # ── TEXT row ────────────────────────────────────────────────────
+    # Label is inline-left of the box (saves the 18px the prior layout
+    # spent on a separate label row). 2 visible lines instead of 3.
     is_text_focus = (focused == "compose_text")
     label_color = theme.FG_GOOD if is_text_focus else theme.FG_DIM
     draw.text((theme.PAD_X, y), "TEXT", font=fonts.body, fill=label_color)
-    # Multi-line wrapped text box. Word-wraps at the right edge; if the
-    # operator types more than fits, we scroll to keep the bottom (most
-    # recently typed) line visible. Cursor sits at the end of the last
-    # rendered line when focused.
-    text_box_y0 = y + 18
-    text_box_y1 = text_box_y0 + 56  # 3 visible lines @ 14 pt body + padding
-    box = (theme.PAD_X, text_box_y0, theme.SCREEN_W - theme.PAD_X, text_box_y1)
+    text_box_y0 = y
+    text_box_y1 = text_box_y0 + 36           # 2 visible lines @ 14 pt + padding
+    box = (box_x0 - 2, text_box_y0 - 2, theme.SCREEN_W - theme.PAD_X, text_box_y1)
     draw.rectangle(
         box,
         outline=theme.FG_GOOD if is_text_focus else theme.SEPARATOR,
@@ -1054,13 +1064,13 @@ def _render_compose(state: UISnapshot, fonts: Fonts) -> Image.Image:
     for line in lines:
         draw.text((inner_x, iy), line, font=fonts.body, fill=body_color)
         iy += line_h
-    y = text_box_y1 + 8
+    y = text_box_y1 + 4
 
 
     # ── SEND button ─────────────────────────────────────────────────
     is_send_focus = (focused == "compose_send")
     btn_w = 96
-    btn_h = 22
+    btn_h = 18
     btn_x0 = (theme.SCREEN_W - btn_w) // 2
     btn = (btn_x0, y, btn_x0 + btn_w, y + btn_h)
     if is_send_focus:
@@ -1077,7 +1087,7 @@ def _render_compose(state: UISnapshot, fonts: Fonts) -> Image.Image:
     send_x = btn_x0 + (btn_w - send_w) // 2
     send_y = y + (btn_h - 14) // 2 - 1
     draw.text((send_x, send_y), "SEND", font=fonts.body, fill=send_color)
-    y = btn[3] + 4
+    y = btn[3] + 2
 
     # ── TX-state hint ───────────────────────────────────────────────
     # If the operator presses SEND, the message will enqueue. Whether
@@ -1389,35 +1399,52 @@ def _setup_rows(state: UISnapshot) -> list[tuple[str, str, str, tuple[int, int, 
 
 
 def _render_shutting_down(state: UISnapshot, fonts: Fonts) -> Image.Image:
-    """Confirmation screen during the both-buttons-held countdown."""
+    """Confirmation screen during the Fn+Q press-and-hold countdown.
+
+    Phase 4: layout reworked to fit 320×170 — every coordinate now
+    derives from theme.BODY_Y0/BODY_Y1 instead of the prior hardcoded
+    values that assumed a 240×240 panel. Also pulls SHUTDOWN_HOLD_S
+    from the gesture module so the displayed seconds-left always
+    matches the real timer (Phase 3 dropped this from 5 s to 3 s).
+    """
+    # Local import keeps the module-load order clean: ui/screens.py
+    # doesn't depend on input/* otherwise, and a top-level import
+    # would create an apparent (though not actual) cross-package
+    # dependency that's harder to reason about.
+    from microjs8.input.shutdown_gesture import SHUTDOWN_HOLD_S
+
     img, draw = _new_canvas()
     # No header / footer here — full-bleed for clarity under stress.
-    # We use the title font (smaller than large_bold) so the string
-    # comfortably fits in 240 px.
+
     title = "SHUTTING DOWN"
     bbox = fonts.title.getbbox(title)
     tw = bbox[2] - bbox[0]
     th = bbox[3] - bbox[1]
-    title_y = 70
+    # Top of title: ~25% of body from the top, leaving room for the
+    # subtitle, progress bar, and seconds-left text below.
+    title_y = theme.BODY_Y0 + (theme.BODY_H // 5)
     draw.text(
         ((theme.SCREEN_W - tw) // 2, title_y),
         title,
         font=fonts.title,
         fill=theme.FG,
     )
-    sub = "release a button to cancel"
+    sub = "release Fn+Q to cancel"
     bbox = fonts.small.getbbox(sub)
     sw = bbox[2] - bbox[0]
+    sub_y = title_y + th + 6
     draw.text(
-        ((theme.SCREEN_W - sw) // 2, title_y + th + 10),
+        ((theme.SCREEN_W - sw) // 2, sub_y),
         sub,
         font=fonts.small,
         fill=theme.FG_DIM,
     )
 
-    # Progress bar — empties from full to zero across the 5-second hold.
-    bar_y = 170
-    bar_h = 18
+    # Progress bar — empties from full to zero across SHUTDOWN_HOLD_S.
+    # Anchored relative to BODY_Y1 so it stays just above the bottom
+    # edge regardless of panel height.
+    bar_h = 14
+    bar_y = theme.BODY_Y1 - 28          # leaves room for seconds-left text below
     bar_x0 = 24
     bar_x1 = theme.SCREEN_W - 24
     bar_w = bar_x1 - bar_x0
@@ -1431,12 +1458,12 @@ def _render_shutting_down(state: UISnapshot, fonts: Fonts) -> Image.Image:
             fill=theme.FG_BAD,
         )
 
-    seconds_left = state.shutdown_remaining * 5.0
+    seconds_left = state.shutdown_remaining * SHUTDOWN_HOLD_S
     txt = f"{seconds_left:.1f} s"
     bbox = fonts.body.getbbox(txt)
     tw = bbox[2] - bbox[0]
     draw.text(
-        ((theme.SCREEN_W - tw) // 2, bar_y + bar_h + 12),
+        ((theme.SCREEN_W - tw) // 2, bar_y + bar_h + 2),
         txt,
         font=fonts.body,
         fill=theme.FG_DIM,
