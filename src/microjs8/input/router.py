@@ -24,7 +24,7 @@ the entire keyboard pipeline testable without GPIO, evdev, or the TFT.
 from __future__ import annotations
 
 import logging
-from typing import Awaitable, Callable, Optional
+from typing import Awaitable, Callable, Optional, Protocol
 
 from microjs8.input.events import Key, KeyEvent
 from microjs8.ui.state import ComposeCmd, Screen, UIState
@@ -47,6 +47,20 @@ _MAX_FREQ_HZ = 12
 EmergencyBypass = Callable[[], None]
 
 
+# Structural types for the system-key services. We use Protocol rather
+# than importing the concrete classes because the router shouldn't
+# depend on ``power.backlight`` or ``input.shutdown_gesture`` at module
+# load time — keeps test fakes trivial (any object with a matching
+# method shape just works).
+class _Backlight(Protocol):
+    def toggle(self) -> None: ...
+
+
+class _ShutdownGesture(Protocol):
+    def arm(self) -> None: ...
+    def cancel(self) -> None: ...
+
+
 class InputRouter:
     """Translate KeyEvents into UIState mutations.
 
@@ -65,6 +79,8 @@ class InputRouter:
         mark_inbox_read: Optional[Callable[[int], bool]] = None,
         delete_inbox_row: Optional[Callable[[int], bool]] = None,
         compose_send: Optional[Callable[[str, "ComposeCmd", str], bool]] = None,
+        backlight: Optional["_Backlight"] = None,
+        shutdown_gesture: Optional["_ShutdownGesture"] = None,
     ) -> None:
         self._ui = ui
         # save_config(callsign, grid, units) -> True if saved cleanly.
@@ -104,6 +120,12 @@ class InputRouter:
         # no-op (compose state still clears so the UI doesn't get
         # stuck).
         self._compose_send = compose_send
+        # CardputerZero system-key services. Both optional — when None,
+        # Fn+B / Fn+Q events are silently dropped, which is the
+        # right behaviour in headless tests and during early bring-up
+        # before the backlight node exists.
+        self._backlight = backlight
+        self._shutdown_gesture = shutdown_gesture
 
     def handle(self, event: KeyEvent) -> None:
         """Top-level dispatcher. Wraps any handler exception so a
@@ -115,6 +137,23 @@ class InputRouter:
 
     def _handle(self, event: KeyEvent) -> None:
         snapshot = self._ui.snapshot()
+
+        # 0) System keys — Fn+B (backlight toggle) and Fn+Q (shutdown
+        # gesture). These work from ANY screen, including mid-edit:
+        # the operator must always be able to dim the screen or power
+        # down regardless of UI state. Routed before edit mode and
+        # before global hotkeys.
+        if event.key is Key.FN_B:
+            if event.pressed and self._backlight is not None:
+                self._backlight.toggle()
+            return
+        if event.key is Key.FN_Q:
+            if self._shutdown_gesture is not None:
+                if event.pressed:
+                    self._shutdown_gesture.arm()
+                else:
+                    self._shutdown_gesture.cancel()
+            return
 
         # 1) If we're in edit mode, the field eats every key first.
         if self._ui.is_editing():

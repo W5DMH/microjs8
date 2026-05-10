@@ -40,12 +40,13 @@ from microjs8.cat import CatService, PttService, build_ptt_service, get_radio
 from microjs8.config import Config, ConfigError
 from microjs8.gps import GpsFix, GpsReader
 from microjs8.input import (
-    ButtonWatcher,
     InputRouter,
     KeyboardThread,
     KeyEvent,
+    ShutdownGesture,
     systemctl_poweroff,
 )
+from microjs8.power import Backlight
 from microjs8.modem import DecodeThread
 from microjs8.paths import data_dir, inbox_db_path
 from microjs8.protocol import (
@@ -103,7 +104,8 @@ class MicroJS8App:
         self._stop = asyncio.Event()
         self._ui_state: Optional[UIState] = None
         self._render_thread: Optional[RenderThread] = None
-        self._buttons: Optional[ButtonWatcher] = None
+        self._shutdown_gesture: Optional[ShutdownGesture] = None
+        self._backlight: Optional[Backlight] = None
         self._display: Optional[DisplayDevice] = None
         self._keyboard: Optional[KeyboardThread] = None
         self._router: Optional[InputRouter] = None
@@ -214,9 +216,9 @@ class MicroJS8App:
             compose_send=self._compose_send_sync,
         )
 
-        # ── Display, buttons, keyboard, GPS ──────────────────────────
+        # ── Display, shutdown gesture, backlight, keyboard, GPS ──────
         self._start_display_thread_best_effort()
-        self._start_buttons_best_effort(loop)
+        self._start_shutdown_gesture_and_backlight_best_effort(loop)
         self._start_keyboard_thread_best_effort(loop)
         self._start_gps_reader_best_effort(loop)
 
@@ -264,21 +266,48 @@ class MicroJS8App:
         self._render_thread = RenderThread(self._display, self._ui_state, fonts)
         self._render_thread.start()
 
-    def _start_buttons_best_effort(self, loop: asyncio.AbstractEventLoop) -> None:
+    def _start_shutdown_gesture_and_backlight_best_effort(
+        self, loop: asyncio.AbstractEventLoop
+    ) -> None:
+        """Initialise the Fn+Q shutdown gesture and the Fn+B backlight toggle.
+
+        Both are best-effort: a missing backlight sysfs node or a failed
+        gesture init must not stop the daemon — keyboard input and the
+        UI still work without them, and the operator can shut down via
+        SSH or the hardware power button.
+        """
         if self._headless:
-            _log.info("running headless — buttons skipped")
+            _log.info("running headless — shutdown gesture and backlight skipped")
             return
         assert self._ui_state is not None
+        # Shutdown gesture: an asyncio coroutine triggered by the
+        # Fn+Q press from the keyboard thread (via the router).
         try:
-            self._buttons = ButtonWatcher(
+            self._shutdown_gesture = ShutdownGesture(
                 self._ui_state, loop, shutdown_callback=systemctl_poweroff,
             )
-            self._buttons.start()
         except Exception:
             _log.exception(
-                "could not initialise buttons — keyboard navigation still works"
+                "could not initialise shutdown gesture — operator must use ssh or "
+                "the hardware power button to power down"
             )
-            self._buttons = None
+            self._shutdown_gesture = None
+        # Backlight toggle. Constructor only reads max_brightness once;
+        # any sysfs error is logged but not raised, so this should never
+        # actually fail. Defensive try-block kept for symmetry.
+        try:
+            self._backlight = Backlight()
+        except Exception:
+            _log.exception("could not initialise backlight controller")
+            self._backlight = None
+        # Wire both into the router so Fn+B / Fn+Q dispatch lands.
+        # The router was constructed earlier in startup; we update its
+        # injected services here. (If the router doesn't exist for some
+        # reason — shouldn't happen — we silently skip; the router's
+        # absence is logged elsewhere.)
+        if self._router is not None:
+            self._router._backlight = self._backlight
+            self._router._shutdown_gesture = self._shutdown_gesture
 
     def _start_keyboard_thread_best_effort(self, loop: asyncio.AbstractEventLoop) -> None:
         """Start the USB keyboard reader thread.
@@ -296,7 +325,7 @@ class MicroJS8App:
             self._keyboard.start()
         except Exception:
             _log.exception(
-                "could not start keyboard thread — TFT buttons still work"
+                "could not start keyboard thread — UI will be input-locked"
             )
             self._keyboard = None
 
@@ -2186,9 +2215,12 @@ class MicroJS8App:
                 _log.warning("keyboard thread did not stop within 2s")
             self._keyboard = None
 
-        if self._buttons is not None:
-            self._buttons.stop()
-            self._buttons = None
+        if self._shutdown_gesture is not None:
+            self._shutdown_gesture.stop()
+            self._shutdown_gesture = None
+        # Backlight has no resources to release (just a sysfs path),
+        # so we drop the reference without a stop() call.
+        self._backlight = None
 
         if self._render_thread is not None:
             self._render_thread.stop()

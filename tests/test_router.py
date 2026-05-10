@@ -1012,3 +1012,128 @@ def test_compose_send_with_no_callback_still_clears():
     snap = s.snapshot()
     assert snap.compose_to == ""
     assert snap.compose_text == ""
+
+
+# ── Phase 3: CardputerZero system keys (Fn+B, Fn+Q) ──────────────────
+
+
+class _FakeBacklight:
+    """Records toggle() calls for assertion."""
+
+    def __init__(self) -> None:
+        self.toggles = 0
+
+    def toggle(self) -> None:
+        self.toggles += 1
+
+
+class _FakeShutdownGesture:
+    """Records arm()/cancel() calls for assertion."""
+
+    def __init__(self) -> None:
+        self.armed = 0
+        self.cancelled = 0
+
+    def arm(self) -> None:
+        self.armed += 1
+
+    def cancel(self) -> None:
+        self.cancelled += 1
+
+
+def test_fn_b_press_toggles_backlight():
+    s = _state()
+    save = _SaveCapture()
+    bypass = _BypassCapture()
+    bl = _FakeBacklight()
+    r = InputRouter(s, save_config=save, emergency_bypass=bypass, backlight=bl)
+    r.handle(KeyEvent(key=Key.FN_B))
+    assert bl.toggles == 1
+
+
+def test_fn_b_release_does_not_toggle():
+    """Fn+B is press-only; the release event (pressed=False) must not
+    fire a second toggle and double-flip the state.
+    """
+    s = _state()
+    save = _SaveCapture()
+    bypass = _BypassCapture()
+    bl = _FakeBacklight()
+    r = InputRouter(s, save_config=save, emergency_bypass=bypass, backlight=bl)
+    r.handle(KeyEvent(key=Key.FN_B, pressed=False))
+    assert bl.toggles == 0
+
+
+def test_fn_b_with_no_backlight_service_is_silent():
+    """If no Backlight is wired, Fn+B must be silently dropped — no
+    AttributeError, no log spam.
+    """
+    s = _state()
+    save = _SaveCapture()
+    bypass = _BypassCapture()
+    r = InputRouter(s, save_config=save, emergency_bypass=bypass)
+    r.handle(KeyEvent(key=Key.FN_B))    # must not raise
+
+
+def test_fn_q_press_arms_shutdown_gesture():
+    s = _state()
+    save = _SaveCapture()
+    bypass = _BypassCapture()
+    sg = _FakeShutdownGesture()
+    r = InputRouter(s, save_config=save, emergency_bypass=bypass,
+                    shutdown_gesture=sg)
+    r.handle(KeyEvent(key=Key.FN_Q, pressed=True))
+    assert sg.armed == 1
+    assert sg.cancelled == 0
+
+
+def test_fn_q_release_cancels_shutdown_gesture():
+    s = _state()
+    save = _SaveCapture()
+    bypass = _BypassCapture()
+    sg = _FakeShutdownGesture()
+    r = InputRouter(s, save_config=save, emergency_bypass=bypass,
+                    shutdown_gesture=sg)
+    r.handle(KeyEvent(key=Key.FN_Q, pressed=False))
+    assert sg.armed == 0
+    assert sg.cancelled == 1
+
+
+def test_fn_q_dispatches_through_edit_mode():
+    """The shutdown gesture must work even when the operator is mid-edit.
+
+    The operator must always be able to power down regardless of any
+    in-progress text-entry — that's the whole point of having a clean
+    shutdown gesture vs the hardware power button.
+    """
+    s = _state(screen=Screen.SETUP)
+    s.begin_edit("callsign")        # enters edit mode
+    assert s.is_editing()
+
+    save = _SaveCapture()
+    bypass = _BypassCapture()
+    sg = _FakeShutdownGesture()
+    r = InputRouter(s, save_config=save, emergency_bypass=bypass,
+                    shutdown_gesture=sg)
+    r.handle(KeyEvent(key=Key.FN_Q, pressed=True))
+    # Gesture armed even though we were editing.
+    assert sg.armed == 1
+    # Edit mode is still in progress (the gesture didn't clobber it).
+    assert s.is_editing()
+
+
+def test_fn_b_dispatches_through_edit_mode():
+    """Backlight toggle also works mid-edit — operator may want to dim
+    the screen while typing a long message in low light.
+    """
+    s = _state(screen=Screen.SETUP)
+    s.begin_edit("callsign")
+    assert s.is_editing()
+
+    save = _SaveCapture()
+    bypass = _BypassCapture()
+    bl = _FakeBacklight()
+    r = InputRouter(s, save_config=save, emergency_bypass=bypass, backlight=bl)
+    r.handle(KeyEvent(key=Key.FN_B))
+    assert bl.toggles == 1
+    assert s.is_editing()
