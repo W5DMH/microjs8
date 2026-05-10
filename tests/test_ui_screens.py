@@ -891,3 +891,118 @@ def test_compose_no_warning_when_time_synced(fonts):
                 f"unexpected warn pixel at ({x},{y}) when time is "
                 f"synced — TX hint should not be shown"
             )
+
+
+# ── Phase 6: HOME battery row + COMPOSE battery TX warning ──────────
+
+
+def _battery_state(capacity: int, status: str = "Discharging"):
+    from microjs8.power.battery import BatteryState
+    return BatteryState(capacity, 3.7, -150.0, 25.0, status)
+
+
+def test_home_renders_critical_battery_in_red(fonts):
+    """Discharging at ≤5% should paint at least one FG_BAD pixel
+    in the Batt row's value column."""
+    snap = _snapshot(Screen.HOME)
+    from dataclasses import replace
+    snap = replace(snap, battery=_battery_state(4, "Discharging"))
+    img = render(snap, fonts)
+    # Scan the body for FG_BAD-coloured pixels (220, 60, 60).
+    found_red = False
+    for x in range(theme.SCREEN_W):
+        for y in range(theme.BODY_Y0, theme.BODY_Y1):
+            r, g, b = img.getpixel((x, y))
+            if r > 200 and 40 < g < 80 and 40 < b < 80:
+                found_red = True
+                break
+        if found_red:
+            break
+    assert found_red, "expected FG_BAD pixels for critical battery on HOME"
+
+
+def test_home_renders_low_battery_in_amber(fonts):
+    """10% discharging is below LOW (15%) threshold — paint amber."""
+    snap = _snapshot(Screen.HOME)
+    from dataclasses import replace
+    snap = replace(snap, battery=_battery_state(10, "Discharging"))
+    img = render(snap, fonts)
+    found_amber = False
+    for x in range(theme.SCREEN_W):
+        for y in range(theme.BODY_Y0, theme.BODY_Y1):
+            r, g, b = img.getpixel((x, y))
+            if r > 200 and 140 < g < 200 and b < 100:
+                found_amber = True
+                break
+        if found_amber:
+            break
+    assert found_amber, "expected FG_WARN pixels for low battery on HOME"
+
+
+def test_home_renders_charging_battery_in_white(fonts):
+    """Charging at 4% — the operator is on the cable, no warn colour."""
+    snap = _snapshot(Screen.HOME)
+    from dataclasses import replace
+    snap = replace(snap, battery=_battery_state(4, "Charging"))
+    img = render(snap, fonts)
+    # Should NOT find FG_BAD pixels (the row is white when charging).
+    for x in range(theme.SCREEN_W):
+        for y in range(theme.BODY_Y0, theme.BODY_Y1):
+            r, g, b = img.getpixel((x, y))
+            assert not (r > 200 and 40 < g < 80 and 40 < b < 80), (
+                f"unexpected FG_BAD pixel at ({x},{y}) when battery is charging"
+            )
+
+
+def test_home_renders_when_battery_unknown(fonts):
+    """battery=None must not crash the renderer."""
+    snap = _snapshot(Screen.HOME)
+    img = render(snap, fonts)   # snap.battery is None by default
+    assert img.size == (theme.SCREEN_W, theme.SCREEN_H)
+
+
+def test_compose_warns_on_critical_battery(fonts):
+    """The COMPOSE TX-warning chain should pick up battery-critical
+    even when other gates pass. Detect via FG_WARN pixels."""
+    from microjs8.ui.screens import _render_compose
+    from dataclasses import replace
+    snap = _compose_snapshot(time_source="chrony")
+    snap = replace(snap, battery=_battery_state(3, "Discharging"))
+    img = _render_compose(snap, fonts)
+    found_warn = False
+    for x in range(theme.SCREEN_W):
+        for y in range(theme.BODY_Y0, theme.BODY_Y1):
+            r, g, b = img.getpixel((x, y))
+            if r > 200 and 140 < g < 200 and b < 100:
+                found_warn = True
+                break
+        if found_warn:
+            break
+    assert found_warn, (
+        "COMPOSE should show a battery-critical warning when battery is "
+        "discharging at ≤5%"
+    )
+
+
+def test_compose_no_battery_warning_when_emergency_override(fonts):
+    """§6.11: help beacon is exempt from the 5% cutoff. The COMPOSE
+    warning chain must respect the same exemption — when
+    emergency_override is set, no battery warning appears even if the
+    battery is critical."""
+    from microjs8.ui.screens import _render_compose
+    from dataclasses import replace
+    snap = _compose_snapshot(time_source="chrony")
+    snap = replace(
+        snap,
+        battery=_battery_state(2, "Discharging"),
+        emergency_override=True,
+    )
+    img = _render_compose(snap, fonts)
+    # Check the bottom region of body (where the warning would render):
+    for x in range(theme.SCREEN_W):
+        for y in range(theme.BODY_Y0 + 100, theme.BODY_Y1):
+            r, g, b = img.getpixel((x, y))
+            assert not (r > 200 and 140 < g < 200 and b < 100), (
+                f"unexpected FG_WARN pixel at ({x},{y}) — battery warning should "
+                f"be suppressed under emergency override"
+            )

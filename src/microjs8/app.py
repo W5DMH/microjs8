@@ -46,7 +46,7 @@ from microjs8.input import (
     ShutdownGesture,
     systemctl_poweroff,
 )
-from microjs8.power import Backlight
+from microjs8.power import Backlight, BatteryReader
 from microjs8.modem import DecodeThread
 from microjs8.paths import data_dir, inbox_db_path
 from microjs8.protocol import (
@@ -106,6 +106,7 @@ class MicroJS8App:
         self._render_thread: Optional[RenderThread] = None
         self._shutdown_gesture: Optional[ShutdownGesture] = None
         self._backlight: Optional[Backlight] = None
+        self._battery_reader: Optional[BatteryReader] = None
         self._display: Optional[DisplayDevice] = None
         self._keyboard: Optional[KeyboardThread] = None
         self._router: Optional[InputRouter] = None
@@ -303,13 +304,25 @@ class MicroJS8App:
             _log.exception("could not initialise backlight controller")
             self._backlight = None
         # Wire both into the router so Fn+B / Fn+Q dispatch lands.
-        # The router was constructed earlier in startup; we update its
-        # injected services here. (If the router doesn't exist for some
+        # The router was constructed earlier in startup; we use its
+        # public setters here. (If the router doesn't exist for some
         # reason — shouldn't happen — we silently skip; the router's
         # absence is logged elsewhere.)
         if self._router is not None:
-            self._router._backlight = self._backlight
-            self._router._shutdown_gesture = self._shutdown_gesture
+            self._router.set_backlight(self._backlight)
+            self._router.set_shutdown_gesture(self._shutdown_gesture)
+
+        # Battery fuel-gauge reader (Phase 6). Async task on the
+        # main loop, polls /sys/class/power_supply/<bq27*>/ at 1 Hz.
+        # Failure here is also non-fatal — a missing fuel gauge just
+        # means HOME shows '--' and the TX gate treats battery as
+        # 'not critical' (no extra block).
+        try:
+            self._battery_reader = BatteryReader(self._ui_state)
+            self._battery_reader.start(loop)
+        except Exception:
+            _log.exception("could not start battery reader — HOME shows '--'")
+            self._battery_reader = None
 
     def _start_keyboard_thread_best_effort(self, loop: asyncio.AbstractEventLoop) -> None:
         """Start the USB keyboard reader thread.
@@ -2220,6 +2233,12 @@ class MicroJS8App:
         if self._shutdown_gesture is not None:
             self._shutdown_gesture.stop()
             self._shutdown_gesture = None
+        # Battery reader is an asyncio task — stop() cancels it.
+        # No join needed; the cancellation propagates through the
+        # task on the next await.
+        if self._battery_reader is not None:
+            self._battery_reader.stop()
+            self._battery_reader = None
         # Backlight has no resources to release (just a sysfs path),
         # so we drop the reference without a stop() call.
         self._backlight = None

@@ -199,3 +199,85 @@ def test_default_chrony_ok_handles_subprocess_error(monkeypatch):
     _chrony_cache["checked_at"] = 0.0
     _chrony_cache["result"] = False
     assert default_chrony_ok() is False
+
+
+# ── Phase 6: battery-critical gate ───────────────────────────────────
+
+
+def _battery(capacity: int, status: str = "Discharging"):
+    """Build a BatteryState matching the §6.11 thresholds."""
+    from microjs8.power.battery import BatteryState
+    return BatteryState(capacity, 3.7, -150.0, 25.0, status)
+
+
+def test_battery_critical_blocks_normal_tx():
+    """5% discharging in the normal path → TX blocked with
+    'battery critical' reason (matches the COMPOSE warning string)."""
+    s = _state()
+    s.set_battery(_battery(5, "Discharging"))
+    gate = TxSafetyGate(s, chrony_ok_fn=lambda: True)
+    ok, reason = gate.check_can_transmit()
+    assert ok is False
+    assert "battery" in reason.lower()
+    assert "critical" in reason.lower()
+
+
+def test_battery_at_critical_threshold_blocks():
+    """Boundary: exactly CRITICAL_BATTERY_PCT (5) is critical."""
+    from microjs8.power.battery import CRITICAL_BATTERY_PCT
+    s = _state()
+    s.set_battery(_battery(CRITICAL_BATTERY_PCT, "Discharging"))
+    gate = TxSafetyGate(s, chrony_ok_fn=lambda: True)
+    ok, _ = gate.check_can_transmit()
+    assert ok is False
+
+
+def test_battery_just_above_critical_does_not_block():
+    """Boundary: CRITICAL_BATTERY_PCT+1 (6%) discharging is not critical."""
+    from microjs8.power.battery import CRITICAL_BATTERY_PCT
+    s = _state()
+    s.set_battery(_battery(CRITICAL_BATTERY_PCT + 1, "Discharging"))
+    gate = TxSafetyGate(s, chrony_ok_fn=lambda: True)
+    ok, _ = gate.check_can_transmit()
+    assert ok is True
+
+
+def test_battery_critical_while_charging_does_not_block():
+    """A 4% reading while CHARGING means the operator just plugged
+    in — TX must not block (operator is actively addressing it)."""
+    s = _state()
+    s.set_battery(_battery(4, "Charging"))
+    gate = TxSafetyGate(s, chrony_ok_fn=lambda: True)
+    ok, _ = gate.check_can_transmit()
+    assert ok is True
+
+
+def test_battery_critical_exempt_in_emergency_override():
+    """§6.11: help-beacon path is exempt from the 5% gate. Even at
+    1% discharging, emergency_override allows TX."""
+    s = _state()
+    s.set_battery(_battery(1, "Discharging"))
+    s.trigger_emergency_override()
+    # GPS lock required for emergency — provide one.
+    from microjs8.gps.types import GpsFix, FixKind
+    import time as _time
+    s.set_gps(GpsFix(
+        kind=FixKind.FIX_2D, lat=42.0, lon=-71.0, altitude_m=None,
+        speed_mps=None, track_deg=None, hdop=2.0,
+        fix_time=None, satellites_used=4,
+        received_at=_time.monotonic(),
+    ))
+    gate = TxSafetyGate(s, chrony_ok_fn=lambda: True)
+    ok, reason = gate.check_can_transmit()
+    assert ok is True, f"emergency override should bypass battery gate; got {reason}"
+
+
+def test_battery_none_does_not_block_tx():
+    """When no fuel gauge is present, snap.battery is None — that
+    must not block TX. Operators on bench setups without the BQ27
+    should still be able to transmit."""
+    s = _state()
+    # Don't call set_battery — battery stays None.
+    gate = TxSafetyGate(s, chrony_ok_fn=lambda: True)
+    ok, _ = gate.check_can_transmit()
+    assert ok is True
