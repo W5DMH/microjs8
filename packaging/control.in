@@ -1,0 +1,32 @@
+Package: microjs8
+Version: @VERSION@
+Architecture: all
+Maintainer: W5DMH <w5dmh@example.invalid>
+Section: hamradio
+Priority: optional
+Homepage: https://github.com/W5DMH/microjs8
+Depends: python3 (>= 3.11),
+ python3-pil,
+ python3-numpy,
+ python3-evdev,
+ python3-sounddevice,
+ python3-serial,
+ fonts-dejavu-core,
+ adduser,
+ systemd-sysv
+Recommends: hamlib-utils,
+ chrony,
+ gpsd
+Description: MicroJS8 — JS8 transceiver for M5Stack CardputerZero
+ A self-contained JS8 transceiver daemon targeting the M5Stack
+ CardputerZero handheld. Provides receive-decode-display, directed
+ messaging, mailbox, emergency beacon, and TX scheduling on the
+ built-in 320x170 panel and matrix keyboard.
+ .
+ Drives the radio via hamlib's rigctld (TS-480 emulation for QDX,
+ G90 driver for Xiegu, RTS-PTT for DigiRig). Audio capture and
+ playback go through ALSA / PortAudio.
+ .
+ Installs to /usr/share/APPLaunch/ and registers as an APPLaunch
+ application; the M5Stack launcher menu shows it as a tile.
+ The systemd service auto-starts on boot.
