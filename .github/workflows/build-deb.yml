@@ -19,6 +19,13 @@ on:
 permissions:
   contents: write   # needed to attach assets to a Release on tag push
 
+# Opt all JavaScript actions in this workflow into the Node.js 24
+# runtime ahead of GitHub's June 2 2026 forced cutover. Silences the
+# deprecation warning we hit on Phase 7's first run. See:
+#   https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
 jobs:
   build:
     name: Build microjs8.deb
@@ -44,17 +51,33 @@ jobs:
       - name: Sanity — validate the systemd unit
         # systemd-analyze verify catches typos in directive names and
         # malformed unit syntax. Doesn't require running systemd.
+        #
+        # Phase 7 hotfix: systemd-analyze refuses files whose name
+        # doesn't end in a recognised unit suffix (.service, .target,
+        # .socket, etc.). Our template is microjs8.service.in — copy
+        # to a tempfile with the right extension before validating.
+        # We also tolerate non-fatal noise about unreachable units
+        # (gpsd.socket, rigctld.service) that aren't installed on
+        # the GitHub runner; only real syntax errors fail the step.
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends systemd
-          # systemd-analyze loads the unit; we point it at the .in
-          # template since the build hasn't run yet.
-          systemd-analyze verify --no-pager packaging/microjs8.service.in \
-            2> verify.log || true
-          if grep -E '^(Failed|.*Unknown lvalue)' verify.log; then
-            echo "systemd unit has fatal errors" >&2
-            cat verify.log
-            exit 1
+          tmpdir=$(mktemp -d)
+          cp packaging/microjs8.service.in "$tmpdir/microjs8.service"
+          # systemd-analyze writes findings to stderr and exits non-
+          # zero on errors. Capture both streams and decide based on
+          # content; informational warnings don't fail the build.
+          if ! systemd-analyze verify --no-pager \
+                 "$tmpdir/microjs8.service" 2>&1 | tee verify.log; then
+            # Real errors look like:
+            #   "Unknown key name 'Foo' in section [Service]"
+            #   "Failed to parse section header '...'"
+            # which are ALWAYS typos in the unit and warrant failing.
+            if grep -qE 'Unknown (key|lvalue)|Failed to parse' verify.log; then
+              echo "::error::systemd unit has fatal errors"
+              exit 1
+            fi
+            echo "::warning::systemd-analyze reported non-fatal issues (ok)"
           fi
 
       - name: Build .deb
@@ -65,14 +88,20 @@ jobs:
       - name: Inspect .deb
         # Print the package metadata + file inventory to the job log
         # so reviewers can eyeball changes without downloading.
+        # Phase 7 hotfix: $NF (last field) is more robust than $6 in
+        # the awk for paths with spaces or extra columns.
         run: |
           DEB=$(ls dist/*.deb | head -1)
-          echo "## Package metadata" >> "$GITHUB_STEP_SUMMARY"
-          dpkg-deb -I "$DEB" >> "$GITHUB_STEP_SUMMARY"
-          echo "## File inventory" >> "$GITHUB_STEP_SUMMARY"
-          echo '```' >> "$GITHUB_STEP_SUMMARY"
-          dpkg-deb -c "$DEB" | awk '{print $1, $6}' >> "$GITHUB_STEP_SUMMARY"
-          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          {
+            echo "## Package metadata"
+            echo '```'
+            dpkg-deb -I "$DEB"
+            echo '```'
+            echo "## File inventory"
+            echo '```'
+            dpkg-deb -c "$DEB" | awk '{print $1, $NF}'
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Lint .deb with lintian
         # lintian catches Debian-policy violations — wrong file
@@ -80,13 +109,23 @@ jobs:
         # the build on lintian warnings (some are aspirational for
         # an unsigned dev-built .deb), but we surface them so the
         # operator can see what'd need fixing for an official upload.
+        #
+        # Phase 7 hotfix: continue-on-error guarantees the step
+        # cannot fail the workflow regardless of how lintian exits
+        # (including signal kills, OOM, etc).
+        continue-on-error: true
         run: |
           sudo apt-get install -y --no-install-recommends lintian
           DEB=$(ls dist/*.deb | head -1)
           lintian --no-tag-display-limit "$DEB" || true
 
       - name: Upload artifact (PRs and main)
-        if: github.event_name != 'push' || github.ref != 'refs/tags/v*'
+        # Phase 7 hotfix: the prior filter
+        #   if: github.event_name != 'push' || github.ref != 'refs/tags/v*'
+        # was tautological — `!= 'refs/tags/v*'` is a literal string
+        # comparison, not a glob, so it always matched. Mirror the
+        # release step below using startsWith() for symmetry.
+        if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
         uses: actions/upload-artifact@v4
         with:
           name: microjs8-deb
@@ -94,7 +133,7 @@ jobs:
           retention-days: 30
 
       - name: Attach to Release (tag push)
-        if: startsWith(github.ref, 'refs/tags/v')
+        if: ${{ startsWith(github.ref, 'refs/tags/v') }}
         uses: softprops/action-gh-release@v2
         with:
           files: dist/*.deb
