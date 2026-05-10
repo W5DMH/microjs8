@@ -680,7 +680,9 @@ def test_header_clock_font_is_about_three_quarters_of_title(fonts):
     that range means somebody changed FONT_CLOCK and lost the
     intended 75% relationship."""
     from PIL import Image, ImageDraw
-    img = Image.new("RGB", (240, 240), (0, 0, 0))
+    # Dimensions don't matter for this test — we only measure text widths.
+    # Use theme constants to stay consistent with the rest of the suite.
+    img = Image.new("RGB", (theme.SCREEN_W, theme.SCREEN_H), (0, 0, 0))
     draw = ImageDraw.Draw(img)
     sample = "HH:MM:SS"
     title_w = draw.textlength(sample, font=fonts.title)
@@ -693,10 +695,15 @@ def test_header_clock_font_is_about_three_quarters_of_title(fonts):
 
 
 def test_header_clock_renders_in_right_region(fonts):
-    """The clock should land at the right edge of the 240-px header
+    """The clock should land at the right edge of the header
     (right-aligned with PAD_X padding) — not in the center where it
     used to overlap with long titles like 'EMERGENCY' or 'DIRECTED
-    MENU'. Pixels light up in the right column when rendered."""
+    MENU'. Pixels light up in the right column when rendered.
+
+    The search region is computed from theme constants so the test
+    adapts to whatever panel size we ship — currently the
+    CardputerZero's 320×170, formerly MiniJS8's 240×240.
+    """
     from PIL import Image, ImageDraw
     from microjs8.ui.screens import _draw_header
     from dataclasses import replace
@@ -704,13 +711,13 @@ def test_header_clock_renders_in_right_region(fonts):
     img = Image.new("RGB", (theme.SCREEN_W, theme.SCREEN_H), theme.BG)
     draw = ImageDraw.Draw(img)
     _draw_header(draw, fonts, "DIRECTED", snap)
-    # Right column = x ∈ [200, 236] (the rightmost ~40 px should
-    # contain at least some clock glyphs since the format is
-    # "UTC HH:MM:SS" = ~95 px wide right-aligned to PAD_X=4 from
-    # the right edge).
+    # Right region: rightmost ~40 px of the panel (the clock format
+    # "UTC HH:MM:SS" right-aligned with PAD_X from the right edge).
+    # Vertical: full header height.
     right_painted = False
-    for x in range(200, 236):
-        for y in range(4, 24):
+    search_w = 40
+    for x in range(theme.SCREEN_W - search_w, theme.SCREEN_W - theme.PAD_X):
+        for y in range(theme.PAD_Y, theme.HEADER_H):
             if img.getpixel((x, y)) != theme.HEADER_BG:
                 right_painted = True
                 break
