@@ -36,18 +36,28 @@ class Key(enum.Enum):
     CTRL_Q = "CTRL_Q"
     CTRL_S = "CTRL_S"
     CTRL_C = "CTRL_C"
+    # Fn-combined hotkeys (CardputerZero — already-resolved by the
+    # kernel keymap into distinct keycodes).
+    FN_B = "FN_B"
+    FN_Q = "FN_Q"
 
 
 @dataclass(frozen=True)
 class KeyEvent:
-    """A logical key was pressed.
+    """A logical key was pressed (or released).
 
     Either ``key`` (a Key enum member) or ``char`` (a printable string)
     is set, never both. The router dispatches on which is set.
+
+    ``pressed`` defaults to True (the only value the keyboard reader
+    used to emit pre-Phase-3). The shutdown gesture's Fn+Q handling is
+    the sole consumer of ``pressed=False`` today; other keys remain
+    press-only.
     """
 
     key: Key | None = None
     char: str | None = None
+    pressed: bool = True
 
     def __post_init__(self) -> None:
         if (self.key is None) == (self.char is None):

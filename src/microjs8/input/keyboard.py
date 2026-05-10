@@ -162,6 +162,32 @@ _CTRL_KEYS: dict[str, Key] = {
 }
 
 
+# ── CardputerZero Fn-modified keycodes ──────────────────────────────
+#
+# The CardputerZero's TCA8418 I²C keypad goes through a kernel keymap
+# (``/usr/share/keymaps/tca8418_keypad_m5stack_keymap.map``) that
+# translates Fn+key combinations into distinct evdev keycodes BEFORE
+# we see them. Userspace doesn't track ``Fn`` as a modifier — we just
+# bind whatever keycodes the keymap produces for ``Fn+B`` and ``Fn+Q``.
+#
+# The exact integer values are unconfirmed until first hardware. To
+# discover them, run on the device::
+#
+#     evtest /dev/input/by-path/platform-3f804000.i2c-event
+#
+# and press Fn+B then Fn+Q while watching the output. Then either:
+#   - update the defaults below, or
+#   - set ``MICROJS8_FN_B_KEYCODE`` / ``MICROJS8_FN_Q_KEYCODE`` in the
+#     systemd unit (no code change needed for bring-up).
+#
+# Placeholders are KEY_F11 (87) and KEY_F12 (88) — both are real evdev
+# keycodes that won't collide with anything on the 46-key matrix
+# layout, so unit tests can exercise the dispatch path safely.
+import os as _os
+_FN_B_SCANCODE: int = int(_os.environ.get("MICROJS8_FN_B_KEYCODE", 87))
+_FN_Q_SCANCODE: int = int(_os.environ.get("MICROJS8_FN_Q_KEYCODE", 88))
+
+
 def find_keyboard_device() -> Optional[str]:
     """Look up the USB keyboard device path.
 
@@ -338,6 +364,27 @@ class KeyboardThread(threading.Thread):
         if kc == _KEY_CAPSLOCK:
             if state == EvKeyEvent.key_down:
                 self._capslock_on = not self._capslock_on
+            return
+
+        # CardputerZero Fn+B (backlight toggle) — press-only, like other
+        # function keys. Auto-repeat from a long hold is treated as a
+        # single press: it's harmless because the router's toggle is
+        # debounced at the backlight layer.
+        if kc == _FN_B_SCANCODE:
+            if state == EvKeyEvent.key_down:
+                self._emit(KeyEvent(key=Key.FN_B))
+            return
+
+        # CardputerZero Fn+Q (shutdown gesture) — emit BOTH press and
+        # release so the gesture state machine can arm and cancel.
+        # ``key_hold`` events (auto-repeat) are NOT re-emitted: the
+        # gesture's ``arm()`` is idempotent and a stream of "press"
+        # events during the 3-second hold would be wasted work.
+        if kc == _FN_Q_SCANCODE:
+            if state == EvKeyEvent.key_down:
+                self._emit(KeyEvent(key=Key.FN_Q, pressed=True))
+            elif state == EvKeyEvent.key_up:
+                self._emit(KeyEvent(key=Key.FN_Q, pressed=False))
             return
 
         # We only act on KEY DOWN; ignore release and hold-repeat for

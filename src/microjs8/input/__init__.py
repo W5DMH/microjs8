@@ -1,26 +1,29 @@
-"""microjs8.input — USB keyboard and GPIO buttons (Step 3)."""
+"""microjs8.input — keyboard, system-key gesture handling.
 
-from microjs8.input.buttons import (
-    PIN_BUTTON_BOTTOM,
-    PIN_BUTTON_TOP,
-    SHUTDOWN_HOLD_S,
-    ButtonWatcher,
-    fake_shutdown,
-    systemctl_poweroff,
-)
+Pre-Phase-3 (MiniJS8) this also exported ``ButtonWatcher`` for the two
+TFT GPIO buttons. The CardputerZero has no tactile buttons; that module
+was removed in Phase 3 and replaced with ``shutdown_gesture`` for
+``Fn+Q`` press-and-hold powerdown. Backlight toggle moved to
+``microjs8.power.backlight`` (triggered by ``Fn+B`` from the router).
+"""
+
 from microjs8.input.events import Key, KeyEvent
 from microjs8.input.keyboard import KeyboardThread, find_keyboard_device
 from microjs8.input.router import InputRouter
+from microjs8.input.shutdown_gesture import (
+    SHUTDOWN_HOLD_S,
+    ShutdownGesture,
+    fake_shutdown,
+    systemctl_poweroff,
+)
 
 __all__ = [
-    "ButtonWatcher",
     "InputRouter",
     "Key",
     "KeyEvent",
     "KeyboardThread",
-    "PIN_BUTTON_BOTTOM",
-    "PIN_BUTTON_TOP",
     "SHUTDOWN_HOLD_S",
+    "ShutdownGesture",
     "fake_shutdown",
     "find_keyboard_device",
     "systemctl_poweroff",
