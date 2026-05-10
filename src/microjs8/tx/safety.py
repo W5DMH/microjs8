@@ -88,8 +88,10 @@ class TxSafetyGate:
         # it computes slot timing, so the two stay coherent.
         ts = self.time_source()
 
-        # Emergency override path: bypasses callsign/grid checks BUT
-        # still requires GPS lock (the SOS message needs a real
+        # Emergency override path: bypasses callsign/grid checks, AND
+        # bypasses the §6.11 battery-critical gate (life-safety
+        # traffic must transmit even at 4% — see build spec §6.11).
+        # Still requires GPS lock (the SOS message needs a real
         # locator) and a usable time source.
         if snap.emergency_override:
             if not snap.gps.has_position:
@@ -97,6 +99,14 @@ class TxSafetyGate:
             if not ts.usable:
                 return False, "time not synced (no consensus)"
             return True, None
+
+        # Phase 6 §6.11: battery-critical gate. Applies to the normal
+        # path only. ``snap.battery is None`` means the fuel gauge
+        # hasn't reported yet (or is missing entirely) — treat this
+        # as "unknown, allow TX" rather than blocking, so a missing
+        # BQ27220 chip can't take TX offline.
+        if snap.battery is not None and snap.battery.is_critical:
+            return False, "battery critical"
 
         # Normal path.
         if snap.callsign == N0CALL or not snap.callsign:

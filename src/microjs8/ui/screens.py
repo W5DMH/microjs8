@@ -228,9 +228,9 @@ def _render_home(state: UISnapshot, fonts: Fonts) -> Image.Image:
     # out which source is currently driving slot timing.
     time_src_label, time_src_color = _time_source_label(state)
 
-    y = theme.BODY_Y0 + 6
+    y = theme.BODY_Y0 + 2
     _kv_row(draw, fonts, y, "Call", state.callsign, value_color=callsign_color)
-    y += 22
+    y += 18
     # Grid: show configured grid, with GPS-derived in parentheses if
     # different (so the operator can see at a glance "I'm in a different
     # grid than I told the radio").
@@ -241,22 +241,39 @@ def _render_home(state: UISnapshot, fonts: Fonts) -> Image.Image:
         # Configured grid is unset but GPS knows where we are
         grid_text = f"(unset; gps {state.gps_grid})"
     _kv_row(draw, fonts, y, "Grid", grid_text, value_color=grid_color)
-    y += 22
+    y += 18
     _kv_row(draw, fonts, y, "TimeSrc", time_src_label, value_color=time_src_color)
-    y += 22
+    y += 18
     _kv_row(draw, fonts, y, "GPS", gps_label, value_color=gps_color)
-    y += 22
+    y += 18
     _kv_row(draw, fonts, y, "Freq", f"{freq_mhz:.3f} MHz", value_color=theme.FG)
-    y += 22
+    y += 18
     # CAT status — green when rigctld is connected and we can transmit,
     # dim "--" when not. Without CAT we can only receive.
     cat_label = "CONNECTED" if state.cat_connected else "--"
     cat_color = theme.FG_GOOD if state.cat_connected else theme.FG_DIM
     _kv_row(draw, fonts, y, "CAT", cat_label, value_color=cat_color)
-    y += 22
-    _kv_row(draw, fonts, y, "Mode", f"JS8 {state.mode.upper()}", value_color=theme.FG)
-    y += 22
-    _kv_row(draw, fonts, y, "HB", "OFF", value_color=theme.FG_DIM)
+    y += 18
+    # Phase 6 §6.11: battery row. Shows "NN% [↑/↓/=]" where the glyph
+    # encodes status. Color follows the §6.11 thresholds:
+    #   - FG_BAD (red)   : discharging at ≤ 5% — TX is gated
+    #   - FG_WARN (amber): discharging at ≤ 15% — operator should charge
+    #   - FG (white)     : everywhere else (charging, healthy, full)
+    # When the battery snapshot is None (no fuel gauge or sustained
+    # read failure), we render '--' rather than hiding the row.
+    if state.battery is None:
+        batt_label = "--"
+        batt_color = theme.FG_DIM
+    else:
+        b = state.battery
+        batt_label = f"{b.capacity}% {b.status_glyph}"
+        if b.is_critical:
+            batt_color = theme.FG_BAD
+        elif b.is_low:
+            batt_color = theme.FG_WARN
+        else:
+            batt_color = theme.FG
+    _kv_row(draw, fonts, y, "Batt", batt_label, value_color=batt_color)
 
     # Inbox indicator — only rendered when there's something to
     # show, so the operator's eye is drawn to it. Format:
@@ -270,7 +287,7 @@ def _render_home(state: UISnapshot, fonts: Fonts) -> Image.Image:
     has_unread = state.inbox_unread_count > 0
     has_held = state.inbox_held_count > 0
     if has_unread or has_held:
-        y += 22
+        y += 18
         if has_unread and has_held:
             label = (
                 f"{state.inbox_unread_count} unread "
@@ -1108,6 +1125,17 @@ def _render_compose(state: UISnapshot, fonts: Fonts) -> Image.Image:
         tx_warning = "TO cannot be your own call"
     elif not state.tx_allowed:
         tx_warning = "TX OFF — configure station"
+    elif (
+        state.battery is not None
+        and state.battery.is_critical
+        and not state.emergency_override
+    ):
+        # Phase 6 §6.11: battery ≤ 5% blocks TX in the normal path.
+        # The emergency override (help beacon) is exempt — life-
+        # safety traffic transmits regardless of battery state — so
+        # we explicitly check `not state.emergency_override` here to
+        # mirror the same exemption that TxSafetyGate applies.
+        tx_warning = "TX OFF — battery critical"
     elif not state.time_source:
         # No chrony, no consensus — scheduler won't fire until 3+
         # frames are decoded OR chrony comes back. The compose will

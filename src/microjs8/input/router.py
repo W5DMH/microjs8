@@ -127,6 +127,19 @@ class InputRouter:
         self._backlight = backlight
         self._shutdown_gesture = shutdown_gesture
 
+    # ── Late-binding setters ────────────────────────────────────────
+    # These exist so app.py can construct the router early (before
+    # subsystems like the backlight controller exist) and inject the
+    # late-arriving services without touching private attributes.
+
+    def set_backlight(self, backlight: Optional["_Backlight"]) -> None:
+        """Inject (or replace) the backlight controller. ``None`` disables Fn+B."""
+        self._backlight = backlight
+
+    def set_shutdown_gesture(self, gesture: Optional["_ShutdownGesture"]) -> None:
+        """Inject (or replace) the shutdown gesture handler. ``None`` disables Fn+Q."""
+        self._shutdown_gesture = gesture
+
     def handle(self, event: KeyEvent) -> None:
         """Top-level dispatcher. Wraps any handler exception so a
         single bad key doesn't take the input subsystem down."""

@@ -36,6 +36,7 @@ from typing import Optional
 
 from microjs8.activity import DirectedActivityEntry
 from microjs8.gps.types import FixKind, GpsFix, no_fix
+from microjs8.power.battery import BatteryState
 from microjs8.protocol.types import HeardStation, ParsedFrame
 
 
@@ -360,6 +361,14 @@ class UISnapshot:
     compose_text: str = ""
     compose_focused_field: Optional[str] = None
 
+    # Phase 6: battery snapshot from the BQ27220 fuel gauge. None
+    # when the reader hasn't run yet (or when discovery has failed
+    # for ≥3 polls — see ``power.battery.BatteryReader``). The HOME
+    # row renders '--' in this case rather than crashing or hiding
+    # the row entirely. The TX safety gate (§6.11) treats None as
+    # "not critical" so a missing fuel gauge doesn't block TX.
+    battery: Optional["BatteryState"] = None
+
 
 class UIState:
     """Mutable UI state. Mutate from asyncio thread only."""
@@ -426,6 +435,11 @@ class UIState:
         self._compose_to: str = ""
         self._compose_cmd: ComposeCmd = ComposeCmd.FREE
         self._compose_text: str = ""
+
+        # Phase 6: battery snapshot (None until BatteryReader fires
+        # the first successful poll, or back to None if discovery
+        # fails or 3 consecutive reads error).
+        self._battery: Optional[BatteryState] = None
 
         self._lock = threading.Lock()
         self._dirty = threading.Event()
@@ -1049,6 +1063,32 @@ class UIState:
             return None
         return fields[idx]
 
+    def set_battery(self, state: Optional[BatteryState]) -> None:
+        """Update the battery snapshot.
+
+        Marks dirty only when the displayed fields actually change.
+        Polled at 1 Hz by ``BatteryReader``, but the BQ27220 typically
+        only changes capacity once every 30-60 s under normal load —
+        we'd otherwise wake the render thread for every poll with no
+        on-screen change.
+
+        ``state=None`` is the explicit "battery state unknown" signal
+        (sustained read failures or no fuel gauge); the HOME row
+        renders '--' in this case. Going from a known state back to
+        None always marks dirty since the row will visibly change.
+        """
+        old = self._battery
+        if old is None and state is None:
+            return  # already unknown; no work
+        if old is not None and state is not None:
+            # Same-or-different known state. Re-render only on the
+            # fields HOME actually displays: capacity and status.
+            if (old.capacity, old.status) == (state.capacity, state.status):
+                self._battery = state  # keep the fresh voltage/current
+                return
+        self._battery = state
+        self._dirty.set()
+
     def set_gps(self, fix: GpsFix) -> None:
         """Update the current GPS fix.
 
@@ -1113,6 +1153,7 @@ class UIState:
             compose_cmd=self._compose_cmd,
             compose_text=self._compose_text,
             compose_focused_field=self.compose_focused_field(),
+            battery=self._battery,
         )
 
     # ── Render-side dirty-flag plumbing ──────────────────────────────
