@@ -1,4 +1,4 @@
-"""Tests for minijs8.tx.beacon — HeartbeatBeacon and EmergencyBeacon.
+"""Tests for microjs8.tx.beacon — HeartbeatBeacon and EmergencyBeacon.
 
 These threads have time-driven semantics. We verify message format
 and queue-interaction directly via ``_build_message()`` / ``_fire_one()``;
@@ -15,12 +15,12 @@ from typing import Optional
 
 import pytest
 
-from minijs8.tx.beacon import (
+from microjs8.tx.beacon import (
     EmergencyBeacon,
     HEARTBEAT_INTERVAL_S,
     HeartbeatBeacon,
 )
-from minijs8.tx.queue import OutboundKind, OutboundQueue
+from microjs8.tx.queue import OutboundKind, OutboundQueue
 
 
 @pytest.fixture
@@ -104,7 +104,7 @@ def test_heartbeat_fire_one_when_factory_returns_none(queue):
 def test_heartbeat_when_queue_full_does_not_increment(queue):
     """If queue rejects the enqueue (full), fire_count stays put."""
     # Fill queue.
-    from minijs8.tx.queue import QUEUE_DEPTH
+    from microjs8.tx.queue import QUEUE_DEPTH
     for i in range(QUEUE_DEPTH):
         queue.enqueue(f"M{i}", OutboundKind.DIRECTED, to_call="K1ABC")
     hb = HeartbeatBeacon(
@@ -204,5 +204,5 @@ def test_emergency_fire_one_enqueues_as_allcall(queue):
 
 
 def test_emergency_default_interval_is_5_min():
-    from minijs8.tx.beacon import EMERGENCY_BEACON_INTERVAL_S
+    from microjs8.tx.beacon import EMERGENCY_BEACON_INTERVAL_S
     assert EMERGENCY_BEACON_INTERVAL_S == 5 * 60

@@ -1,4 +1,4 @@
-"""Tests for minijs8.gps.gpsd_client.
+"""Tests for microjs8.gps.gpsd_client.
 
 We don't need a real gpsd. We construct a GpsdClient, swap its
 ``_sock`` attribute for a fake socket that replays a scripted byte
@@ -13,8 +13,8 @@ from typing import Iterator
 
 import pytest
 
-from minijs8.gps.gpsd_client import GpsdClient
-from minijs8.gps.types import FixKind
+from microjs8.gps.gpsd_client import GpsdClient
+from microjs8.gps.types import FixKind
 
 
 class _FakeSocket:

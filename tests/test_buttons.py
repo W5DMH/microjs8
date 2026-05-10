@@ -1,4 +1,4 @@
-"""Tests for minijs8.input.buttons.
+"""Tests for microjs8.input.buttons.
 
 We don't poke real GPIO. Instead we drive the watcher via fake
 button objects that we control directly, so we can exercise the
@@ -12,11 +12,11 @@ from typing import Optional
 
 import pytest
 
-from minijs8.input.buttons import (
+from microjs8.input.buttons import (
     SHUTDOWN_HOLD_S,
     ButtonWatcher,
 )
-from minijs8.ui.state import Screen, UIState
+from microjs8.ui.state import Screen, UIState
 
 
 class FakeButton:
@@ -87,7 +87,7 @@ def test_short_press_bottom_retreats_ring(loop_state_buttons):
     loop.run_until_complete(asyncio.sleep(0))
 
     # Wraps from HOME back to the last ring screen.
-    from minijs8.ui.state import RING
+    from microjs8.ui.state import RING
     assert state.snapshot().screen is RING[-1]
 
 

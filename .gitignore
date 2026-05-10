@@ -35,7 +35,7 @@ Thumbs.db
 bookworm-lite-arm64.img
 
 
-# ── Runtime + local state (lives in /var/minijs8/ on the Pi, not here) 
+# ── Runtime + local state (lives in /var/microjs8/ on the Pi, not here) 
 # Including these in the repo would leak callsign/grid/QSO data.
 *.db
 *.db-journal

@@ -1,4 +1,4 @@
-"""Tests for minijs8.audio.playback.AudioPlayback (callback mode).
+"""Tests for microjs8.audio.playback.AudioPlayback (callback mode).
 
 Stub sounddevice so we can exercise lifecycle, the resample function,
 the input-validation path, and the audio callback itself without
@@ -16,7 +16,7 @@ from typing import Any
 import numpy as np
 import pytest
 
-from minijs8.audio.playback import (
+from microjs8.audio.playback import (
     AudioPlayback,
     PlaybackError,
     TX_OUTPUT_CHANNELS,

@@ -28,13 +28,13 @@ Goals of this suite (in priority order):
 
 from __future__ import annotations
 
-from minijs8.protocol.checksum import checksum16
-from minijs8.protocol.reassembly import (
+from microjs8.protocol.checksum import checksum16
+from microjs8.protocol.reassembly import (
     AssembledMessage,
     MessageAssembler,
     DEFAULT_FRAME_TIMEOUT_S,
 )
-from minijs8.protocol.types import DecodedFrame, FrameKind, ParsedFrame
+from microjs8.protocol.types import DecodedFrame, FrameKind, ParsedFrame
 
 
 # ── Test helpers ───────────────────────────────────────────────────
@@ -714,7 +714,7 @@ def test_assembled_message_was_buffered_command_default_true():
 
 def _on_air_kd8pgb_msg_csum() -> str:
     """Compute the actual on-air checksum for the test body."""
-    from minijs8.protocol.checksum import checksum16
+    from microjs8.protocol.checksum import checksum16
     return checksum16(
         "TEST STORAGE MESSAGE STORED ON REFERENCE 1 FROM KD8PGB"
     )
@@ -734,7 +734,7 @@ def test_canary_4frame_buffered_msg_with_mid_space_boundary():
     huffEncode breaks at character boundaries — preserving boundary
     whitespace is the protocol contract.
     """
-    from minijs8.protocol.grammar import parse as parse_frame
+    from microjs8.protocol.grammar import parse as parse_frame
 
     csum = _on_air_kd8pgb_msg_csum()
 
@@ -770,8 +770,8 @@ def test_buffered_msg_with_leading_space_on_continuation():
     """Mirror case: the space falls at the START of frame N+1's bits
     (frame N's bits ended just before the space). Must concatenate
     correctly."""
-    from minijs8.protocol.grammar import parse as parse_frame
-    from minijs8.protocol.checksum import checksum16
+    from microjs8.protocol.grammar import parse as parse_frame
+    from microjs8.protocol.checksum import checksum16
 
     body_text = "QUICK BROWN FOX JUMPS"
     csum = checksum16(body_text)
@@ -803,7 +803,7 @@ def test_grammar_preserves_trailing_whitespace_in_directed_body():
     """Grammar must NOT strip trailing whitespace from directed body —
     that whitespace is part of the multi-frame protocol contract.
     """
-    from minijs8.protocol.grammar import parse as parse_frame
+    from microjs8.protocol.grammar import parse as parse_frame
 
     p = parse_frame(_decoded("KD8PGB: W5DMH SOME TEXT WITH TRAILING "), "W5DMH")
     assert p.body == "SOME TEXT WITH TRAILING ", (
@@ -814,7 +814,7 @@ def test_grammar_preserves_trailing_whitespace_in_directed_body():
 def test_grammar_preserves_trailing_whitespace_in_unknown_body():
     """For UNKNOWN-kind frames (continuations) the body is the full text;
     trailing whitespace survives lstrip-only."""
-    from minijs8.protocol.grammar import parse as parse_frame
+    from microjs8.protocol.grammar import parse as parse_frame
 
     p = parse_frame(_decoded("RAW CONTINUATION TEXT "), "W5DMH")
     assert p.kind.name == "UNKNOWN"

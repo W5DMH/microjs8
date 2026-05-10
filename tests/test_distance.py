@@ -1,4 +1,4 @@
-"""Tests for minijs8.protocol.distance.
+"""Tests for microjs8.protocol.distance.
 
 Distances between known cities, bearings to verify direction-of-travel
 math, and edge cases.
@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import pytest
 
-from minijs8.protocol.distance import (
+from microjs8.protocol.distance import (
     distance_and_bearing,
     grid_to_latlon_center,
     haversine_distance_km,

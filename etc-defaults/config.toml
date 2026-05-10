@@ -1,16 +1,16 @@
-# MiniJS8 — Default configuration
+# MicroJS8 — Default configuration
 # ================================
 #
-# This file is shipped with the image at /etc/minijs8/config.toml and
-# copied to /var/minijs8/config.toml on first boot if no live config
+# This file is shipped with the image at /etc/microjs8/config.toml and
+# copied to /var/microjs8/config.toml on first boot if no live config
 # exists. Edit the live copy, not this one — this one is on the
 # read-only root partition.
 #
 # After editing the live config, restart the daemon:
-#   sudo systemctl restart minijs8
+#   sudo systemctl restart microjs8
 #
 # To validate the config without starting the daemon:
-#   /opt/minijs8/venv/bin/python -m minijs8 --check-config
+#   /opt/microjs8/venv/bin/python -m microjs8 --check-config
 
 # ── Top-level options ────────────────────────────────────────────────────────
 # (Top-level TOML keys MUST come before any [section] header.)
@@ -31,7 +31,7 @@ grid = ""
 # ── [radio] — radio hardware (Step 6) ────────────────────────────────────────
 [radio]
 # Radio identity. The id selects the hamlib model + baud rate + PTT
-# method from the embedded registry in minijs8.cat.radios.
+# method from the embedded registry in microjs8.cat.radios.
 #
 # Currently supported:
 #   "qdx"  — QRP Labs QDX, hamlib model 2084 (Kenwood TS-480 emulation)

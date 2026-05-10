@@ -1,10 +1,10 @@
-"""Tests for minijs8.ui.state — ring navigation and shutdown bookkeeping."""
+"""Tests for microjs8.ui.state — ring navigation and shutdown bookkeeping."""
 
 from __future__ import annotations
 
 import pytest
 
-from minijs8.ui.state import RING, Screen, UIState
+from microjs8.ui.state import RING, Screen, UIState
 
 
 def _state(callsign: str = "K1ABC", grid: str = "FN42", tx_allowed: bool = True) -> UIState:

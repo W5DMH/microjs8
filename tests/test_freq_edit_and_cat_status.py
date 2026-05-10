@@ -9,9 +9,9 @@ from __future__ import annotations
 
 import pytest
 
-from minijs8.input.events import Key, KeyEvent
-from minijs8.input.router import InputRouter
-from minijs8.ui.state import Screen, UIState
+from microjs8.input.events import Key, KeyEvent
+from microjs8.input.router import InputRouter
+from microjs8.ui.state import Screen, UIState
 
 
 def _state() -> UIState:

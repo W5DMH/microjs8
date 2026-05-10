@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import time
 
-from minijs8.gps.types import FixKind, GpsFix
-from minijs8.ui.state import UIState
+from microjs8.gps.types import FixKind, GpsFix
+from microjs8.ui.state import UIState
 
 
 def _fix(kind: FixKind, lat: float = 42.3, lon: float = -83.0,

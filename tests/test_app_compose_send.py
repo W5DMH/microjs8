@@ -9,9 +9,9 @@ from __future__ import annotations
 from pathlib import Path
 import pytest
 
-from minijs8.app import MiniJS8App
-from minijs8.config import Config, StationConfig
-from minijs8.ui.state import ComposeCmd
+from microjs8.app import MicroJS8App
+from microjs8.config import Config, StationConfig
+from microjs8.ui.state import ComposeCmd
 
 
 class _FakeOutboundQueue:
@@ -32,10 +32,10 @@ class _FakeOutboundQueue:
         return rid
 
 
-def _make_app(grid: str = "EN83") -> MiniJS8App:
+def _make_app(grid: str = "EN83") -> MicroJS8App:
     """Construct a minimal app for unit-testing _compose_send_sync."""
     cfg = Config(station=StationConfig(callsign="W5DMH", grid=grid))
-    app = MiniJS8App(cfg, headless=True)
+    app = MicroJS8App(cfg, headless=True)
     app._outbound_queue = _FakeOutboundQueue()
     return app
 

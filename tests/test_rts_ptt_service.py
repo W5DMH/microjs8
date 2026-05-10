@@ -1,4 +1,4 @@
-"""Tests for minijs8.cat.rts_ptt_service.RtsPttService.
+"""Tests for microjs8.cat.rts_ptt_service.RtsPttService.
 
 The service does three jobs we verify:
 
@@ -20,8 +20,8 @@ from typing import Any
 
 import pytest
 
-from minijs8.cat import rts_ptt_service as service_module
-from minijs8.cat.rts_ptt_service import RtsPttService
+from microjs8.cat import rts_ptt_service as service_module
+from microjs8.cat.rts_ptt_service import RtsPttService
 
 
 @pytest.fixture

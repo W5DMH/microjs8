@@ -1,4 +1,4 @@
-"""Tests for minijs8.gps.grid.
+"""Tests for microjs8.gps.grid.
 
 The grid math is small but the corner cases (poles, antimeridian,
 negative degrees) are easy to get wrong. We use known reference
@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import pytest
 
-from minijs8.gps.grid import latlon_to_grid
+from microjs8.gps.grid import latlon_to_grid
 
 
 # Reference points: (lat, lon, expected_6char_grid).

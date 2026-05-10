@@ -1,4 +1,4 @@
-"""Tests for systemd/minijs8-rigctld-launcher.
+"""Tests for systemd/microjs8-rigctld-launcher.
 
 The launcher is a shell script (intentionally — see comments in the
 script itself), so we exercise it via subprocess in --dry-run mode.
@@ -7,7 +7,7 @@ rigctld command line that would be exec'd, which is exactly what we
 want to assert on.
 
 We test:
-  * Default config path is /var/minijs8/config.toml (the LIVE config,
+  * Default config path is /var/microjs8/config.toml (the LIVE config,
     not the shipped template at /etc/) — this matters because the UI
     cycle handler writes only to /var, and a launcher reading /etc
     would silently use stale radio_id values.
@@ -28,7 +28,7 @@ from pathlib import Path
 import pytest
 
 
-LAUNCHER_PATH = Path(__file__).parent.parent / "systemd" / "minijs8-rigctld-launcher"
+LAUNCHER_PATH = Path(__file__).parent.parent / "systemd" / "microjs8-rigctld-launcher"
 
 
 # ── Module-level guard: skip if shell launcher missing or unreadable
@@ -41,7 +41,7 @@ def _launcher_present():
 
 
 def _run_launcher(config_path: Path, *, dry_run: bool = True) -> subprocess.CompletedProcess:
-    """Run the launcher with MINIJS8_CONFIG pointing at config_path.
+    """Run the launcher with MICROJS8_CONFIG pointing at config_path.
 
     Returns the CompletedProcess (including stdout, stderr, returncode).
     Always passes --dry-run by default so we don't try to exec rigctld
@@ -50,7 +50,7 @@ def _run_launcher(config_path: Path, *, dry_run: bool = True) -> subprocess.Comp
     args = [str(LAUNCHER_PATH)]
     if dry_run:
         args.append("--dry-run")
-    env = {**os.environ, "MINIJS8_CONFIG": str(config_path)}
+    env = {**os.environ, "MICROJS8_CONFIG": str(config_path)}
     return subprocess.run(
         args,
         env=env,
@@ -63,8 +63,8 @@ def _run_launcher(config_path: Path, *, dry_run: bool = True) -> subprocess.Comp
 # ── Default-path defense ────────────────────────────────────────────
 
 
-def test_launcher_default_config_path_is_var_minijs8():
-    """The launcher's default CONFIG_FILE must be /var/minijs8/config.toml.
+def test_launcher_default_config_path_is_var_microjs8():
+    """The launcher's default CONFIG_FILE must be /var/microjs8/config.toml.
 
     This is the path the daemon and config.save_atomic() use as the
     LIVE config. Reading the shipped template at /etc/ would mean the
@@ -74,15 +74,15 @@ def test_launcher_default_config_path_is_var_minijs8():
     text = LAUNCHER_PATH.read_text()
     # The default value comes from the parameter expansion in the
     # CONFIG_FILE assignment. We grep for the exact path string —
-    # if anyone changes the default away from /var/minijs8/, this
+    # if anyone changes the default away from /var/microjs8/, this
     # fails loudly.
-    assert "${MINIJS8_CONFIG:-/var/minijs8/config.toml}" in text, (
-        "launcher default config path must be /var/minijs8/config.toml; "
+    assert "${MICROJS8_CONFIG:-/var/microjs8/config.toml}" in text, (
+        "launcher default config path must be /var/microjs8/config.toml; "
         "any other path will be out of sync with config.save_atomic()'s "
         "write target"
     )
-    # And explicitly: NOT /etc/minijs8/config.toml as the default.
-    assert "${MINIJS8_CONFIG:-/etc/minijs8/config.toml}" not in text
+    # And explicitly: NOT /etc/microjs8/config.toml as the default.
+    assert "${MICROJS8_CONFIG:-/etc/microjs8/config.toml}" not in text
 
 
 # ── Radio profile dispatch (parameter-driven) ───────────────────────

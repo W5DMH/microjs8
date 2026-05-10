@@ -9,8 +9,8 @@ from __future__ import annotations
 
 import pytest
 
-from minijs8.protocol.types import HeardStation
-from minijs8.ui.state import (
+from microjs8.protocol.types import HeardStation
+from microjs8.ui.state import (
     COMPOSE_CMD_ORDER,
     ComposeCmd,
     Screen,

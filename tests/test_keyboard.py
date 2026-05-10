@@ -1,4 +1,4 @@
-"""Tests for minijs8.input.keyboard.
+"""Tests for microjs8.input.keyboard.
 
 We don't open real /dev/input/eventN — instead we use a fake evdev
 device that yields scripted events. This validates the keymap +
@@ -21,8 +21,8 @@ from unittest import mock
 
 import pytest
 
-from minijs8.input.events import Key, KeyEvent
-from minijs8.input.keyboard import (
+from microjs8.input.events import Key, KeyEvent
+from microjs8.input.keyboard import (
     KeyboardThread,
     find_keyboard_device,
 )
@@ -42,7 +42,7 @@ def test_find_keyboard_device_prefers_by_id(tmp_path, monkeypatch):
     link.symlink_to(target)
 
     monkeypatch.setattr(
-        "minijs8.input.keyboard.glob.glob",
+        "microjs8.input.keyboard.glob.glob",
         lambda pat: [str(link)] if "by-id" in pat else [],
     )
     found = find_keyboard_device()
@@ -50,7 +50,7 @@ def test_find_keyboard_device_prefers_by_id(tmp_path, monkeypatch):
 
 
 def test_find_keyboard_device_returns_none_when_absent(monkeypatch):
-    monkeypatch.setattr("minijs8.input.keyboard.glob.glob", lambda pat: [])
+    monkeypatch.setattr("microjs8.input.keyboard.glob.glob", lambda pat: [])
     assert find_keyboard_device() is None
 
 

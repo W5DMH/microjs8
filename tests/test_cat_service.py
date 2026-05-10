@@ -1,4 +1,4 @@
-"""Tests for minijs8.cat.service.CatService.
+"""Tests for microjs8.cat.service.CatService.
 
 The service does three jobs we need to verify:
 
@@ -16,8 +16,8 @@ from typing import Callable
 
 import pytest
 
-from minijs8.cat import service as service_module
-from minijs8.cat.service import CatService
+from microjs8.cat import service as service_module
+from microjs8.cat.service import CatService
 
 
 # ── Tiny rigctld fake — same shape as test_rigctl_client.py ─────────

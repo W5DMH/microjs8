@@ -1,4 +1,4 @@
-"""Tests for minijs8.tx.queue.OutboundQueue.
+"""Tests for microjs8.tx.queue.OutboundQueue.
 
 Covers state transitions, FIFO order, queue depth cap, ACK matching,
 and timeout sweep — all the behavior the scheduler depends on.
@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-from minijs8.tx.queue import (
+from microjs8.tx.queue import (
     ACK_TIMEOUT_S,
     MAX_ATTEMPTS,
     OutboundKind,
@@ -422,7 +422,7 @@ def test_enqueue_depth_includes_encoding_rows(queue):
     """The queue-full check counts ENCODING rows toward the depth
     limit. Otherwise you could OOM the encoder by spamming
     enqueue_for_encoding."""
-    from minijs8.tx.queue import QUEUE_DEPTH
+    from microjs8.tx.queue import QUEUE_DEPTH
 
     # Fill the queue with ENCODING rows.
     ids = []
