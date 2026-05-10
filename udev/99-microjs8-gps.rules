@@ -1,0 +1,11 @@
+# MicroJS8 — u-blox 7 GPS dongle stable name
+# ==========================================
+#
+# Creates /dev/gps -> the u-blox 7 GLONASS USB dongle's serial port.
+# VID:PID 1546:01a7 is the u-blox AG / "u-blox 7 - GPS/GNSS Receiver"
+# descriptor used by the common USB stick form factor.
+#
+# Confirmed working with this VID:PID in the previous JS8Mesh build.
+
+SUBSYSTEM=="tty", ATTRS{idVendor}=="1546", ATTRS{idProduct}=="01a7", \
+    SYMLINK+="gps", GROUP="dialout", MODE="0660"

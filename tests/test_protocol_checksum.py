@@ -14,7 +14,7 @@ corrupt frames is well-defined.
 
 from __future__ import annotations
 
-from minijs8.protocol.checksum import (
+from microjs8.protocol.checksum import (
     crc16_kermit,
     pack16bits,
     checksum16,

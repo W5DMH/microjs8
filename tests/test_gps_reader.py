@@ -1,4 +1,4 @@
-"""Tests for minijs8.gps.reader.GpsReader.
+"""Tests for microjs8.gps.reader.GpsReader.
 
 Like the keyboard tests, we don't connect to a real gpsd. We inject a
 fake client whose stream() yields scripted fixes, so we can validate
@@ -14,9 +14,9 @@ from typing import Iterator, Optional
 
 import pytest
 
-from minijs8.gps.gpsd_client import GpsdClient
-from minijs8.gps.reader import GpsReader
-from minijs8.gps.types import FixKind, GpsFix
+from microjs8.gps.gpsd_client import GpsdClient
+from microjs8.gps.reader import GpsReader
+from microjs8.gps.types import FixKind, GpsFix
 
 
 def _make_fix(kind: FixKind, lat: float = 42.0, lon: float = -83.0) -> GpsFix:

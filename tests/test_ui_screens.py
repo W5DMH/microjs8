@@ -1,4 +1,4 @@
-"""Tests for minijs8.ui.screens.
+"""Tests for microjs8.ui.screens.
 
 Each screen must render a 240x240 RGB image without raising. We do not
 assert anything pixel-perfect — that's a visual-inspection job — but we
@@ -12,10 +12,10 @@ from __future__ import annotations
 import pytest
 from PIL import Image
 
-from minijs8.ui import theme
-from minijs8.ui.fonts import load_fonts
-from minijs8.ui.screens import render
-from minijs8.ui.state import Screen, UISnapshot
+from microjs8.ui import theme
+from microjs8.ui.fonts import load_fonts
+from microjs8.ui.screens import render
+from microjs8.ui.state import Screen, UISnapshot
 
 
 @pytest.fixture(scope="module")
@@ -102,7 +102,7 @@ def test_renderer_exception_returns_error_frame(fonts):
         tx_allowed=ok.tx_allowed,
     ) if False else replace(ok)
     # Cheaper: monkey-patch the dispatch table to inject a raising renderer.
-    from minijs8.ui import screens as scr_mod
+    from microjs8.ui import screens as scr_mod
 
     def boom(state, fonts):
         raise RuntimeError("synthetic renderer failure")
@@ -124,7 +124,7 @@ def test_renderer_exception_returns_error_frame(fonts):
 def test_setup_rows_includes_radio_row():
     """The Setup screen must expose a Radio row keyed 'radio' so the
     router can identify it for cycle-on-Enter dispatch."""
-    from minijs8.ui.screens import _setup_rows
+    from microjs8.ui.screens import _setup_rows
 
     snap = _snapshot(Screen.SETUP)
     rows = _setup_rows(snap)
@@ -142,8 +142,8 @@ def test_setup_radio_row_shows_display_name():
     """The displayed value for the radio row must be the human-
     readable display_name from the registry, not the raw id. (e.g.
     "QRP Labs QDX" rather than "qdx".)"""
-    from minijs8.cat.radios import get_radio
-    from minijs8.ui.screens import _setup_rows
+    from microjs8.cat.radios import get_radio
+    from microjs8.ui.screens import _setup_rows
 
     snap = _snapshot(Screen.SETUP)
     # _snapshot builds with default radio_id="qdx".
@@ -158,7 +158,7 @@ def test_setup_radio_row_falls_back_to_raw_id_when_unknown():
     row should display the raw id rather than crash. Defense-in-depth
     against a registry/config drift bug."""
     from dataclasses import replace
-    from minijs8.ui.screens import _setup_rows
+    from microjs8.ui.screens import _setup_rows
 
     snap = _snapshot(Screen.SETUP)
     # Inject an id that the registry won't know.
@@ -182,14 +182,14 @@ def test_setup_screen_renders_with_radio_focused(fonts):
 # ── Inbox / mailbox renderers (INBOX screen) ─────────────────────────
 
 
-from minijs8.ui.screens import (
+from microjs8.ui.screens import (
     _render_inbox,
     _render_inbox_detail,
     _format_inbox_time,
     _format_inbox_full_time,
     _wrap_message_body,
 )
-from minijs8.ui.state import InboxRow
+from microjs8.ui.state import InboxRow
 
 
 def _inbox_row(
@@ -387,7 +387,7 @@ def test_home_screen_renders_inbox_indicator_when_held(fonts):
         inbox_held_count=3,
         inbox_unread_count=1,
     )
-    from minijs8.ui.screens import render
+    from microjs8.ui.screens import render
     img = render(snap, fonts)
     assert img.size == (theme.SCREEN_W, theme.SCREEN_H)
 
@@ -395,8 +395,8 @@ def test_home_screen_renders_inbox_indicator_when_held(fonts):
 # ── Directed activity log (chat-style DIRECTED screen) ──────────────
 
 
-from minijs8.activity import DirectedActivityEntry, Direction
-from minijs8.ui.screens import _render_directed as _render_directed_log
+from microjs8.activity import DirectedActivityEntry, Direction
+from microjs8.ui.screens import _render_directed as _render_directed_log
 
 
 def _activity_in(
@@ -499,7 +499,7 @@ def test_directed_log_long_body_does_not_overflow(fonts):
 def test_directed_log_render_via_dispatcher(fonts):
     """render() dispatches Screen.DIRECTED to the activity-log renderer
     (regression guard against the renderer dict mapping breaking)."""
-    from minijs8.ui.screens import render
+    from microjs8.ui.screens import render
     snap = _directed_snapshot((
         _activity_in(from_call="K1ABC", verb="GRID?"),
     ))
@@ -509,7 +509,7 @@ def test_directed_log_render_via_dispatcher(fonts):
 
 def test_inbox_render_via_dispatcher(fonts):
     """render() dispatches Screen.INBOX to the inbox renderer."""
-    from minijs8.ui.screens import render
+    from microjs8.ui.screens import render
     snap = _inbox_snapshot(
         messages=(_inbox_row(),),
         unread=1, screen=Screen.INBOX,
@@ -573,7 +573,7 @@ def test_header_time_format_includes_utc_prefix():
     UTC label tells the operator at a glance that the time is the
     ham-radio reference (not local), and the format keeps fixed
     width so right-alignment doesn't jitter as the seconds tick."""
-    from minijs8.ui.screens import _format_time_for_header
+    from microjs8.ui.screens import _format_time_for_header
     snap = _snapshot(Screen.HOME)
     s = _format_time_for_header(snap)
     # 12 chars wide: "UTC " + "HH:MM:SS"
@@ -601,7 +601,7 @@ def test_header_clock_is_always_white_regardless_of_source(fonts):
     """
     from PIL import Image, ImageDraw
     from dataclasses import replace
-    from minijs8.ui.screens import _draw_header
+    from microjs8.ui.screens import _draw_header
 
     for src in ("chrony", "consensus", ""):
         snap = replace(_snapshot(Screen.DIRECTED), time_source=src)
@@ -640,7 +640,7 @@ def test_home_screen_no_longer_has_time_row(fonts):
 
 def test_home_timesrc_label_chrony_says_utc():
     """HOME's TimeSrc row spells out the source — UTC for chrony."""
-    from minijs8.ui.screens import _time_source_label
+    from microjs8.ui.screens import _time_source_label
     from dataclasses import replace
     snap = replace(_snapshot(Screen.HOME), time_source="chrony")
     label, color = _time_source_label(snap)
@@ -650,7 +650,7 @@ def test_home_timesrc_label_chrony_says_utc():
 
 def test_home_timesrc_label_consensus_says_consensus():
     """HOME's TimeSrc row spells out the source — CONSENSUS for radio-derived."""
-    from minijs8.ui.screens import _time_source_label
+    from microjs8.ui.screens import _time_source_label
     from dataclasses import replace
     snap = replace(_snapshot(Screen.HOME), time_source="consensus")
     label, color = _time_source_label(snap)
@@ -661,7 +661,7 @@ def test_home_timesrc_label_consensus_says_consensus():
 def test_home_timesrc_label_no_source_says_none_dim():
     """HOME's TimeSrc row says NONE when neither source is usable —
     color dim so operator sees TX is blocked at a glance."""
-    from minijs8.ui.screens import _time_source_label
+    from microjs8.ui.screens import _time_source_label
     snap = _snapshot(Screen.HOME)  # default time_source is empty
     label, color = _time_source_label(snap)
     assert label == "NONE"
@@ -698,7 +698,7 @@ def test_header_clock_renders_in_right_region(fonts):
     used to overlap with long titles like 'EMERGENCY' or 'DIRECTED
     MENU'. Pixels light up in the right column when rendered."""
     from PIL import Image, ImageDraw
-    from minijs8.ui.screens import _draw_header
+    from microjs8.ui.screens import _draw_header
     from dataclasses import replace
     snap = replace(_snapshot(Screen.DIRECTED), time_source="chrony")
     img = Image.new("RGB", (theme.SCREEN_W, theme.SCREEN_H), theme.BG)
@@ -728,7 +728,7 @@ def test_header_clock_does_not_overlap_long_title(fonts):
     Sanity check: there should be a gap of unpainted pixels between
     the title's right edge and the clock's left edge."""
     from PIL import Image, ImageDraw
-    from minijs8.ui.screens import _draw_header
+    from microjs8.ui.screens import _draw_header
     from dataclasses import replace
     snap = replace(_snapshot(Screen.DIRECTED_MENU), time_source="chrony")
     img = Image.new("RGB", (theme.SCREEN_W, theme.SCREEN_H), theme.BG)
@@ -760,7 +760,7 @@ def test_header_does_not_render_position_indicator(fonts):
     no '/' character renders anywhere in the header band on a normal
     screen."""
     from PIL import Image, ImageDraw
-    from minijs8.ui.screens import _draw_header
+    from microjs8.ui.screens import _draw_header
     snap = _snapshot(Screen.DIRECTED)
     img = Image.new("RGB", (theme.SCREEN_W, theme.SCREEN_H), theme.BG)
     draw = ImageDraw.Draw(img)
@@ -835,7 +835,7 @@ def test_directed_log_inbound_body_does_not_render_in_red(fonts):
 
 
 def _compose_snapshot(*, tx_allowed: bool = True, time_source: str = "chrony"):
-    from minijs8.ui.state import ComposeCmd
+    from microjs8.ui.state import ComposeCmd
     return UISnapshot(
         screen=Screen.COMPOSE,
         callsign="W5DMH", grid="EN83", units="miles",
@@ -852,7 +852,7 @@ def test_compose_warns_when_no_time_source(fonts):
     scheduler won't fire — we surface this on COMPOSE so the operator
     knows their SEND will queue but not transmit immediately. Detect
     by sampling for warn-colored pixels (~240,180,40 = FG_WARN)."""
-    from minijs8.ui.screens import _render_compose
+    from microjs8.ui.screens import _render_compose
     snap = _compose_snapshot(time_source="")
     img = _render_compose(snap, fonts)
     found_warn = False
@@ -874,7 +874,7 @@ def test_compose_no_warning_when_time_synced(fonts):
     """When time is synced (chrony or consensus), no warning shows —
     UI is clean. Sample for warn-colored pixels in body and assert
     none present."""
-    from minijs8.ui.screens import _render_compose
+    from microjs8.ui.screens import _render_compose
     snap = _compose_snapshot(time_source="chrony")
     img = _render_compose(snap, fonts)
     for x in range(theme.SCREEN_W):

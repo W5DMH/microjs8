@@ -1,4 +1,4 @@
-"""Tests for minijs8.app — orchestrator lifecycle.
+"""Tests for microjs8.app — orchestrator lifecycle.
 
 These tests verify the asyncio loop wiring without touching any
 hardware. They are runnable on the Pi 4 build host as well as a
@@ -12,8 +12,8 @@ import signal
 
 import pytest
 
-from minijs8.app import MiniJS8App
-from minijs8.config import Config, StationConfig
+from microjs8.app import MicroJS8App
+from microjs8.config import Config, StationConfig
 
 
 def _make_config(*, configured: bool) -> Config:
@@ -26,7 +26,7 @@ def _make_config(*, configured: bool) -> Config:
 
 async def test_run_returns_when_stop_requested():
     """request_stop() must cause run() to return promptly."""
-    app = MiniJS8App(_make_config(configured=True), headless=True)
+    app = MicroJS8App(_make_config(configured=True), headless=True)
 
     async def stopper() -> None:
         await asyncio.sleep(0.05)
@@ -40,7 +40,7 @@ async def test_run_returns_when_stop_requested():
 
 async def test_run_returns_on_sigterm():
     """Sending SIGTERM to ourselves must shut the app down cleanly."""
-    app = MiniJS8App(_make_config(configured=True), headless=True)
+    app = MicroJS8App(_make_config(configured=True), headless=True)
 
     async def kicker() -> None:
         # Give run() a moment to install the signal handler.
@@ -55,7 +55,7 @@ async def test_run_returns_on_sigterm():
 
 async def test_request_stop_is_idempotent():
     """Calling request_stop() multiple times must be safe."""
-    app = MiniJS8App(_make_config(configured=True), headless=True)
+    app = MicroJS8App(_make_config(configured=True), headless=True)
 
     async def multi_stop() -> None:
         await asyncio.sleep(0.05)
@@ -75,7 +75,7 @@ async def test_runs_with_unconfigured_station():
     TX is gated separately; the daemon must boot regardless so the operator
     can use the (future) on-device setup wizard.
     """
-    app = MiniJS8App(_make_config(configured=False), headless=True)
+    app = MicroJS8App(_make_config(configured=False), headless=True)
 
     async def stopper() -> None:
         await asyncio.sleep(0.05)

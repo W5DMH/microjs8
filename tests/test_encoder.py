@@ -1,4 +1,4 @@
-"""Tests for minijs8.modem.encoder.
+"""Tests for microjs8.modem.encoder.
 
 We don't need the real gfsk8 .so; we inject a stub via sys.modules so
 tests can run on any host. The stub mimics the actual API surface
@@ -17,7 +17,7 @@ from typing import Any
 import numpy as np
 import pytest
 
-from minijs8.modem.encoder import (
+from microjs8.modem.encoder import (
     DEFAULT_AUDIO_FREQ_HZ,
     EncoderError,
     SUBMODE_FAST,
@@ -343,7 +343,7 @@ def test_encode_preserves_silence_prefix_unconditionally(fake_gfsk8):
     Encoder input rate (gfsk8 native) is 12 kHz; output rate is 48 kHz
     after the polyphase resample, so the buffer is 4× larger.
     """
-    from minijs8.modem.encoder import SILENCE_PREFIX_SAMPLES
+    from microjs8.modem.encoder import SILENCE_PREFIX_SAMPLES
     # gfsk8 native 12 kHz: 500 ms silence = 6000 samples,
     # 12.64 s modulation = 151680 samples.
     silence_samples_12k = 6000

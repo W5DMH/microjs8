@@ -1,4 +1,4 @@
-"""Tests for minijs8.cat.rigctl_client.RigctlClient.
+"""Tests for microjs8.cat.rigctl_client.RigctlClient.
 
 We don't need a real rigctld. We bind a real socket to a high port and
 script responses byte-for-byte — that exercises the full
@@ -19,7 +19,7 @@ from typing import Callable
 
 import pytest
 
-from minijs8.cat.rigctl_client import (
+from microjs8.cat.rigctl_client import (
     RigctlClient,
     RigctlError,
     RigctlNotOk,

@@ -1,6 +1,6 @@
 """Tests for app.py inbox-dispatch logic (Phase 1+2).
 
-These tests exercise the inbox state machine in MiniJS8App by:
+These tests exercise the inbox state machine in MicroJS8App by:
 
   1. Constructing an app with a real MailboxStore (tmp DB) but with
      OutboundQueue and other heavy components stubbed out as fakes.
@@ -21,15 +21,15 @@ from typing import Optional
 
 import pytest
 
-from minijs8.app import MiniJS8App
-from minijs8.config import Config, StationConfig
-from minijs8.protocol.types import (
+from microjs8.app import MicroJS8App
+from microjs8.config import Config, StationConfig
+from microjs8.protocol.types import (
     DecodedFrame,
     FrameKind,
     ParsedFrame,
 )
-from minijs8.store.inbox import MailboxStore, TYPE_STORE, TYPE_UNREAD
-from minijs8.tx.queue import OutboundKind
+from microjs8.store.inbox import MailboxStore, TYPE_STORE, TYPE_UNREAD
+from microjs8.tx.queue import OutboundKind
 
 
 # ── Fakes ───────────────────────────────────────────────────────────
@@ -79,7 +79,7 @@ class _FakeOutboundQueue:
 # ── Fixture ────────────────────────────────────────────────────────
 
 
-def _make_app(tmp_path: Path) -> MiniJS8App:
+def _make_app(tmp_path: Path) -> MicroJS8App:
     """Construct a minimal app for unit-testing _dispatch_inbox.
 
     Wires in a real MailboxStore (tmp DB) so we can assert on
@@ -87,7 +87,7 @@ def _make_app(tmp_path: Path) -> MiniJS8App:
     starters are bypassed — we only need the dispatcher methods.
     """
     cfg = Config(station=StationConfig(callsign="W5DMH", grid="EN83"))
-    app = MiniJS8App(cfg, headless=True)
+    app = MicroJS8App(cfg, headless=True)
 
     # Real mailbox store — exercises the actual schema & SQL.
     app._mailbox = MailboxStore(tmp_path / "inbox.db")

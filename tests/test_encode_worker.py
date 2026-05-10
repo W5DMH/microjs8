@@ -1,4 +1,4 @@
-"""Tests for minijs8.tx.encode_worker.
+"""Tests for microjs8.tx.encode_worker.
 
 Covers EncodedAudioCache (thread-safe in-memory dict) and EncodeWorker
 (background thread that encodes ENCODING-state rows).
@@ -14,12 +14,12 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from minijs8.modem.encoder import EncoderError
-from minijs8.tx.encode_worker import (
+from microjs8.modem.encoder import EncoderError
+from microjs8.tx.encode_worker import (
     EncodedAudioCache,
     EncodeWorker,
 )
-from minijs8.tx.queue import (
+from microjs8.tx.queue import (
     OutboundKind,
     OutboundQueue,
     OutboundState,

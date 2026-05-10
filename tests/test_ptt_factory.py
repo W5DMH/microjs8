@@ -1,10 +1,10 @@
-"""Tests for minijs8.cat.ptt_factory.build_ptt_service."""
+"""Tests for microjs8.cat.ptt_factory.build_ptt_service."""
 
 from __future__ import annotations
 
 import pytest
 
-from minijs8.cat import (
+from microjs8.cat import (
     DIGIRIG_RTS_ONLY,
     QDX,
     XIEGU_G90_DIGIRIG,

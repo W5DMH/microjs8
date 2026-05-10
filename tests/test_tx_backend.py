@@ -1,4 +1,4 @@
-"""Tests for minijs8.tx.tx_backend — RealTxBackend and FakeTxBackend.
+"""Tests for microjs8.tx.tx_backend — RealTxBackend and FakeTxBackend.
 
 Most of Step 6 will use FakeTxBackend; we verify both here. RealTxBackend
 gets exercised against doubles for the encoder, playback, and CAT.
@@ -13,9 +13,9 @@ from typing import Any, Optional
 import numpy as np
 import pytest
 
-from minijs8.cat.radios import QDX, RadioDef
-from minijs8.modem.encoder import EncoderError
-from minijs8.tx.tx_backend import (
+from microjs8.cat.radios import QDX, RadioDef
+from microjs8.modem.encoder import EncoderError
+from microjs8.tx.tx_backend import (
     FakeTxBackend,
     RealTxBackend,
     TxResult,
@@ -106,12 +106,12 @@ def deterministic_tx_time(monkeypatch):
         alignment math.
 
     Tests that need to exercise the "too late" path can override this
-    with their own monkeypatch of ``minijs8.tx.tx_backend.time.time``.
+    with their own monkeypatch of ``microjs8.tx.tx_backend.time.time``.
     """
     fixed = 1_700_000_010.1  # 100 ms into a slot (slot starts at xx10)
     # Patch only the time module reference inside tx_backend so other
     # uses of time.time elsewhere stay real.
-    import minijs8.tx.tx_backend as txb
+    import microjs8.tx.tx_backend as txb
 
     original_time = txb.time.time
     monkeypatch.setattr(txb.time, "time", lambda: fixed)
@@ -548,7 +548,7 @@ def test_align_strips_protocol_silence_then_pads_to_500ms(
     + 12.64s of modulation @ 48kHz (the protocol silence is stripped,
     fresh silence is computed using JS8Call's round-up formula).
     """
-    import minijs8.tx.tx_backend as txb
+    import microjs8.tx.tx_backend as txb
     # 100 ms into a slot — target silence is 400 ms.
     monkeypatch.setattr(txb.time, "time", lambda: 1_700_000_010.1)
 
@@ -580,7 +580,7 @@ def test_align_full_500ms_silence_at_slot_boundary(
 ):
     """At exactly slot start (mstr=0), JS8Call's round-up formula
     emits a full 500 ms period (24000 samples @ 48k) of silence."""
-    import minijs8.tx.tx_backend as txb
+    import microjs8.tx.tx_backend as txb
     # Exactly at slot boundary.
     monkeypatch.setattr(txb.time, "time", lambda: 1_700_000_010.0)
 
@@ -605,7 +605,7 @@ def test_align_past_target_rounds_up_to_next_boundary(
     At mstr=600ms, we're 100ms past the 500ms boundary. Modulation
     should land at the next boundary (slot+1000ms), so we emit 400 ms
     of silence (= 19200 samples @ 48 kHz)."""
-    import minijs8.tx.tx_backend as txb
+    import microjs8.tx.tx_backend as txb
     # 600 ms into a slot — past the 500 ms target.
     monkeypatch.setattr(txb.time, "time", lambda: 1_700_000_010.6)
 
@@ -633,7 +633,7 @@ def test_align_past_target_keeps_ptt_keyed_normally(
     """When wall-clock is past target, JS8Call's round-up formula
     means we still TX successfully (just one boundary later), and
     the burst lifecycle is normal — one ptt_on, one ptt_off."""
-    import minijs8.tx.tx_backend as txb
+    import microjs8.tx.tx_backend as txb
     monkeypatch.setattr(txb.time, "time", lambda: 1_700_000_010.6)
 
     backend = _make_real_backend(fake_gfsk8)

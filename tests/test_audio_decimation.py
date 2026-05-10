@@ -11,7 +11,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from minijs8.audio.capture import (
+from microjs8.audio.capture import (
     AudioCapture,
     CAPTURE_DECIMATION,
     CAPTURE_SAMPLE_RATE,

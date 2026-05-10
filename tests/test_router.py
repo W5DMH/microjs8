@@ -1,4 +1,4 @@
-"""Tests for minijs8.input.router.
+"""Tests for microjs8.input.router.
 
 The router is pure functional logic — no I/O — so we drive it directly
 with synthetic KeyEvents and assert on UIState afterward.
@@ -8,9 +8,9 @@ from __future__ import annotations
 
 import pytest
 
-from minijs8.input.events import Key, KeyEvent
-from minijs8.input.router import InputRouter
-from minijs8.ui.state import RING, Screen, UIState
+from microjs8.input.events import Key, KeyEvent
+from microjs8.input.router import InputRouter
+from microjs8.ui.state import RING, Screen, UIState
 
 
 # ── Fixtures ─────────────────────────────────────────────────────────
@@ -392,7 +392,7 @@ def test_typing_directly_does_not_auto_edit_radio():
 # ── Inbox / mailbox key handling (Phase 1+2) ────────────────────────
 
 
-from minijs8.store.inbox import InboxRecord
+from microjs8.store.inbox import InboxRecord
 
 
 def _inbox_records(*specs):
@@ -851,7 +851,7 @@ def _router_with_compose_callback(state, accept=True):
 
 def test_compose_tab_cycles_through_four_fields():
     """Tab on COMPOSE moves focus TO → CMD → TEXT → SEND → TO."""
-    from minijs8.ui.state import ComposeCmd  # noqa: F401
+    from microjs8.ui.state import ComposeCmd  # noqa: F401
 
     s = _state(screen=Screen.COMPOSE)
     r, _ = _router_with_compose_callback(s)
@@ -901,7 +901,7 @@ def test_compose_typing_in_text_preserves_case_and_spaces():
 def test_compose_up_down_on_cmd_cycles_dropdown():
     """↑/↓ when CMD focused cycles the enum; on other fields it
     falls through (returns False) so global keys can still work."""
-    from minijs8.ui.state import ComposeCmd, COMPOSE_CMD_ORDER
+    from microjs8.ui.state import ComposeCmd, COMPOSE_CMD_ORDER
 
     s = _state(screen=Screen.COMPOSE)
     r, _ = _router_with_compose_callback(s)
@@ -937,7 +937,7 @@ def test_compose_enter_on_send_fires_callback_and_jumps_to_directed():
     """Enter on the SEND field invokes compose_send with (to, cmd,
     text), clears the compose state, and jumps to DIRECTED so the
     operator sees their TX'd message land in the activity log."""
-    from minijs8.ui.state import ComposeCmd
+    from microjs8.ui.state import ComposeCmd
 
     s = _state(screen=Screen.COMPOSE)
     s.compose_set_to("K1ABC")

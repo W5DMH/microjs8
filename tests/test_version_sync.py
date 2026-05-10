@@ -11,7 +11,7 @@ import re
 import tomllib
 from pathlib import Path
 
-from minijs8 import __version__
+from microjs8 import __version__
 
 
 def test_version_matches_pyproject():
@@ -22,7 +22,7 @@ def test_version_matches_pyproject():
     declared = data["project"]["version"]
     assert declared == __version__, (
         f"version mismatch: pyproject.toml says {declared!r}, "
-        f"src/minijs8/version.py says {__version__!r}; "
+        f"src/microjs8/version.py says {__version__!r}; "
         f"update both"
     )
 

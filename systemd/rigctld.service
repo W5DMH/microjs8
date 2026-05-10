@@ -3,14 +3,14 @@
 # ==========================================
 #
 # Owns the configured radio's CAT serial port and exposes a TCP
-# protocol on localhost:4532. Our minijs8 daemon connects to this
+# protocol on localhost:4532. Our microjs8 daemon connects to this
 # and issues PTT / frequency commands.
 #
 # Multi-radio support
 # -------------------
 # As of the DigiRig commit, this unit runs the launcher script
-# ``/usr/local/bin/minijs8-rigctld-launcher`` which inspects
-# /etc/minijs8/config.toml and picks the right rigctld arguments
+# ``/usr/local/bin/microjs8-rigctld-launcher`` which inspects
+# /etc/microjs8/config.toml and picks the right rigctld arguments
 # for the configured radio:
 #
 #   * qdx              → rigctld -m 2028 -r /dev/serial/by-id/...QDX...
@@ -36,7 +36,7 @@
 # Diagnostic
 # ----------
 # Test the launcher's args without actually starting rigctld:
-#     /usr/local/bin/minijs8-rigctld-launcher --dry-run
+#     /usr/local/bin/microjs8-rigctld-launcher --dry-run
 #
 # Operators can talk directly to rigctld from any shell when this
 # service is running:
@@ -54,18 +54,18 @@ Documentation=https://hamlib.sourceforge.net/manuals/4.5/rigctld.html
 [Service]
 Type=simple
 
-# The launcher reads /etc/minijs8/config.toml and execs rigctld with
+# The launcher reads /etc/microjs8/config.toml and execs rigctld with
 # the right args. The launcher itself can also exit 0 without ever
 # starting rigctld — for radios that don't need CAT (like the
 # DigiRig RTS-only path). Type=simple + that exit pattern means
 # systemd will treat the unit as "started successfully and finished"
 # in the no-CAT case, which is what we want.
-ExecStart=/usr/local/bin/minijs8-rigctld-launcher
+ExecStart=/usr/local/bin/microjs8-rigctld-launcher
 
-# Run as the minijs8 user — same group ownership as our daemon, so
+# Run as the microjs8 user — same group ownership as our daemon, so
 # we only have to give one user permission to /dev/serial/by-id/...
 # and /dev/digirig.
-User=minijs8
+User=microjs8
 Group=dialout
 
 # Restart aggressively. If rigctld dies mid-session (USB unplug,

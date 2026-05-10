@@ -3,13 +3,13 @@ requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "minijs8"
+name = "microjs8"
 version = "0.1.0"
 description = "JS8 transceiver application for Raspberry Pi (Pi Zero 2W)."
 readme = "README.md"
 requires-python = ">=3.11"
 license = "LicenseRef-Proprietary"
-authors = [{name = "MiniJS8 project"}]
+authors = [{name = "MicroJS8 project"}]
 
 # Step 2 + 3 + 4 + 5 deps:
 #   Pillow                                   — image composition for screens
@@ -51,7 +51,7 @@ dev = [
 ]
 
 [project.scripts]
-minijs8 = "minijs8.__main__:main"
+microjs8 = "microjs8.__main__:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}

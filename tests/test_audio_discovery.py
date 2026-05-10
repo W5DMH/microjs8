@@ -1,4 +1,4 @@
-"""Tests for minijs8.audio.discovery.
+"""Tests for microjs8.audio.discovery.
 
 The retry-on-cold-boot path needs explicit coverage. We don't actually
 open PortAudio; we monkey-patch ``sounddevice.query_devices`` and the
@@ -12,7 +12,7 @@ import time
 
 import pytest
 
-from minijs8.audio import discovery
+from microjs8.audio import discovery
 
 
 @pytest.fixture

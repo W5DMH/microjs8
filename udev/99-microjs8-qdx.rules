@@ -1,0 +1,71 @@
+# MicroJS8 — QDX USB serial port stable name + autostart trigger
+# =====================================================================
+#
+# The QDX exposes TWO CDC-ACM virtual serial ports:
+#   Interface 0 (if00)  CAT control     ← what we want
+#   Interface 1 (if01)  debug / terminal
+#
+# We match interface 0 only and create /dev/qdx pointing at it. The
+# kernel also creates /dev/serial/by-id/usb-QRP_Labs_QDX_Transceiver-if00
+# automatically for any USB serial device — that's the canonical
+# stable name and what rigctld.service actually opens. /dev/qdx is a
+# convenience for shell users.
+#
+# Lifecycle integration with rigctld
+# ----------------------------------
+# Two complementary actions:
+#
+#   ADD (QDX appears):
+#     TAG+="systemd" + ENV{SYSTEMD_WANTS}+="rigctld.service" tells
+#     systemd to start (or restart) rigctld whenever the QDX is
+#     plugged in or comes back from a USB glitch.
+#
+#   REMOVE (QDX disappears):
+#     RUN+="systemctl stop rigctld" tells systemd to terminate rigctld
+#     immediately. Without this, rigctld stays running with a dead
+#     serial port: hamlib's design holds the file descriptor and
+#     answers some commands from cache, leaving systemd reporting
+#     "active" while CAT is actually broken. The next ADD then bounces
+#     us through a clean start cycle.
+#
+# This was discovered the hard way — power-cycling the QDX while the
+# Pi stayed up left rigctld in a zombie state where systemctl status
+# said "active (running)" but rigctl commands either hung or returned
+# stale cached data. Even a libhamlib `\chk_vfo` keepalive succeeded
+# from the cache. The combination of (a) explicit stop-on-remove here
+# and (b) using a real CAT command (`f`) for the keepalive in
+# rigctl_client.py gives us reliable detection + recovery.
+#
+# USB IDs verified on hardware:
+#   idVendor   = 0483  (STMicroelectronics)
+#   idProduct  = a34c  (QRP Labs QDX Transceiver — ALL revisions)
+#
+# (The earlier 0483:5740 — STM32 generic Virtual COM — was wrong; QDX
+# firmware uses its own assigned PID.)
+#
+# Group "dialout" gives the microjs8 user read/write without 0666.
+
+# ADD: create the symlink, fix permissions, and ask systemd to start
+# rigctld. Matches on the tty SUBSYSTEM with USB attributes; this rule
+# fires when the kernel's CDC-ACM driver creates the ttyACMx device
+# node for QDX interface 0.
+SUBSYSTEM=="tty", ACTION=="add", \
+    ATTRS{idVendor}=="0483", ATTRS{idProduct}=="a34c", \
+    ENV{ID_USB_INTERFACE_NUM}=="00", \
+    SYMLINK+="qdx", GROUP="dialout", MODE="0660", \
+    TAG+="systemd", ENV{SYSTEMD_WANTS}+="rigctld.service"
+
+# REMOVE: tell systemd to stop rigctld. We use --no-block so udev
+# isn't held up waiting for systemd; rigctld will be cleanly stopped
+# on its own schedule. The full path to systemctl is required because
+# udev's RUN environment is minimal.
+#
+# We can't match on ATTRS here — those come from sysfs which is gone
+# by the time the remove event fires. ENV{ID_VENDOR_ID} and
+# ENV{ID_MODEL_ID} are populated from earlier add-time properties
+# captured by udev's database (cached for the lifetime of the device
+# node), so they're available on remove.
+SUBSYSTEM=="tty", ACTION=="remove", \
+    ENV{ID_VENDOR_ID}=="0483", ENV{ID_MODEL_ID}=="a34c", \
+    ENV{ID_USB_INTERFACE_NUM}=="00", \
+    RUN+="/bin/systemctl --no-block stop rigctld.service"

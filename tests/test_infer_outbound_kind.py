@@ -25,7 +25,7 @@ from __future__ import annotations
 
 import pytest
 
-from minijs8.tx.queue import OutboundKind, infer_outbound_kind
+from microjs8.tx.queue import OutboundKind, infer_outbound_kind
 
 
 # ── Buffered MSG / MSG TO: → DIRECTED ────────────────────────────

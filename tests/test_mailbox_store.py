@@ -1,4 +1,4 @@
-"""Tests for minijs8.store.inbox.MailboxStore.
+"""Tests for microjs8.store.inbox.MailboxStore.
 
 Use an on-disk temp DB rather than :memory: because we want to verify:
 
@@ -25,7 +25,7 @@ from pathlib import Path
 
 import pytest
 
-from minijs8.store.inbox import (
+from microjs8.store.inbox import (
     InboxRecord,
     MailboxError,
     MailboxStore,

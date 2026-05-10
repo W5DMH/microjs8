@@ -1,4 +1,4 @@
-"""Tests for minijs8.store.db.MessageStore.
+"""Tests for microjs8.store.db.MessageStore.
 
 Use an on-disk temp DB rather than :memory: because we want to verify
 that WAL mode actually creates journal files and that the schema
@@ -12,13 +12,13 @@ from pathlib import Path
 
 import pytest
 
-from minijs8.protocol.types import (
+from microjs8.protocol.types import (
     DecodedFrame,
     FrameKind,
     HeardStation,
     ParsedFrame,
 )
-from minijs8.store import MessageStore
+from microjs8.store import MessageStore
 
 
 @pytest.fixture

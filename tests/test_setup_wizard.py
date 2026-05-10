@@ -15,10 +15,10 @@ from pathlib import Path
 
 import pytest
 
-from minijs8 import config as config_mod
-from minijs8.input.events import Key, KeyEvent
-from minijs8.input.router import InputRouter
-from minijs8.ui.state import Screen, UIState
+from microjs8 import config as config_mod
+from microjs8.input.events import Key, KeyEvent
+from microjs8.input.router import InputRouter
+from microjs8.ui.state import Screen, UIState
 
 
 @pytest.fixture
@@ -27,8 +27,8 @@ def isolated_paths(tmp_path, monkeypatch):
     etc = tmp_path / "etc"
     data.mkdir()
     etc.mkdir()
-    monkeypatch.setenv("MINIJS8_DATA_DIR", str(data))
-    monkeypatch.setenv("MINIJS8_ETC_DIR", str(etc))
+    monkeypatch.setenv("MICROJS8_DATA_DIR", str(data))
+    monkeypatch.setenv("MICROJS8_ETC_DIR", str(etc))
     # Ship a default config so first-boot logic doesn't fail.
     project_default = (
         Path(__file__).parent.parent / "etc-defaults" / "config.toml"

@@ -29,17 +29,17 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
-from minijs8.app import MiniJS8App
-from minijs8.config import Config, StationConfig
-from minijs8.protocol.checksum import checksum16
-from minijs8.protocol.reassembly import AssembledMessage, MessageAssembler
-from minijs8.protocol.types import (
+from microjs8.app import MicroJS8App
+from microjs8.config import Config, StationConfig
+from microjs8.protocol.checksum import checksum16
+from microjs8.protocol.reassembly import AssembledMessage, MessageAssembler
+from microjs8.protocol.types import (
     DecodedFrame,
     FrameKind,
     ParsedFrame,
 )
-from minijs8.store.inbox import MailboxStore, TYPE_STORE, TYPE_UNREAD
-from minijs8.tx.queue import OutboundKind
+from microjs8.store.inbox import MailboxStore, TYPE_STORE, TYPE_UNREAD
+from microjs8.tx.queue import OutboundKind
 
 
 # ── Fakes (mirrored from test_app_inbox_dispatch.py) ────────────────
@@ -77,10 +77,10 @@ class _FakeOutboundQueue:
         return None
 
 
-def _make_app(tmp_path: Path) -> MiniJS8App:
+def _make_app(tmp_path: Path) -> MicroJS8App:
     """Construct a minimal app for unit-testing assembled dispatch."""
     cfg = Config(station=StationConfig(callsign="W5DMH", grid="EN83"))
-    app = MiniJS8App(cfg, headless=True)
+    app = MicroJS8App(cfg, headless=True)
     app._mailbox = MailboxStore(tmp_path / "inbox.db")
     app._outbound_queue = _FakeOutboundQueue()
     app._ui_state = None
@@ -638,7 +638,7 @@ def test_single_frame_snr_query_logs_to_directed_activity(tmp_path: Path):
     """An inbound DIRECTED_QUERY (e.g. SNR?) is single-frame, doesn't
     go through the assembler, but should still appear in the
     directed log via the decode-handler hook."""
-    from minijs8.protocol.types import DecodedFrame, FrameKind, ParsedFrame
+    from microjs8.protocol.types import DecodedFrame, FrameKind, ParsedFrame
 
     app = _make_app(tmp_path)
     # Compose a single-frame SNR? directed at us.
@@ -672,7 +672,7 @@ def test_single_frame_ack_logs_to_directed_activity(tmp_path: Path):
     """An inbound ACK (response to one of our outbound MSGs) shows in
     the directed log. This is how the operator sees that a station
     received and ACKed something we sent."""
-    from minijs8.protocol.types import DecodedFrame, FrameKind, ParsedFrame
+    from microjs8.protocol.types import DecodedFrame, FrameKind, ParsedFrame
 
     app = _make_app(tmp_path)
     df = DecodedFrame(

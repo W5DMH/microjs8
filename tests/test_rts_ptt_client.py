@@ -1,4 +1,4 @@
-"""Tests for minijs8.cat.rts_ptt_client.RtsPttClient.
+"""Tests for microjs8.cat.rts_ptt_client.RtsPttClient.
 
 We stub out ``serial.Serial`` so tests don't need a real DigiRig.
 The fake records every line-state change (RTS / DTR) so we can
@@ -12,7 +12,7 @@ from typing import Any
 
 import pytest
 
-from minijs8.cat.rts_ptt_client import RtsPttClient, RtsPttError
+from microjs8.cat.rts_ptt_client import RtsPttClient, RtsPttError
 
 
 # ── Fake serial module ──────────────────────────────────────────────

@@ -1,4 +1,4 @@
-"""Tests for minijs8.config."""
+"""Tests for microjs8.config."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from minijs8 import config
+from microjs8 import config
 
 
 @pytest.fixture
@@ -17,8 +17,8 @@ def isolated_paths(tmp_path, monkeypatch):
     etc = tmp_path / "etc"
     data.mkdir()
     etc.mkdir()
-    monkeypatch.setenv("MINIJS8_DATA_DIR", str(data))
-    monkeypatch.setenv("MINIJS8_ETC_DIR", str(etc))
+    monkeypatch.setenv("MICROJS8_DATA_DIR", str(data))
+    monkeypatch.setenv("MICROJS8_ETC_DIR", str(etc))
     return data, etc
 
 

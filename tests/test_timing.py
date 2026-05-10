@@ -1,4 +1,4 @@
-"""Tests for minijs8.timing.TimingTracker."""
+"""Tests for microjs8.timing.TimingTracker."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ import threading
 
 import pytest
 
-from minijs8.timing import (
+from microjs8.timing import (
     DEFAULT_MIN_SAMPLES,
     DEFAULT_WINDOW_SIZE,
     TimingTracker,

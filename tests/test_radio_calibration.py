@@ -20,7 +20,7 @@ not PTT routing or rigctld arguments), so it gets its own file.
 
 from __future__ import annotations
 
-from minijs8.cat.radios import (
+from microjs8.cat.radios import (
     DIGIRIG_RTS_ONLY,
     QDX,
     XIEGU_G90_DIGIRIG,

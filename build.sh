@@ -1,7 +1,7 @@
 #!/bin/bash
-# MiniJS8 Raspberry Pi Image Builder
+# MicroJS8 Raspberry Pi Image Builder
 # ===================================
-# Builds a flashable SD card image for a MiniJS8 node (Pi Zero 2W target).
+# Builds a flashable SD card image for a MicroJS8 node (Pi Zero 2W target).
 #
 # Run on a Pi 4 (native arm64) or x86-64 Linux host with qemu-user-static
 # binfmt registered, as root:
@@ -11,20 +11,20 @@
 # Input:  bookworm-lite-arm64.img   (Raspberry Pi OS Bookworm Lite, arm64)
 #                                    placed in $PROJECT_DIR
 #
-# Output: output/minijs8-YYYYMMDD.img.xz       (compressed, ~600-700 MB)
-#         output/minijs8-YYYYMMDD.img.xz.sha256
+# Output: output/microjs8-YYYYMMDD.img.xz       (compressed, ~600-700 MB)
+#         output/microjs8-YYYYMMDD.img.xz.sha256
 #         output/build-YYYYMMDD.log
 #
 # Flash:
-#   xz -dk output/minijs8-YYYYMMDD.img.xz
-#   sudo dd if=output/minijs8-YYYYMMDD.img of=/dev/sdX bs=4M status=progress
+#   xz -dk output/microjs8-YYYYMMDD.img.xz
+#   sudo dd if=output/microjs8-YYYYMMDD.img of=/dev/sdX bs=4M status=progress
 #   # or use Raspberry Pi Imager — select the .xz file directly
 #
 # After flashing and booting on the Pi Zero 2W:
 #   - Check the daemon is running:
-#       ssh minijs8@<ip> 'systemctl status minijs8'
+#       ssh microjs8@<ip> 'systemctl status microjs8'
 #   - Tail the journal:
-#       ssh minijs8@<ip> 'journalctl -u minijs8 -f'
+#       ssh microjs8@<ip> 'journalctl -u microjs8 -f'
 
 set -euo pipefail
 
@@ -34,9 +34,9 @@ PROJECT_DIR="$SCRIPT_DIR"
 INPUT_IMG="$PROJECT_DIR/bookworm-lite-arm64.img"
 OUTPUT_DIR="$PROJECT_DIR/output"
 DATE_STR="$(date +%Y%m%d)"
-OUTPUT_IMG="$OUTPUT_DIR/minijs8-${DATE_STR}.img"
-WORK_IMG="$OUTPUT_DIR/minijs8-work.img"
-MOUNT_DIR="/mnt/minijs8-build"
+OUTPUT_IMG="$OUTPUT_DIR/microjs8-${DATE_STR}.img"
+WORK_IMG="$OUTPUT_DIR/microjs8-work.img"
+MOUNT_DIR="/mnt/microjs8-build"
 LOG="$OUTPUT_DIR/build-${DATE_STR}.log"
 BOOT_MNT="$MOUNT_DIR/boot"
 ROOT_MNT="$MOUNT_DIR/root"
@@ -64,7 +64,7 @@ err()  { echo "[$(date '+%H:%M:%S')] ✗ $*"; exit 1; }
 
 # ── Preflight ─────────────────────────────────────────────────────────────────
 log "=================================================="
-log " MiniJS8 Image Builder"
+log " MicroJS8 Image Builder"
 log " $(date)"
 log "=================================================="
 log " Project:  $PROJECT_DIR"
@@ -87,24 +87,24 @@ done
 
 # Verify our project files are all here before we start mounting things.
 REQUIRED_FILES=(
-    "src/minijs8/__init__.py"
-    "src/minijs8/__main__.py"
-    "src/minijs8/app.py"
-    "src/minijs8/config.py"
-    "src/minijs8/logging_setup.py"
-    "src/minijs8/paths.py"
-    "src/minijs8/version.py"
+    "src/microjs8/__init__.py"
+    "src/microjs8/__main__.py"
+    "src/microjs8/app.py"
+    "src/microjs8/config.py"
+    "src/microjs8/logging_setup.py"
+    "src/microjs8/paths.py"
+    "src/microjs8/version.py"
     "pyproject.toml"
-    "systemd/minijs8.service"
+    "systemd/microjs8.service"
     "systemd/rigctld.service"
-    "udev/99-minijs8-qdx.rules"
-    "udev/99-minijs8-gps.rules"
-    "udev/99-minijs8-audio.rules"
-    "polkit/50-minijs8-poweroff.rules"
-    "boot-config/minijs8.conf"
+    "udev/99-microjs8-qdx.rules"
+    "udev/99-microjs8-gps.rules"
+    "udev/99-microjs8-audio.rules"
+    "polkit/50-microjs8-poweroff.rules"
+    "boot-config/microjs8.conf"
     "etc-defaults/config.toml"
     "etc-defaults/gpsd/gpsd"
-    "etc-defaults/chrony/minijs8-gps.conf"
+    "etc-defaults/chrony/microjs8-gps.conf"
 )
 for f in "${REQUIRED_FILES[@]}"; do
     [ -f "$PROJECT_DIR/$f" ] || err "Missing project file: $f"
@@ -192,10 +192,10 @@ cp /etc/resolv.conf "$ROOT_MNT/etc/resolv.conf"
 run_chroot() { chroot "$ROOT_MNT" /bin/bash -c "$1"; }
 
 # ── Hostname & SSH ────────────────────────────────────────────────────────────
-log "Setting hostname to minijs8..."
-echo "minijs8" > "$ROOT_MNT/etc/hostname"
-sed -i 's/raspberrypi/minijs8/g' "$ROOT_MNT/etc/hosts" 2>/dev/null || true
-ok "Hostname: minijs8"
+log "Setting hostname to microjs8..."
+echo "microjs8" > "$ROOT_MNT/etc/hostname"
+sed -i 's/raspberrypi/microjs8/g' "$ROOT_MNT/etc/hosts" 2>/dev/null || true
+ok "Hostname: microjs8"
 
 log "Enabling SSH..."
 touch "$BOOT_MNT/ssh"
@@ -208,13 +208,13 @@ CMDLINE="$BOOT_MNT/cmdline.txt"
 
 log "Configuring /boot/firmware/config.txt..."
 # Append our snippet idempotently (grep before adding).
-if ! grep -q "MiniJS8 — boot config" "$BOOT_CFG"; then
+if ! grep -q "MicroJS8 — boot config" "$BOOT_CFG"; then
     echo "" >> "$BOOT_CFG"
-    echo "# === MiniJS8 — boot config (appended by build.sh) ===" >> "$BOOT_CFG"
-    cat "$PROJECT_DIR/boot-config/minijs8.conf" >> "$BOOT_CFG"
+    echo "# === MicroJS8 — boot config (appended by build.sh) ===" >> "$BOOT_CFG"
+    cat "$PROJECT_DIR/boot-config/microjs8.conf" >> "$BOOT_CFG"
     ok "config.txt extended"
 else
-    log "  config.txt already contains MiniJS8 block; skipping"
+    log "  config.txt already contains MicroJS8 block; skipping"
 fi
 
 # Disable USB autosuspend in cmdline (prevents the QDX or USB audio from
@@ -229,14 +229,14 @@ fi
 
 # ── User account ──────────────────────────────────────────────────────────────
 # Two users:
-#   pi        — interactive SSH user (default password "minijs8setup")
-#   minijs8   — service account that runs the daemon (no shell login)
+#   pi        — interactive SSH user (default password "microjs8setup")
+#   microjs8   — service account that runs the daemon (no shell login)
 log "Configuring user accounts..."
-HASHED_PW=$(echo "minijs8setup" | openssl passwd -6 -stdin)
+HASHED_PW=$(echo "microjs8setup" | openssl passwd -6 -stdin)
 echo "pi:${HASHED_PW}" > "$BOOT_MNT/userconf"
 run_chroot "id pi 2>/dev/null || \
     useradd -m -s /bin/bash -G sudo,dialout,audio,plugdev,gpio,i2c,spi,netdev pi"
-run_chroot "echo 'pi:minijs8setup' | chpasswd"
+run_chroot "echo 'pi:microjs8setup' | chpasswd"
 run_chroot "usermod -a -G dialout,audio,gpio,spi pi"
 
 # Ensure the 'input' group exists. Bookworm has it pre-created (used
@@ -245,11 +245,11 @@ run_chroot "usermod -a -G dialout,audio,gpio,spi pi"
 run_chroot "getent group input >/dev/null || groupadd --system input"
 
 # Service account — non-interactive, just a /var/lib home so systemd is happy.
-run_chroot "id minijs8 2>/dev/null || \
-    useradd --system --home-dir /var/lib/minijs8 --shell /usr/sbin/nologin \
-            --groups audio,dialout,gpio,spi,input minijs8"
+run_chroot "id microjs8 2>/dev/null || \
+    useradd --system --home-dir /var/lib/microjs8 --shell /usr/sbin/nologin \
+            --groups audio,dialout,gpio,spi,input microjs8"
 
-ok "Users configured (pi: SSH; minijs8: service account)"
+ok "Users configured (pi: SSH; microjs8: service account)"
 
 # Disable Pi first-run wizard (we have our own first-boot logic)
 run_chroot "rm -f /etc/xdg/autostart/piwiz.desktop 2>/dev/null || true"
@@ -310,7 +310,7 @@ PACKAGES=(
     # localhost:4532 f` queries the radio frequency from any shell.
     libhamlib-utils
 
-    # SQLite CLI for diagnostic queries against /var/minijs8/messages.db
+    # SQLite CLI for diagnostic queries against /var/microjs8/messages.db
     # ("SELECT count(*) FROM heard_stations" etc). The Python sqlite3
     # module is in the stdlib so the daemon doesn't need this — it's
     # purely an operator convenience.
@@ -334,22 +334,22 @@ run_chroot "systemctl disable fake-hwclock 2>/dev/null || true"
 run_chroot "rm -f /etc/fake-hwclock.data"
 
 # ── Application install ───────────────────────────────────────────────────────
-log "Installing MiniJS8 application to /opt/minijs8..."
-mkdir -p "$ROOT_MNT/opt/minijs8"
+log "Installing MicroJS8 application to /opt/microjs8..."
+mkdir -p "$ROOT_MNT/opt/microjs8"
 
 # Stage the package source, the pyproject, and the wheels dir into the
 # install root. We use rsync so future revisions only copy deltas.
 rsync -a --delete \
     "$PROJECT_DIR/src/" \
-    "$ROOT_MNT/opt/minijs8/src/"
-cp "$PROJECT_DIR/pyproject.toml" "$ROOT_MNT/opt/minijs8/"
-cp "$PROJECT_DIR/README.md"      "$ROOT_MNT/opt/minijs8/" 2>/dev/null || true
+    "$ROOT_MNT/opt/microjs8/src/"
+cp "$PROJECT_DIR/pyproject.toml" "$ROOT_MNT/opt/microjs8/"
+cp "$PROJECT_DIR/README.md"      "$ROOT_MNT/opt/microjs8/" 2>/dev/null || true
 
 # Wheels directory for offline pip installs in later steps (e.g. the
 # pinned GFSK8 wheel for your fork). Empty in Step 1 — that's fine.
-mkdir -p "$ROOT_MNT/opt/minijs8/wheels"
+mkdir -p "$ROOT_MNT/opt/microjs8/wheels"
 if compgen -G "$PROJECT_DIR/wheels/*.whl" > /dev/null; then
-    cp "$PROJECT_DIR/wheels/"*.whl "$ROOT_MNT/opt/minijs8/wheels/"
+    cp "$PROJECT_DIR/wheels/"*.whl "$ROOT_MNT/opt/microjs8/wheels/"
     log "  copied $(ls "$PROJECT_DIR/wheels/"*.whl | wc -l) wheel(s)"
 fi
 
@@ -358,28 +358,28 @@ ok "Application files staged"
 # Create the venv and install the package, all inside the chroot so the
 # resulting Python interpreter and any compiled wheels match the target
 # architecture.
-log "Creating Python virtualenv at /opt/minijs8/venv..."
-run_chroot "python3 -m venv --without-pip /opt/minijs8/venv" \
+log "Creating Python virtualenv at /opt/microjs8/venv..."
+run_chroot "python3 -m venv --without-pip /opt/microjs8/venv" \
     || err "venv creation failed"
 
 # Bootstrap pip inside the venv. We use ensurepip (stdlib) so we don't
 # need network for this step alone.
-run_chroot "/opt/minijs8/venv/bin/python -m ensurepip --upgrade" \
+run_chroot "/opt/microjs8/venv/bin/python -m ensurepip --upgrade" \
     || err "pip bootstrap failed"
-run_chroot "/opt/minijs8/venv/bin/python -m pip install --upgrade pip setuptools wheel" \
+run_chroot "/opt/microjs8/venv/bin/python -m pip install --upgrade pip setuptools wheel" \
     || warn "pip self-upgrade failed (continuing)"
 
-log "Installing MiniJS8 package into venv..."
-# Install from /opt/minijs8/ where pyproject.toml lives. The
+log "Installing MicroJS8 package into venv..."
+# Install from /opt/microjs8/ where pyproject.toml lives. The
 # package-dir = {"" = "src"} entry in pyproject.toml tells setuptools
 # to find the actual Python package inside src/.
-run_chroot "cd /opt/minijs8 && /opt/minijs8/venv/bin/pip install --no-build-isolation ." \
-    || err "MiniJS8 package install failed"
+run_chroot "cd /opt/microjs8 && /opt/microjs8/venv/bin/pip install --no-build-isolation ." \
+    || err "MicroJS8 package install failed"
 
 # Smoke test: the installed package must import cleanly and report its version.
-log "Smoke test: importing minijs8 inside the venv..."
-run_chroot "/opt/minijs8/venv/bin/python -c 'import minijs8; print(\"  minijs8\", minijs8.__version__)'" \
-    || err "minijs8 package failed to import after install"
+log "Smoke test: importing microjs8 inside the venv..."
+run_chroot "/opt/microjs8/venv/bin/python -c 'import microjs8; print(\"  microjs8\", microjs8.__version__)'" \
+    || err "microjs8 package failed to import after install"
 ok "Application installed"
 
 # ── GFSK8 modem (Step 5) ──────────────────────────────────────────────────────
@@ -428,7 +428,7 @@ ok "Application installed"
 #   path. The staged wheel path doesn't reference this constant.
 
 STAGED_WHEEL="$PROJECT_DIR/wheels/gfsk8.cpython-311-aarch64-linux-gnu.so"
-SO_DEST="/opt/minijs8/venv/lib/python3.11/site-packages/gfsk8.cpython-311-aarch64-linux-gnu.so"
+SO_DEST="/opt/microjs8/venv/lib/python3.11/site-packages/gfsk8.cpython-311-aarch64-linux-gnu.so"
 
 if [ -f "$STAGED_WHEEL" ]; then
     log "Using staged GFSK8 .so from $STAGED_WHEEL..."
@@ -481,7 +481,7 @@ else
     run_chroot "cd /tmp/gfsk8-build/src && \
         cmake -B build -S . -DCMAKE_BUILD_TYPE=Release \
                            -DBUILD_PYTHON_MODULE=ON \
-                           -DPython3_EXECUTABLE=/opt/minijs8/venv/bin/python && \
+                           -DPython3_EXECUTABLE=/opt/microjs8/venv/bin/python && \
         cmake --build build -j2" \
         || err "GFSK8 CMake build failed"
 
@@ -490,7 +490,7 @@ else
     SO_PATH_IN_CHROOT="$(run_chroot "find /tmp/gfsk8-build/src/build/python -name 'gfsk8*.so' -print -quit" 2>/dev/null | tr -d '\r' | tail -1)"
     [ -n "$SO_PATH_IN_CHROOT" ] || err "GFSK8 build did not produce a gfsk8*.so"
 
-    run_chroot "cp '$SO_PATH_IN_CHROOT' /opt/minijs8/venv/lib/python3.11/site-packages/" \
+    run_chroot "cp '$SO_PATH_IN_CHROOT' /opt/microjs8/venv/lib/python3.11/site-packages/" \
         || err "could not install gfsk8.so into venv"
     # Free ~150 MB of build artifacts so we don't ship them in the final image.
     run_chroot "rm -rf /tmp/gfsk8-build" || warn "could not remove GFSK8 build dir"
@@ -508,7 +508,7 @@ fi
 # known-good wheel in $PROJECT_DIR/wheels/, or investigates the
 # chroot build (LTO interaction, pybind11 version, etc).
 log "Smoke test: importing gfsk8 + verifying modulate() produces real audio..."
-run_chroot "/opt/minijs8/venv/bin/python -c '
+run_chroot "/opt/microjs8/venv/bin/python -c '
 import gfsk8
 import numpy as np
 
@@ -550,14 +550,14 @@ print(\"  smoke test: PASS\")
 ok "GFSK8 modem installed and verified"
 
 # Set ownership so the systemd service can stat the install root.
-run_chroot "chown -R root:root /opt/minijs8"
-run_chroot "chmod -R a+rX     /opt/minijs8"
+run_chroot "chown -R root:root /opt/microjs8"
+run_chroot "chmod -R a+rX     /opt/microjs8"
 
 # ── Default shipped config ────────────────────────────────────────────────────
-log "Installing /etc/minijs8/config.toml..."
-mkdir -p "$ROOT_MNT/etc/minijs8"
-cp "$PROJECT_DIR/etc-defaults/config.toml" "$ROOT_MNT/etc/minijs8/config.toml"
-chmod 644 "$ROOT_MNT/etc/minijs8/config.toml"
+log "Installing /etc/microjs8/config.toml..."
+mkdir -p "$ROOT_MNT/etc/microjs8"
+cp "$PROJECT_DIR/etc-defaults/config.toml" "$ROOT_MNT/etc/microjs8/config.toml"
+chmod 644 "$ROOT_MNT/etc/microjs8/config.toml"
 ok "Default config installed"
 
 # ── gpsd / chrony GPS time discipline ─────────────────────────────────────────
@@ -572,67 +572,67 @@ ok "gpsd configured"
 
 log "Configuring chrony to read GPS time from gpsd..."
 mkdir -p "$ROOT_MNT/etc/chrony/conf.d"
-cp "$PROJECT_DIR/etc-defaults/chrony/minijs8-gps.conf" \
-   "$ROOT_MNT/etc/chrony/conf.d/minijs8-gps.conf"
-chmod 644 "$ROOT_MNT/etc/chrony/conf.d/minijs8-gps.conf"
+cp "$PROJECT_DIR/etc-defaults/chrony/microjs8-gps.conf" \
+   "$ROOT_MNT/etc/chrony/conf.d/microjs8-gps.conf"
+chmod 644 "$ROOT_MNT/etc/chrony/conf.d/microjs8-gps.conf"
 # Confirm chrony's main config sources conf.d (Bookworm default does,
 # but we double-check so the config is actually applied).
 if ! grep -q "include /etc/chrony/conf.d" "$ROOT_MNT/etc/chrony/chrony.conf"; then
     echo "" >> "$ROOT_MNT/etc/chrony/chrony.conf"
-    echo "# MiniJS8: include drop-ins" >> "$ROOT_MNT/etc/chrony/chrony.conf"
+    echo "# MicroJS8: include drop-ins" >> "$ROOT_MNT/etc/chrony/chrony.conf"
     echo "include /etc/chrony/conf.d/*.conf" >> "$ROOT_MNT/etc/chrony/chrony.conf"
 fi
 ok "chrony configured to read GPS time"
 
 # ── Writable runtime directory ────────────────────────────────────────────────
-log "Creating writable runtime directory /var/minijs8..."
-mkdir -p "$ROOT_MNT/var/minijs8/log"
-run_chroot "chown -R minijs8:minijs8 /var/minijs8"
-run_chroot "chmod 755 /var/minijs8 /var/minijs8/log"
+log "Creating writable runtime directory /var/microjs8..."
+mkdir -p "$ROOT_MNT/var/microjs8/log"
+run_chroot "chown -R microjs8:microjs8 /var/microjs8"
+run_chroot "chmod 755 /var/microjs8 /var/microjs8/log"
 ok "Runtime directory ready"
 
 # ── udev rules ────────────────────────────────────────────────────────────────
 log "Installing udev rules..."
 mkdir -p "$ROOT_MNT/etc/udev/rules.d"
-cp "$PROJECT_DIR/udev/99-minijs8-qdx.rules" "$ROOT_MNT/etc/udev/rules.d/"
-cp "$PROJECT_DIR/udev/99-minijs8-gps.rules" "$ROOT_MNT/etc/udev/rules.d/"
-cp "$PROJECT_DIR/udev/99-minijs8-audio.rules" "$ROOT_MNT/etc/udev/rules.d/"
-cp "$PROJECT_DIR/udev/99-minijs8-digirig.rules" "$ROOT_MNT/etc/udev/rules.d/"
-chmod 644 "$ROOT_MNT/etc/udev/rules.d/99-minijs8-"*.rules
+cp "$PROJECT_DIR/udev/99-microjs8-qdx.rules" "$ROOT_MNT/etc/udev/rules.d/"
+cp "$PROJECT_DIR/udev/99-microjs8-gps.rules" "$ROOT_MNT/etc/udev/rules.d/"
+cp "$PROJECT_DIR/udev/99-microjs8-audio.rules" "$ROOT_MNT/etc/udev/rules.d/"
+cp "$PROJECT_DIR/udev/99-microjs8-digirig.rules" "$ROOT_MNT/etc/udev/rules.d/"
+chmod 644 "$ROOT_MNT/etc/udev/rules.d/99-microjs8-"*.rules
 ok "udev rules installed (/dev/qdx, /dev/gps, /dev/digirig, audio)"
 
 # ── polkit rule ───────────────────────────────────────────────────────────────
-# Without this, the unprivileged minijs8 service user gets
+# Without this, the unprivileged microjs8 service user gets
 # "Interactive authentication required" from systemd-logind when it
 # tries to invoke `systemctl poweroff` from the both-buttons gesture.
-log "Installing polkit rule for minijs8 power-off..."
+log "Installing polkit rule for microjs8 power-off..."
 mkdir -p "$ROOT_MNT/etc/polkit-1/rules.d"
-cp "$PROJECT_DIR/polkit/50-minijs8-poweroff.rules" \
-   "$ROOT_MNT/etc/polkit-1/rules.d/50-minijs8-poweroff.rules"
-chown root:root "$ROOT_MNT/etc/polkit-1/rules.d/50-minijs8-poweroff.rules"
-chmod 644 "$ROOT_MNT/etc/polkit-1/rules.d/50-minijs8-poweroff.rules"
+cp "$PROJECT_DIR/polkit/50-microjs8-poweroff.rules" \
+   "$ROOT_MNT/etc/polkit-1/rules.d/50-microjs8-poweroff.rules"
+chown root:root "$ROOT_MNT/etc/polkit-1/rules.d/50-microjs8-poweroff.rules"
+chmod 644 "$ROOT_MNT/etc/polkit-1/rules.d/50-microjs8-poweroff.rules"
 ok "polkit rule installed"
 
 # ── systemd unit ──────────────────────────────────────────────────────────────
-log "Installing minijs8.service..."
-cp "$PROJECT_DIR/systemd/minijs8.service" "$ROOT_MNT/etc/systemd/system/minijs8.service"
-chmod 644 "$ROOT_MNT/etc/systemd/system/minijs8.service"
-run_chroot "systemctl enable minijs8.service" \
-    || err "failed to enable minijs8.service"
-ok "minijs8.service enabled (will start on boot)"
+log "Installing microjs8.service..."
+cp "$PROJECT_DIR/systemd/microjs8.service" "$ROOT_MNT/etc/systemd/system/microjs8.service"
+chmod 644 "$ROOT_MNT/etc/systemd/system/microjs8.service"
+run_chroot "systemctl enable microjs8.service" \
+    || err "failed to enable microjs8.service"
+ok "microjs8.service enabled (will start on boot)"
 
 # rigctld — runs at boot and via Restart=on-failure for hot-plug recovery.
-# The launcher script (minijs8-rigctld-launcher) reads /etc/minijs8/config.toml
+# The launcher script (microjs8-rigctld-launcher) reads /etc/microjs8/config.toml
 # and picks the right rigctld args for the configured radio:
 #   - qdx              → TS-480 emulation, ttyACM
 #   - xiegu-g90-digirig → G90 driver + RTS-PTT on DigiRig serial port
 #   - digirig-rts-only → exits 0 (no rigctld needed; RtsPttService handles PTT)
-log "Installing minijs8-rigctld-launcher (multi-radio rigctld picker)..."
+log "Installing microjs8-rigctld-launcher (multi-radio rigctld picker)..."
 mkdir -p "$ROOT_MNT/usr/local/bin"
-cp "$PROJECT_DIR/systemd/minijs8-rigctld-launcher" \
-   "$ROOT_MNT/usr/local/bin/minijs8-rigctld-launcher"
-chmod 755 "$ROOT_MNT/usr/local/bin/minijs8-rigctld-launcher"
-ok "minijs8-rigctld-launcher installed"
+cp "$PROJECT_DIR/systemd/microjs8-rigctld-launcher" \
+   "$ROOT_MNT/usr/local/bin/microjs8-rigctld-launcher"
+chmod 755 "$ROOT_MNT/usr/local/bin/microjs8-rigctld-launcher"
+ok "microjs8-rigctld-launcher installed"
 
 log "Installing rigctld.service (Step 6 CAT control)..."
 cp "$PROJECT_DIR/systemd/rigctld.service" "$ROOT_MNT/etc/systemd/system/rigctld.service"
@@ -676,11 +676,11 @@ mv "$ROOT_MNT/etc/resolv.conf.bak" "$ROOT_MNT/etc/resolv.conf" 2>/dev/null || \
     echo "nameserver 1.1.1.1" > "$ROOT_MNT/etc/resolv.conf"
 
 # ── Version stamp ─────────────────────────────────────────────────────────────
-APP_VER=$(grep -E '^__version__' "$PROJECT_DIR/src/minijs8/version.py" | \
+APP_VER=$(grep -E '^__version__' "$PROJECT_DIR/src/microjs8/version.py" | \
     sed -E 's/.*"([^"]+)".*/\1/')
-echo "MiniJS8 ${APP_VER} built ${DATE_STR}" > "$ROOT_MNT/etc/minijs8-version"
-chmod 644 "$ROOT_MNT/etc/minijs8-version"
-log "Version stamp: MiniJS8 ${APP_VER} (${DATE_STR})"
+echo "MicroJS8 ${APP_VER} built ${DATE_STR}" > "$ROOT_MNT/etc/microjs8-version"
+chmod 644 "$ROOT_MNT/etc/microjs8-version"
+log "Version stamp: MicroJS8 ${APP_VER} (${DATE_STR})"
 
 # ── Unmount ───────────────────────────────────────────────────────────────────
 log "Unmounting image..."
@@ -712,7 +712,7 @@ sha256sum "${OUTPUT_IMG}.xz" > "${OUTPUT_IMG}.xz.sha256"
 ok "Compressed: ${OUTPUT_IMG}.xz ($(du -h "${OUTPUT_IMG}.xz" | cut -f1))"
 
 log "=================================================="
-log " MiniJS8 Image Build Complete"
+log " MicroJS8 Image Build Complete"
 log " $(date)"
 log "=================================================="
 log ""
@@ -726,11 +726,11 @@ log "   sudo dd if=${OUTPUT_IMG} of=/dev/sdX bs=4M status=progress conv=fsync"
 log "   (or use Raspberry Pi Imager — select the .xz directly)"
 log ""
 log " Default SSH credentials:"
-log "   ssh pi@minijs8.local"
-log "   Password: minijs8setup"
+log "   ssh pi@microjs8.local"
+log "   Password: microjs8setup"
 log "   Change with: passwd"
 log ""
 log " Verify daemon running after first boot:"
-log "   sudo systemctl status minijs8"
-log "   sudo journalctl -u minijs8 -b"
+log "   sudo systemctl status microjs8"
+log "   sudo journalctl -u microjs8 -b"
 log "=================================================="

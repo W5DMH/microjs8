@@ -1,4 +1,4 @@
-"""Tests for minijs8.tx.scheduler.TxScheduler.
+"""Tests for microjs8.tx.scheduler.TxScheduler.
 
 We never actually run the scheduler thread loop in tests — instead we
 call ``_tick()`` directly. That keeps tests fast, deterministic, and
@@ -13,15 +13,15 @@ from pathlib import Path
 
 import pytest
 
-from minijs8.tx.queue import (
+from microjs8.tx.queue import (
     ACK_TIMEOUT_S,
     MAX_ATTEMPTS,
     OutboundKind,
     OutboundQueue,
     OutboundState,
 )
-from minijs8.tx.scheduler import TxScheduler
-from minijs8.tx.tx_backend import FakeTxBackend, TxResult
+from microjs8.tx.scheduler import TxScheduler
+from microjs8.tx.tx_backend import FakeTxBackend, TxResult
 
 
 @pytest.fixture
@@ -491,7 +491,7 @@ def test_seconds_until_next_preflight_at_slot_boundary():
     transmit_frame's wall-clock alignment sees mstr ≈ target_offset
     + queue-work-and-settle and pads silence to land modulation at
     slot+500ms."""
-    from minijs8.tx.scheduler import _TARGET_OFFSET_S
+    from microjs8.tx.scheduler import _TARGET_OFFSET_S
     backend = FakeTxBackend()
     sched = TxScheduler(
         queue=None,  # type: ignore[arg-type]
@@ -512,7 +512,7 @@ def test_seconds_until_next_preflight_at_slot_boundary():
 def test_seconds_until_next_preflight_just_before_boundary():
     """When time is just before a slot boundary, sleep is small —
     we wake just AFTER the upcoming boundary."""
-    from minijs8.tx.scheduler import _TARGET_OFFSET_S
+    from microjs8.tx.scheduler import _TARGET_OFFSET_S
     backend = FakeTxBackend()
     sched = TxScheduler(
         queue=None,  # type: ignore[arg-type]
@@ -533,7 +533,7 @@ def test_seconds_until_next_preflight_just_before_boundary():
 def test_seconds_until_next_preflight_just_after_boundary():
     """When time is just past a slot boundary, sleep is almost a full
     slot — we wake at the NEXT boundary + offset, not this one."""
-    from minijs8.tx.scheduler import _TARGET_OFFSET_S
+    from microjs8.tx.scheduler import _TARGET_OFFSET_S
     backend = FakeTxBackend()
     sched = TxScheduler(
         queue=None,  # type: ignore[arg-type]
@@ -709,7 +709,7 @@ def test_burst_watchdog_deadline_set_at_burst_start(queue):
     """When a multi-frame burst starts, the watchdog deadline is set
     to ``n_frames × _BURST_WATCHDOG_PER_FRAME_S`` seconds in the
     future. We check the formula with both 1- and 3-frame messages."""
-    from minijs8.tx.scheduler import _BURST_WATCHDOG_PER_FRAME_S
+    from microjs8.tx.scheduler import _BURST_WATCHDOG_PER_FRAME_S
 
     # 3-frame message
     msg_id = queue.enqueue(
@@ -830,7 +830,7 @@ def test_burst_hold_seconds_set_before_start_burst(queue):
     the burst will hold PTT, BEFORE keying. The value is the
     scheduler watchdog deadline plus CAT grace, so the CAT-layer
     safety net only fires if the scheduler itself is stuck."""
-    from minijs8.tx.scheduler import (
+    from microjs8.tx.scheduler import (
         _BURST_WATCHDOG_PER_FRAME_S,
         _CAT_WATCHDOG_GRACE_S,
     )
@@ -1067,7 +1067,7 @@ def test_multi_frame_encode_failure_abandons_immediately(queue):
     """If encode() raises (e.g. bad message format, no identity),
     the message is marked SENDING then immediately ABANDONED. We
     don't retry encode failures — they don't fix themselves."""
-    from minijs8.modem.encoder import EncoderError
+    from microjs8.modem.encoder import EncoderError
 
     msg_id = queue.enqueue("BAD", OutboundKind.ALLCALL, to_call=None)
 
@@ -1175,7 +1175,7 @@ def test_scheduler_uses_cached_audio_when_present(queue):
     just hands it to playback."""
     import numpy as np
 
-    from minijs8.tx.encode_worker import EncodedAudioCache
+    from microjs8.tx.encode_worker import EncodedAudioCache
 
     backend = FakeTxBackend()
     cache = EncodedAudioCache()
@@ -1200,7 +1200,7 @@ def test_scheduler_falls_back_to_inline_encode_on_cache_miss(queue):
     (rare — daemon restart between worker put() and queue
     mark_encoded()), scheduler falls back to inline encode rather
     than abandoning the message."""
-    from minijs8.tx.encode_worker import EncodedAudioCache
+    from microjs8.tx.encode_worker import EncodedAudioCache
 
     backend = FakeTxBackend()
     cache = EncodedAudioCache()  # empty
@@ -1231,7 +1231,7 @@ def test_scheduler_discards_cache_on_delivered(queue):
     audio should be dropped at that moment so memory doesn't leak."""
     import numpy as np
 
-    from minijs8.tx.encode_worker import EncodedAudioCache
+    from microjs8.tx.encode_worker import EncodedAudioCache
 
     backend = FakeTxBackend()
     cache = EncodedAudioCache()
@@ -1254,7 +1254,7 @@ def test_scheduler_keeps_cache_during_wait_ack(queue):
     retry, and we want to reuse the same audio rather than re-encoding."""
     import numpy as np
 
-    from minijs8.tx.encode_worker import EncodedAudioCache
+    from microjs8.tx.encode_worker import EncodedAudioCache
 
     backend = FakeTxBackend()
     cache = EncodedAudioCache()
@@ -1275,11 +1275,11 @@ def test_scheduler_discards_cache_on_inline_encode_failure(queue):
     AND the (empty) cache slot is cleaned up. This is defense-in-
     depth — even though the cache had no entry to begin with,
     discard is safe to call."""
-    from minijs8.tx.encode_worker import EncodedAudioCache
+    from microjs8.tx.encode_worker import EncodedAudioCache
 
     class _BrokenBackend(FakeTxBackend):
         def encode(self, text):
-            from minijs8.modem.encoder import EncoderError
+            from microjs8.modem.encoder import EncoderError
             raise EncoderError("simulated encode failure")
 
     backend = _BrokenBackend()
@@ -1305,7 +1305,7 @@ def test_classifier_safety_net_rescues_misclassified_query(queue):
     on-air loop can never recur regardless of what kind got persisted.
 
     Reproduces the exact scenario from the bench-test log:
-        sudo -u minijs8 sqlite3 /var/minijs8/messages.db
+        sudo -u microjs8 sqlite3 /var/microjs8/messages.db
         INSERT INTO outbound (kind, text, to_call, ...)
         VALUES ('DIRECTED', 'KD8PGB QUERY MSGS', 'KD8PGB', ...)
     """

@@ -1,4 +1,4 @@
-"""Tests for minijs8.ui.display.RenderThread.
+"""Tests for microjs8.ui.display.RenderThread.
 
 These exercise the actual RenderThread (not just the fake device) so we
 catch issues like the _stop / threading.Thread._stop attribute collision.
@@ -12,9 +12,9 @@ import time
 
 import pytest
 
-from minijs8.ui.display import FakeDisplayDevice, RenderThread
-from minijs8.ui.fonts import load_fonts
-from minijs8.ui.state import Screen, UIState
+from microjs8.ui.display import FakeDisplayDevice, RenderThread
+from microjs8.ui.fonts import load_fonts
+from microjs8.ui.state import Screen, UIState
 
 
 @pytest.fixture(scope="module")

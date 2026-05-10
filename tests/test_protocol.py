@@ -1,4 +1,4 @@
-"""Tests for minijs8.protocol.grammar.
+"""Tests for microjs8.protocol.grammar.
 
 Exercises every JS8 message kind we care about plus malformed inputs.
 We construct synthetic ``DecodedFrame`` records and feed them through
@@ -11,8 +11,8 @@ import time
 
 import pytest
 
-from minijs8.protocol.grammar import parse
-from minijs8.protocol.types import DecodedFrame, FrameKind
+from microjs8.protocol.grammar import parse
+from microjs8.protocol.types import DecodedFrame, FrameKind
 
 
 def _frame(text: str, snr: int = -10, freq: float = 1500.0) -> DecodedFrame:
@@ -290,7 +290,7 @@ def test_real_truncated_heartbeat_reply_unknown():
 # ── Inbox / mailbox body inspectors (Phase 1+2) ──────────────────
 
 
-from minijs8.protocol.grammar import (
+from microjs8.protocol.grammar import (
     is_query_msgs,
     parse_msg,
     parse_msg_to,

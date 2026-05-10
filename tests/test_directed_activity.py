@@ -20,7 +20,7 @@ import threading
 
 import pytest
 
-from minijs8.activity import (
+from microjs8.activity import (
     DEFAULT_MAX_ENTRIES,
     Direction,
     DirectedActivityEntry,
