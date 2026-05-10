@@ -1,20 +1,29 @@
 """Canonical filesystem paths for MicroJS8.
 
-Production layout (Pi Zero 2W after image flash):
-  /opt/microjs8/             — application install root (read-only)
-  /opt/microjs8/venv/        — baked virtualenv
-  /opt/microjs8/microjs8/     — Python package (importable)
-  /etc/microjs8/             — shipped default config (read-only on R/O root)
-  /var/microjs8/             — writable runtime state (config, db, logs)
+Production layout (CardputerZero after .deb install — Phase 7):
+  /usr/share/APPLaunch/lib/microjs8/  — Python source (read-only)
+  /usr/share/APPLaunch/bin/microjs8   — launcher script (read-only)
+  /etc/microjs8/             — shipped default config (read-only)
+  /var/lib/microjs8/         — writable runtime state (config, db, logs)
+
+The data directory moved from MiniJS8's ``/var/microjs8`` to
+``/var/lib/microjs8`` in Phase 7 for two reasons:
+
+  1. Debian convention puts daemon state under ``/var/lib/<package>/``.
+  2. The Phase 7 systemd unit declares
+     ``ReadWritePaths=/var/lib/microjs8`` under ``ProtectSystem=strict``,
+     which actively blocks writes anywhere else under /var. The
+     paths constant here MUST agree with the unit, otherwise the
+     daemon silently fails to persist state.
 
 For host-side development and unit tests on the Pi 4 build host, two
 environment variables override the production roots:
 
-  MICROJS8_DATA_DIR    overrides /var/microjs8
+  MICROJS8_DATA_DIR    overrides /var/lib/microjs8
   MICROJS8_ETC_DIR     overrides /etc/microjs8
 
 This keeps tests from needing root access and keeps developer machines
-free of /var/microjs8 directories that don't belong to them.
+free of /var/lib/microjs8 directories that don't belong to them.
 """
 
 from __future__ import annotations
@@ -23,7 +32,10 @@ import os
 from pathlib import Path
 
 # Production roots (overridden by env vars when running off-target).
-_DEFAULT_DATA_DIR = Path("/var/microjs8")
+# This MUST agree with packaging/microjs8.service.in's
+# ReadWritePaths and WorkingDirectory; tests/test_paths.py asserts
+# the value so a future drift is caught immediately.
+_DEFAULT_DATA_DIR = Path("/var/lib/microjs8")
 _DEFAULT_ETC_DIR = Path("/etc/microjs8")
 
 

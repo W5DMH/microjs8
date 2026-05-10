@@ -1,7 +1,7 @@
 """Configuration loading and validation for MicroJS8.
 
 Configuration lives in TOML at ``paths.config_path()`` (default
-``/var/microjs8/config.toml``). On first boot, if no live config exists,
+``/var/lib/microjs8/config.toml``). On first boot, if no live config exists,
 the shipped defaults at ``paths.default_config_path()`` are copied in.
 
 Callsign and grid validation follows amateur-radio convention:

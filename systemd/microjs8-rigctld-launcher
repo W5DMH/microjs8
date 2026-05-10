@@ -40,17 +40,20 @@
 
 set -euo pipefail
 
-# Default config path. We read /var/microjs8/config.toml — the LIVE
-# config that the daemon also reads — NOT /etc/microjs8/config.toml,
-# which is the shipped TEMPLATE copied to /var on first boot. The
+# Default config path. We read /var/lib/microjs8/config.toml — the
+# LIVE config that the daemon also reads — NOT /etc/microjs8/config.toml,
+# which is the shipped TEMPLATE copied to /var/lib on first boot. The
 # distinction matters because the operator's UI cycle saves to
-# /var (via paths.config_path() in config.py); reading /etc here
+# /var/lib (via paths.config_path() in config.py); reading /etc here
 # would silently use the wrong radio_id whenever the live config
 # diverged from the template.
 #
+# Phase 7 moved this from /var/microjs8 to /var/lib/microjs8 — must
+# stay in agreement with src/microjs8/paths.py:_DEFAULT_DATA_DIR.
+#
 # Override is supported for testing — set MICROJS8_CONFIG to point
 # at a different file. Production use should always be the default.
-CONFIG_FILE="${MICROJS8_CONFIG:-/var/microjs8/config.toml}"
+CONFIG_FILE="${MICROJS8_CONFIG:-/var/lib/microjs8/config.toml}"
 DRY_RUN=0
 
 if [[ "${1:-}" == "--dry-run" ]]; then

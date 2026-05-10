@@ -9,18 +9,27 @@ from microjs8 import paths
 
 
 def test_default_paths_match_spec():
-    """Production paths must match the spec exactly."""
+    """Production paths must match the spec exactly.
+
+    Phase 7 moved the data root from MiniJS8's ``/var/microjs8`` to
+    ``/var/lib/microjs8`` to align with Debian convention AND with
+    the systemd unit's ``ReadWritePaths`` directive. This test
+    enforces the agreement so a future drift is caught here, before
+    it reaches a production install where the daemon would silently
+    fail to persist state.
+    """
     # Clear overrides for this assertion
     os.environ.pop("MICROJS8_DATA_DIR", None)
     os.environ.pop("MICROJS8_ETC_DIR", None)
 
-    assert paths.data_dir() == Path("/var/microjs8")
+    assert paths.data_dir() == Path("/var/lib/microjs8")
     assert paths.etc_dir() == Path("/etc/microjs8")
-    assert paths.config_path() == Path("/var/microjs8/config.toml")
+    assert paths.config_path() == Path("/var/lib/microjs8/config.toml")
     assert paths.default_config_path() == Path("/etc/microjs8/config.toml")
-    assert paths.log_dir() == Path("/var/microjs8/log")
-    assert paths.log_file() == Path("/var/microjs8/log/microjs8.log")
-    assert paths.db_path() == Path("/var/microjs8/messages.db")
+    assert paths.log_dir() == Path("/var/lib/microjs8/log")
+    assert paths.log_file() == Path("/var/lib/microjs8/log/microjs8.log")
+    assert paths.db_path() == Path("/var/lib/microjs8/messages.db")
+    assert paths.inbox_db_path() == Path("/var/lib/microjs8/inbox.db")
 
 
 def test_env_overrides(tmp_path, monkeypatch):
