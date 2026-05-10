@@ -13,15 +13,16 @@ authors = [{name = "MicroJS8 project"}]
 
 # Step 2 + 3 + 4 + 5 deps:
 #   Pillow                                   — image composition for screens
-#   adafruit-circuitpython-rgb-display       — ST7789 driver (Phase 5 will replace
-#   adafruit-blinka                          — provides board / digitalio modules
-#                                              this with /dev/fb0 mmap; deps stay until then)
 #   evdev                                    — built-in keyboard (CardputerZero TCA8418)
 #   numpy                                    — audio ring buffer + decimation (Step 5)
+#                                              and RGB888→RGB565 conversion for the
+#                                              framebuffer display path (Phase 5)
 #   sounddevice                              — PortAudio wrapper for QDX capture (Step 5)
 #
 # Dropped in Phase 3 (no tactile buttons on CardputerZero):
 #   gpiozero, lgpio
+# Dropped in Phase 5 (no SPI driver — kernel framebuffer at /dev/fb<N>):
+#   adafruit-circuitpython-rgb-display, adafruit-blinka
 #
 # Subsequent steps will add: pyserial (CAT control). The GFSK8 .so is
 # built and installed by build.sh — NOT a pip package — because there's
@@ -29,8 +30,6 @@ authors = [{name = "MicroJS8 project"}]
 # guaranteed ABI match.
 dependencies = [
     "Pillow>=10.0",
-    "adafruit-circuitpython-rgb-display>=3.13",
-    "adafruit-blinka>=8.0",
     "evdev>=1.6",
     "numpy>=1.24",
     "sounddevice>=0.4.6",
