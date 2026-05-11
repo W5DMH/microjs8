@@ -1,10 +1,22 @@
 [Desktop Entry]
+# IMPORTANT: the M5Stack APPLaunch parser only acts on five keys:
+#   Name (required), Exec (required), Icon, Terminal, Sysplause.
+# The other freedesktop.org keys (GenericName, Comment, Categories,
+# Keywords, Type) are silently ignored by the launcher but kept here
+# for forward compatibility with standard desktop-file tooling.
+#
+# Icon path MUST be RELATIVE to /usr/share/APPLaunch/ — the launcher
+# feeds the value straight to LVGL's filesystem driver, which is
+# mounted at letter 'A:' rooted at the APPLaunch prefix. An absolute
+# path will fail to load and the tile will appear blank.
+# Source of this rule:
+#   main/hal/linux/hal_paths_linux.c in CardputerZero-UserDemo
 Name=MicroJS8
 GenericName=JS8 Transceiver
 Comment=Self-contained JS8 transceiver for amateur radio
 Exec=/usr/share/APPLaunch/bin/microjs8
 Terminal=false
-Icon=/usr/share/APPLaunch/share/images/microjs8.png
+Icon=share/images/microjs8.png
 Type=Application
 Categories=HamRadio;Network;
 Keywords=ham;amateur;radio;js8;hf;digital;
