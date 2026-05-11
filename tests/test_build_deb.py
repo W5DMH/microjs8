@@ -292,6 +292,59 @@ def test_desktop_entry_points_to_launcher(tmp_path: Path):
     assert "Name=MicroJS8" in desktop
 
 
+def test_desktop_icon_path_is_relative_per_lvgl_fs_driver(tmp_path: Path):
+    """The M5Stack APPLaunch parser feeds the Icon= value directly to
+    LVGL's filesystem driver, which is mounted at letter 'A:' rooted
+    at /usr/share/APPLaunch/. Absolute paths fail to load → blank tile.
+
+    Source of the rule:
+      M5CardputerZero-UserDemo/projects/APPLaunch/main/hal/linux/hal_paths_linux.c
+
+    > "Image paths must be RELATIVE (e.g. share/images/foo.png) so LVGL
+    >  resolves them as A:share/images/foo.png →
+    >  /usr/share/APPLaunch/share/images/foo.png"
+
+    Regression guard against re-adding the absolute path.
+    """
+    deb = _run_packager(tmp_path, version="0.0.1")
+    extract_dir = tmp_path / "data"
+    extract_dir.mkdir()
+    subprocess.run(
+        ["dpkg-deb", "-x", str(deb), str(extract_dir)],
+        check=True, capture_output=True,
+    )
+    desktop = (extract_dir / "usr/share/APPLaunch/applications/microjs8.desktop").read_text()
+    assert "Icon=share/images/microjs8.png" in desktop, (
+        f"Icon= must be relative to /usr/share/APPLaunch/; got:\n{desktop}"
+    )
+    # And explicitly: NOT the absolute path that the launcher would fail to load.
+    assert "Icon=/usr/share/APPLaunch/share/images/microjs8.png" not in desktop
+
+
+def test_icon_file_is_90x90_png(tmp_path: Path):
+    """The launcher tile widget is sized for ~90x90 icons (matches
+    M5Stack's built-in PYTHON_logo.png, SETTING_logo.png, etc).
+    Smaller icons get upscaled; non-PNG won't load at all.
+    """
+    deb = _run_packager(tmp_path, version="0.0.1")
+    extract_dir = tmp_path / "data"
+    extract_dir.mkdir()
+    subprocess.run(
+        ["dpkg-deb", "-x", str(deb), str(extract_dir)],
+        check=True, capture_output=True,
+    )
+    icon = extract_dir / "usr/share/APPLaunch/share/images/microjs8.png"
+    assert icon.exists(), "icon must ship at the path the .desktop's Icon= refers to"
+
+    # Verify the bytes are a valid PNG and dimensions are 90x90.
+    # The .deb-relative location must agree with the .desktop's
+    # Icon=share/images/... so the launcher's LVGL FS driver finds it.
+    from PIL import Image
+    with Image.open(icon) as im:
+        assert im.format == "PNG", f"icon must be PNG; got {im.format}"
+        assert im.size == (90, 90), f"icon must be 90x90; got {im.size}"
+
+
 # ── Version-extraction unit test (independent of dpkg-deb) ──────────
 
 
