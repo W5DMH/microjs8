@@ -37,6 +37,10 @@ _log = logging.getLogger(__name__)
 _MAX_CALLSIGN = 10
 _MAX_GRID = 6
 _MAX_UNITS = 5  # "miles" / "km"
+# Groups field: comma-separated list of up to 4 entries, each '@' +
+# 1-8 alphanumeric/slash chars. Worst case ~44 chars; allow 64 for
+# operator whitespace before the config validator normalises.
+_MAX_GROUPS_FIELD = 64
 # Max length for the freq_hz edit buffer. Up to "14078000" (8 chars) for
 # Hz form, or "14.078" (6 chars) for MHz form. 12 is comfortable margin.
 _MAX_FREQ_HZ = 12
@@ -72,7 +76,7 @@ class InputRouter:
     def __init__(
         self,
         ui: UIState,
-        save_config: Callable[[str, str, str], bool],
+        save_config: Callable[..., bool],
         emergency_bypass: EmergencyBypass,
         set_frequency: Optional[Callable[[int], bool]] = None,
         cycle_radio: Optional[Callable[[], bool]] = None,
@@ -200,7 +204,23 @@ class InputRouter:
             limit = self._field_max_len(field)
             if len(buf) >= limit:
                 return
-            self._ui.edit_append(event.char)
+            # JS8Call's wire protocol is uppercase-only — callsigns,
+            # grids, command verbs, free-text bodies all transmit
+            # uppercase. We normalise at input time so the operator's
+            # keyboard state (Shift / CapsLock / autocorrect) doesn't
+            # produce mixed-case content that would either fail to
+            # transmit cleanly or render inconsistently against
+            # peers' uppercase displays. The single-character
+            # ``.upper()`` is a no-op for digits, punctuation, and
+            # already-uppercase letters — only ``a..z`` flip.
+            #
+            # Exception: ``units`` is a UI-local preference (miles vs
+            # km) that never appears on the air, and the existing
+            # validator rejects ``KM`` / ``MILES`` so uppercasing
+            # would break the operator's input. Skip the uppercase
+            # conversion for that field only.
+            ch = event.char if field == "units" else event.char.upper()
+            self._ui.edit_append(ch)
 
     def _field_max_len(self, field_name: Optional[str]) -> int:
         if field_name == "callsign":
@@ -209,6 +229,11 @@ class InputRouter:
             return _MAX_GRID
         if field_name == "units":
             return _MAX_UNITS
+        if field_name == "groups":
+            # Worst-case: 4 groups × (1 "@" + 8 chars + ", ") = ~44.
+            # Allow some slack for operator whitespace before commit —
+            # the config validator strips/normalises on save.
+            return _MAX_GROUPS_FIELD
         if field_name == "freq_hz":
             return _MAX_FREQ_HZ
         return 0
@@ -233,6 +258,7 @@ class InputRouter:
         new_call = snap.callsign
         new_grid = snap.grid
         new_units = snap.units
+        new_groups = snap.groups
 
         if field == "callsign":
             new_call = buf
@@ -240,8 +266,16 @@ class InputRouter:
             new_grid = buf
         elif field == "units":
             new_units = buf
+        elif field == "groups":
+            # Hand the raw operator input straight to the save path —
+            # config._validate_groups handles comma-splitting,
+            # uppercase normalisation, dedup, implicit-group filtering,
+            # and per-entry format validation. If the buffer is
+            # malformed, save_config returns False and we re-render
+            # the operator can correct without losing typed content.
+            new_groups = buf
 
-        ok = self._save_config(new_call, new_grid, new_units)
+        ok = self._save_config(new_call, new_grid, new_units, new_groups=new_groups)
         if ok:
             self._ui.commit_edit()
         else:
@@ -405,14 +439,20 @@ class InputRouter:
         # operator to remember an explicit Enter to begin editing.
         if event.char is not None and snapshot.screen is Screen.SETUP:
             field = self._ui.focused_field_name()
-            if field in ("callsign", "grid", "units", "freq_hz"):
+            # Phase 11: 'groups' is editable. Comma-separated list of
+            # @<NAME> entries; the config validator handles parsing.
+            if field in ("callsign", "grid", "groups", "units", "freq_hz"):
                 self._ui.begin_edit(field)
                 # Replace the prefilled buffer with the typed character —
                 # the operator clearly wants to overwrite, not append.
                 # (begin_edit pre-filled with current value; we clear it.)
                 while self._ui.edit_buffer():
                     self._ui.edit_backspace()
-                self._ui.edit_append(event.char)
+                # Same uppercase rule as the in-edit path: JS8Call wire
+                # protocol is uppercase-only, except 'units' which is a
+                # UI-local preference.
+                ch = event.char if field == "units" else event.char.upper()
+                self._ui.edit_append(ch)
                 return
 
     def _ring_locked(self, snapshot) -> bool:
@@ -435,7 +475,7 @@ class InputRouter:
                 if self._cycle_radio is not None:
                     self._cycle_radio()
                 return
-            if field in ("callsign", "grid", "units", "freq_hz"):
+            if field in ("callsign", "grid", "groups", "units", "freq_hz"):
                 self._ui.begin_edit(field)
                 return
         # Other screens have no Enter binding in Step 3.

@@ -81,6 +81,7 @@ from microjs8.tx import (
     TxScheduler,
     default_chrony_ok,
 )
+from microjs8.tx.auto_response import plan_auto_response
 from microjs8.ui import (
     DirectedRow,
     DisplayDevice,
@@ -879,15 +880,33 @@ class MicroJS8App:
 
     # ── Callbacks invoked by the router ──────────────────────────────
 
-    def _save_config_sync(self, callsign: str, grid: str, units: str) -> bool:
+    def _save_config_sync(
+        self,
+        callsign: str,
+        grid: str,
+        units: str,
+        *,
+        new_groups: Optional[object] = None,
+    ) -> bool:
         """Atomic config save invoked from the asyncio thread.
 
         Returns True on success, False on validation or write error.
         On success, refreshes the in-memory Config and the UIState
         identity so the operator sees the change immediately.
+
+        Phase 11: ``new_groups`` is the operator's raw input from the
+        Groups field on the Setup screen — either a comma-separated
+        string ("@EMCOMM, @ARES") or a tuple (already validated).
+        ``None`` (the default) means "preserve whatever groups are
+        currently persisted" so a single-field edit doesn't blow
+        away the other fields. config.save_atomic() handles the
+        comma-split / uppercase / dedup / implicit-filter / cap
+        enforcement via its own _validate_groups helper.
         """
         try:
-            new_cfg = config_mod.save_atomic(callsign, grid, units)
+            new_cfg = config_mod.save_atomic(
+                callsign, grid, units, groups=new_groups,
+            )
         except ConfigError as exc:
             _log.warning("config save rejected: %s", exc)
             return False
@@ -902,6 +921,7 @@ class MicroJS8App:
                 new_cfg.station.grid,
                 new_cfg.units_distance,
                 new_cfg.tx_allowed,
+                groups=new_cfg.station.groups,
             )
         return True
 
@@ -1146,6 +1166,18 @@ class MicroJS8App:
                     self._log_directed_in(parsed)
             except Exception:
                 _log.exception("directed-activity log (inbound ACK) failed")
+
+            # Phase 11: auto-respond to group SNR?/GRID? queries.
+            # Fires only when the frame was addressed to a group we
+            # belong to (parsed.to_call starts with '@' and isn't an
+            # implicit broadcast) AND parsed.is_for_us is True (which
+            # the parser sets when our address-set matched). Single-
+            # frame queries land here; multi-frame queries land in
+            # _dispatch_assembled, which calls the same helper.
+            try:
+                self._maybe_auto_respond_to_group_query(parsed)
+            except Exception:
+                _log.exception("auto-respond (decoded path) raised")
 
             # Step 6: ACK forwarding. Any ACK frame addressed to us
             # might be the response to a directed message we sent.
@@ -1528,6 +1560,16 @@ class MicroJS8App:
         to_call = (assembled.to_call or "").upper()
         is_direct = (to_call == our_call)
         is_allcall = (to_call == "@ALLCALL")
+        # Phase 11: group-directed = '@<NAME>' where <NAME> is not
+        # ALLCALL/HB AND we're a member. The parser already set
+        # is_for_us when we matched the address; here we just need
+        # the structural test (starts with '@', not implicit) so we
+        # don't fire auto-respond on broadcasts.
+        is_group_directed = (
+            to_call.startswith("@")
+            and to_call not in ("@ALLCALL", "@HB")
+            and to_call in {g.upper() for g in self._config.station.groups}
+        )
         verb = assembled.verb
         body = assembled.body
 
@@ -1566,6 +1608,18 @@ class MicroJS8App:
                 self._log_directed_in_assembled(assembled)
             except Exception:
                 _log.exception("directed-activity log (assembled) failed")
+
+        # Phase 11: auto-respond to group SNR?/GRID? queries that came
+        # in as multi-frame buffered commands (rare — these verbs
+        # usually fit in one frame — but defensive). The single-frame
+        # fast path lives in _on_decoded_frame.
+        if is_group_directed:
+            try:
+                self._maybe_auto_respond_to_group_query_assembled(
+                    assembled=assembled,
+                )
+            except Exception:
+                _log.exception("auto-respond (assembled path) raised")
 
         try:
             if is_direct:
@@ -1772,6 +1826,199 @@ class MicroJS8App:
         self._enqueue_directed_reply(
             text=text, to_call=to_call, kind=OutboundKind.REPLY,
         )
+
+    # ── Phase 11: ALLCALL action callbacks ───────────────────────────
+
+    def _allcall_query_msgs_sync(self) -> bool:
+        """Enqueue an @ALLCALL QUERY MSGS broadcast.
+
+        Called from the router when the operator presses Enter on
+        the QUERY MSGS row of the ALLCALL screen. Any station holding
+        buffered MSGs for us is expected to reply over the next
+        couple of slots; those replies land in the DIRECTED activity
+        log + INBOX via the normal decode path.
+        """
+        wire = "@ALLCALL QUERY MSGS"
+        if self._outbound_queue is None:
+            _log.warning("allcall query_msgs: TX pipeline not running")
+            return False
+        try:
+            row_id = self._outbound_queue.enqueue_for_encoding(
+                wire,
+                kind=OutboundKind.ALLCALL,
+                to_call=None,
+            )
+        except Exception:
+            _log.exception(
+                "allcall query_msgs: enqueue_for_encoding failed"
+            )
+            return False
+        if row_id is None:
+            _log.warning("allcall query_msgs: queue full, dropped")
+            return False
+        _log.info(
+            "allcall query_msgs: enqueued row %d: %r", row_id, wire
+        )
+        return True
+
+    def _allcall_cq_sync(self) -> bool:
+        """Enqueue a CQ broadcast.
+
+        Wire form: ``CQ CQ CQ <my_4char_grid>``. The from-envelope is
+        added by the encoder. Per spec §5.1 (standard JS8 CQ form).
+
+        Returns False if the station isn't configured (no grid yet —
+        we'd be sending a meaningless CQ) or the queue is full.
+        """
+        grid = self._config.station.grid
+        if not grid:
+            _log.warning(
+                "allcall cq: no grid configured, not sending"
+            )
+            return False
+        if self._outbound_queue is None:
+            _log.warning("allcall cq: TX pipeline not running")
+            return False
+        # 4-char grid for compatibility (JS8 CQ doesn't expect the
+        # full 6-char locator).
+        wire = f"CQ CQ CQ {grid[:4]}"
+        try:
+            row_id = self._outbound_queue.enqueue_for_encoding(
+                wire,
+                kind=OutboundKind.CQ,
+                to_call=None,
+            )
+        except Exception:
+            _log.exception("allcall cq: enqueue_for_encoding failed")
+            return False
+        if row_id is None:
+            _log.warning("allcall cq: queue full, dropped")
+            return False
+        _log.info("allcall cq: enqueued row %d: %r", row_id, wire)
+        return True
+
+    # ── Phase 11: group-query auto-respond ───────────────────────────
+
+    def _maybe_auto_respond_to_group_query_assembled(
+        self, *, assembled,
+    ) -> None:
+        """Schedule a group-query auto-reply from an assembled frame.
+
+        Mirror of ``_maybe_auto_respond_to_group_query`` but takes an
+        AssembledMessage rather than a ParsedFrame. The two paths
+        exist because group queries can arrive either as a single
+        frame (parsed directly) OR as a multi-frame buffered command
+        (reassembled). Both end up calling the same pure planner.
+
+        Assembled messages don't carry per-frame SNR (frame-level
+        metadata is lost in reassembly), so SNR? replies use None,
+        which the planner correctly rejects — group SNR? answered
+        only when we have the actual SNR. Multi-frame SNR? queries
+        are pathological anyway (the SNR query is 4-5 chars; if it
+        fragmented, copy was bad enough that our SNR estimate
+        wouldn't be informative).
+        """
+        verb = assembled.verb or ""
+        body = assembled.body or ""
+        plan = plan_auto_response(
+            verb=verb,
+            body=body,
+            from_call=assembled.from_call or "",
+            to_call=assembled.to_call or "",
+            our_groups=self._config.station.groups,
+            our_grid=self._config.station.grid,
+            snr_db=None,  # not available post-reassembly
+        )
+        if plan is None:
+            return
+        _log.info(
+            "auto-respond planned (assembled): %r → %s in %.1fs",
+            plan.text, plan.to_call, plan.delay_s,
+        )
+        self._loop.call_later(
+            plan.delay_s,
+            self._enqueue_auto_response,
+            plan.text,
+            plan.to_call,
+        )
+
+    def _maybe_auto_respond_to_group_query(self, parsed) -> None:
+        """Schedule an auto-reply if ``parsed`` is a group SNR?/GRID?.
+
+        Called from both the single-frame decode path and the
+        multi-frame dispatch path. The actual policy decision lives
+        in ``tx.auto_response.plan_auto_response`` (pure function,
+        unit-testable in isolation); this method is the thin wiring
+        that gathers state, calls the planner, and schedules.
+
+        The delay is realised with ``loop.call_later`` — a one-shot
+        timer that fires on the asyncio thread. We pass the bound
+        method directly so the closure stays minimal.
+        """
+        # Cheap pre-filter: only inspect frames the parser marked as
+        # for-us AND addressed to a group (starts with '@'). This
+        # avoids calling plan_auto_response for every single decode.
+        to_call = parsed.to_call or ""
+        if not parsed.is_for_us:
+            return
+        if not to_call.startswith("@"):
+            return
+        if to_call.upper() in ("@ALLCALL", "@HB"):
+            return
+
+        # Extract verb + body. Same split as _log_directed_in: the
+        # frame body never includes the sender's call (parsed off
+        # into from_call), so the first whitespace-delimited token
+        # IS the verb.
+        body = (parsed.body or "").strip()
+        if not body:
+            return
+        split = body.split(None, 1)
+        verb = split[0]
+        rest = split[1] if len(split) > 1 else ""
+
+        plan = plan_auto_response(
+            verb=verb,
+            body=rest,
+            from_call=parsed.from_call or "",
+            to_call=to_call,
+            our_groups=self._config.station.groups,
+            our_grid=self._config.station.grid,
+            snr_db=int(parsed.decoded.snr_db) if parsed.decoded else None,
+        )
+        if plan is None:
+            return
+
+        _log.info(
+            "auto-respond planned: %r → %s in %.1fs (group=%s verb=%s)",
+            plan.text, plan.to_call, plan.delay_s, to_call, verb,
+        )
+        self._loop.call_later(
+            plan.delay_s,
+            self._enqueue_auto_response,
+            plan.text,
+            plan.to_call,
+        )
+
+    def _enqueue_auto_response(self, text: str, to_call: str) -> None:
+        """Submit a previously-planned auto-response to the outbound queue.
+
+        Called by ``loop.call_later`` after the randomized delay.
+        Uses ``OutboundKind.REPLY`` because group-query replies are
+        terminal in their exchange — the asker doesn't auto-ACK an
+        SNR/GRID reply, so queuing as DIRECTED would loop on
+        WAIT_ACK retransmits forever.
+        """
+        try:
+            self._enqueue_directed_reply(
+                text=text,
+                to_call=to_call,
+                kind=OutboundKind.REPLY,
+            )
+        except Exception:
+            _log.exception(
+                "auto-respond enqueue failed: text=%r to=%s", text, to_call,
+            )
 
     def _enqueue_directed_reply(
         self,

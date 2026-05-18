@@ -30,10 +30,18 @@ class _SaveCapture:
 
     def __init__(self, accept: bool = True) -> None:
         self.calls: list[tuple[str, str, str]] = []
+        # Phase 11: separately capture the new_groups kwarg so
+        # group-edit tests can assert on it; existing tests that
+        # ignore it keep working.
+        self.groups_calls: list[object] = []
         self.accept = accept
 
-    def __call__(self, callsign: str, grid: str, units: str) -> bool:
+    def __call__(
+        self, callsign: str, grid: str, units: str,
+        *, new_groups: object = None,
+    ) -> bool:
         self.calls.append((callsign, grid, units))
+        self.groups_calls.append(new_groups)
         return self.accept
 
 
