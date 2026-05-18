@@ -505,6 +505,27 @@ class MailboxStore:
             newest_first=True,
         )
 
+    def list_inbox_with_stored(
+        self, *, limit: int = 100,
+    ) -> list[InboxRecord]:
+        """All UNREAD + READ + STORE rows, newest first.
+
+        This is what the unified Inbox screen renders (May 2026 W5DMH
+        spec): inbox-bound mail and held-for-others store mail in one
+        list, visually distinguished by type. Operators get a single
+        place to see "everything mailbox-related" and can delete
+        held STOREs from the same UI flow they already know.
+
+        The STORE rows are kept in the same SQL query so the newest-
+        first ordering interleaves them naturally — a STORE created
+        5 minutes ago appears above a READ that's 30 minutes old.
+        """
+        return self._list_by_types(
+            (TYPE_UNREAD, TYPE_READ, TYPE_STORE),
+            limit=limit,
+            newest_first=True,
+        )
+
     def list_unread(self, *, limit: int = 100) -> list[InboxRecord]:
         """UNREAD rows only — for the home-screen unread count."""
         return self._list_by_types(
