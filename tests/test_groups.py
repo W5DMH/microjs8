@@ -42,8 +42,8 @@ def isolated_paths(tmp_path, monkeypatch):
     etc = tmp_path / "etc"
     data.mkdir()
     etc.mkdir()
-    monkeypatch.setenv("MINIJS8_DATA_DIR", str(data))
-    monkeypatch.setenv("MINIJS8_ETC_DIR", str(etc))
+    monkeypatch.setenv("MICROJS8_DATA_DIR", str(data))
+    monkeypatch.setenv("MICROJS8_ETC_DIR", str(etc))
     return data, etc
 
 
