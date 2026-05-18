@@ -45,24 +45,33 @@ def _make_save(state: UIState):
     in-progress edit reads OTHER current values from snapshot, so
     if we don't refresh after the callsign save, the subsequent
     grid save would write a stale (N0CALL) callsign."""
-    def save(callsign: str, grid: str, units: str) -> bool:
+    def save(
+        callsign: str, grid: str, units: str,
+        *, new_groups: object = None,
+    ) -> bool:
         try:
-            cfg = config_mod.save_atomic(callsign, grid, units)
+            cfg = config_mod.save_atomic(
+                callsign, grid, units, groups=new_groups,
+            )
         except config_mod.ConfigError:
             return False
         state.set_identity(
             cfg.station.callsign, cfg.station.grid,
             cfg.units_distance, cfg.tx_allowed,
+            groups=cfg.station.groups,
         )
         return True
     return save
 
 
-def _save(callsign: str, grid: str, units: str) -> bool:
+def _save(
+    callsign: str, grid: str, units: str,
+    *, new_groups: object = None,
+) -> bool:
     """Module-level fallback save (used by tests that don't need
     UIState refresh — single-edit tests)."""
     try:
-        config_mod.save_atomic(callsign, grid, units)
+        config_mod.save_atomic(callsign, grid, units, groups=new_groups)
         return True
     except config_mod.ConfigError:
         return False

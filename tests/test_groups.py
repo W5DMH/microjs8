@@ -23,7 +23,11 @@ from microjs8.activity import DirectedActivityLog, Direction
 from microjs8.protocol.types import DecodedFrame, HeardStation
 from microjs8.protocol.grammar import parse
 from microjs8.protocol.types import FrameKind
-# Auto-response import deferred to Phase 11.
+from microjs8.tx.auto_response import (
+    AUTO_RESPONSE_MAX_DELAY_S,
+    AutoResponsePlan,
+    plan_auto_response,
+)
 from microjs8.ui.state import Screen, UIState
 
 
@@ -545,3 +549,361 @@ def test_begin_edit_groups_empty_yields_empty_buffer():
     s.set_screen(Screen.SETUP)
     s.begin_edit("groups")
     assert s.edit_buffer() == ""
+
+
+# ── Auto-response planner ────────────────────────────────────────────
+
+
+def _seeded_rng(seed: int = 42) -> random.Random:
+    return random.Random(seed)
+
+
+def test_plan_snr_query_for_member():
+    plan = plan_auto_response(
+        verb="SNR?", body="",
+        from_call="K1ABC", to_call="@ARESGA",
+        our_groups=("@ARESGA",),
+        our_grid="EN83",
+        snr_db=-9,
+        rng=_seeded_rng(),
+    )
+    assert plan is not None
+    assert plan.text == "K1ABC SNR -9"
+    assert plan.to_call == "K1ABC"
+    assert 0.0 <= plan.delay_s <= AUTO_RESPONSE_MAX_DELAY_S
+
+
+def test_plan_grid_query_for_member():
+    plan = plan_auto_response(
+        verb="GRID?", body="",
+        from_call="K1ABC", to_call="@EMCOMM",
+        our_groups=("@EMCOMM",),
+        our_grid="EN83ih",
+        snr_db=-10,
+        rng=_seeded_rng(),
+    )
+    assert plan is not None
+    assert plan.text == "K1ABC GRID EN83ih"
+    assert plan.to_call == "K1ABC"
+
+
+def test_plan_non_member_no_reply():
+    """We're NOT in @ARESGA → no plan, even for a query verb."""
+    plan = plan_auto_response(
+        verb="SNR?", body="",
+        from_call="K1ABC", to_call="@ARESGA",
+        our_groups=("@EMCOMM",),  # different group
+        our_grid="EN83",
+        snr_db=-9,
+    )
+    assert plan is None
+
+
+def test_plan_unsupported_verb_no_reply():
+    """INFO?/HEARING?/AGN? are out of scope for this drop."""
+    for verb in ("INFO?", "HEARING?", "AGN?", "QSL?", "STATUS"):
+        plan = plan_auto_response(
+            verb=verb, body="",
+            from_call="K1ABC", to_call="@EMCOMM",
+            our_groups=("@EMCOMM",),
+            our_grid="EN83",
+            snr_db=-9,
+        )
+        assert plan is None, f"verb={verb} unexpectedly produced plan"
+
+
+def test_plan_allcall_no_reply():
+    """@ALLCALL queries are not auto-answered (would jam the channel)."""
+    plan = plan_auto_response(
+        verb="SNR?", body="",
+        from_call="K1ABC", to_call="@ALLCALL",
+        our_groups=("@EMCOMM",),
+        our_grid="EN83",
+        snr_db=-9,
+    )
+    assert plan is None
+
+
+def test_plan_hb_no_reply():
+    """@HB queries (would be unusual) are not auto-answered."""
+    plan = plan_auto_response(
+        verb="SNR?", body="",
+        from_call="K1ABC", to_call="@HB",
+        our_groups=("@EMCOMM",),
+        our_grid="EN83",
+        snr_db=-9,
+    )
+    assert plan is None
+
+
+def test_plan_personal_directed_no_reply():
+    """Direct-to-us queries are operator-answered manually in this drop."""
+    plan = plan_auto_response(
+        verb="SNR?", body="",
+        from_call="K1ABC", to_call="W5DMH",
+        our_groups=("@EMCOMM",),
+        our_grid="EN83",
+        snr_db=-9,
+    )
+    assert plan is None
+
+
+def test_plan_snr_requires_snr_value():
+    """SNR? with snr_db=None → no plan."""
+    plan = plan_auto_response(
+        verb="SNR?", body="",
+        from_call="K1ABC", to_call="@EMCOMM",
+        our_groups=("@EMCOMM",),
+        our_grid="EN83",
+        snr_db=None,
+    )
+    assert plan is None
+
+
+def test_plan_grid_requires_grid_value():
+    """GRID? with empty configured grid → no plan."""
+    plan = plan_auto_response(
+        verb="GRID?", body="",
+        from_call="K1ABC", to_call="@EMCOMM",
+        our_groups=("@EMCOMM",),
+        our_grid="",  # not configured
+        snr_db=-9,
+    )
+    assert plan is None
+
+
+def test_plan_delay_is_randomized_within_bounds():
+    """Across many invocations the delay should span most of [0, MAX]."""
+    rng = random.Random(0)
+    delays = []
+    for _ in range(200):
+        p = plan_auto_response(
+            verb="SNR?", body="",
+            from_call="K1ABC", to_call="@EMCOMM",
+            our_groups=("@EMCOMM",),
+            our_grid="EN83",
+            snr_db=-5,
+            rng=rng,
+        )
+        assert p is not None
+        delays.append(p.delay_s)
+    # All within bounds.
+    assert all(0.0 <= d <= AUTO_RESPONSE_MAX_DELAY_S for d in delays)
+    # Spread: min and max should be well-separated (sanity check that
+    # we're actually getting a uniform distribution, not a constant).
+    assert max(delays) - min(delays) > AUTO_RESPONSE_MAX_DELAY_S * 0.5
+
+
+def test_plan_positive_snr_formats_without_explicit_sign():
+    """+5 dB → 'SNR 5' (we send what Python's int repr gives, which
+    is fine for JS8Call's parser)."""
+    plan = plan_auto_response(
+        verb="SNR?", body="",
+        from_call="K1ABC", to_call="@EMCOMM",
+        our_groups=("@EMCOMM",),
+        our_grid="EN83",
+        snr_db=5,
+    )
+    assert plan is not None
+    assert plan.text == "K1ABC SNR 5"
+
+
+def test_plan_returns_correct_type():
+    plan = plan_auto_response(
+        verb="SNR?", body="",
+        from_call="K1ABC", to_call="@EMCOMM",
+        our_groups=("@EMCOMM",),
+        our_grid="EN83",
+        snr_db=-9,
+    )
+    assert isinstance(plan, AutoResponsePlan)
+    assert plan.text and plan.to_call
+    assert isinstance(plan.delay_s, float)
+
+
+def test_plan_empty_from_call_no_reply():
+    """Can't reply to no-one."""
+    plan = plan_auto_response(
+        verb="SNR?", body="",
+        from_call="", to_call="@EMCOMM",
+        our_groups=("@EMCOMM",),
+        our_grid="EN83",
+        snr_db=-9,
+    )
+    assert plan is None
+
+
+
+# ── Router: end-to-end keypress flow on the Groups field ─────────────
+#
+# Regression coverage for the May 2026 bug where the Setup→Groups
+# field would accept Tab-focus but completely ignored typed keystrokes
+# AND Enter. Root cause: the router's "enter edit mode" whitelist in
+# _handle and _handle_enter listed only ("callsign","grid","units",
+# "freq_hz") — not "groups". Focus could land there but no edit
+# session would ever start, so the operator's typing was silently
+# dropped. These tests simulate the exact keypress sequence an
+# operator performs and assert that the buffer accumulates and the
+# save callback fires with the right value.
+
+
+def _setup_state_for_router_tests():
+    """Build a Setup-screen UIState ready for router tests."""
+    from microjs8.input.router import InputRouter
+    from microjs8.input.events import KeyEvent
+    state = UIState("K1ABC", "FN42", True, "miles")
+    state.set_screen(Screen.SETUP)
+    return state
+
+
+def test_groups_field_accepts_typed_characters():
+    """Tab to groups, type '@EMCOMM' — buffer should accumulate."""
+    from microjs8.input.router import InputRouter
+    from microjs8.input.events import Key, KeyEvent
+    state = _setup_state_for_router_tests()
+
+    saved: list = []
+    def save(callsign, grid, units, new_groups=None):
+        saved.append({"groups": new_groups})
+        return True
+    def emergency(): pass
+
+    router = InputRouter(state, save_config=save, emergency_bypass=emergency)
+    # Tab past callsign and grid to land on groups.
+    router.handle(KeyEvent(key=Key.TAB))
+    router.handle(KeyEvent(key=Key.TAB))
+    assert state.focused_field_name() == "groups"
+
+    # Type-to-edit: typing the first character must auto-enter edit
+    # mode and append the character to the buffer.
+    router.handle(KeyEvent(char="@"))
+    assert state.is_editing(), "typing should have started an edit session"
+    assert state.edit_buffer() == "@", (
+        f"buffer should contain '@' after one keypress, got "
+        f"{state.edit_buffer()!r}"
+    )
+
+    # Continue typing to build "@EMCOMM" — uppercase happens in the
+    # router (lowercase 'e' → 'E').
+    for ch in "emcomm":
+        router.handle(KeyEvent(char=ch))
+    assert state.edit_buffer() == "@EMCOMM"
+
+    # Enter commits — save callback fires with our typed buffer in
+    # new_groups; the config validator inside save_atomic normalises
+    # and rejects malformed input. In this test the save is a stub
+    # that just captures the value.
+    router.handle(KeyEvent(key=Key.ENTER))
+    assert saved == [{"groups": "@EMCOMM"}], saved
+
+
+def test_groups_field_enter_begins_edit_session():
+    """Enter on the focused groups field starts an edit session
+    pre-filled with the current value (matches the pattern for
+    callsign/grid/units/freq_hz)."""
+    from microjs8.input.router import InputRouter
+    from microjs8.input.events import Key, KeyEvent
+    state = UIState(
+        "K1ABC", "FN42", True, "miles", groups=("@EMCOMM",),
+    )
+    state.set_screen(Screen.SETUP)
+    def save(callsign, grid, units, new_groups=None): return True
+    def emergency(): pass
+    router = InputRouter(state, save_config=save, emergency_bypass=emergency)
+
+    router.handle(KeyEvent(key=Key.TAB))
+    router.handle(KeyEvent(key=Key.TAB))
+    assert state.focused_field_name() == "groups"
+
+    router.handle(KeyEvent(key=Key.ENTER))
+    assert state.is_editing()
+    # Pre-fill: the buffer should hold the comma-joined current value.
+    assert state.edit_buffer() == "@EMCOMM"
+
+
+def test_groups_field_commits_comma_separated_list():
+    """End-to-end: type '@EMCOMM,@ARES', commit, save sees the
+    comma-separated string (the validator inside save_atomic does
+    the actual parse + normalisation)."""
+    from microjs8.input.router import InputRouter
+    from microjs8.input.events import Key, KeyEvent
+    state = _setup_state_for_router_tests()
+
+    captured = {}
+    def save(callsign, grid, units, new_groups=None):
+        captured["groups"] = new_groups
+        return True
+    def emergency(): pass
+
+    router = InputRouter(state, save_config=save, emergency_bypass=emergency)
+    router.handle(KeyEvent(key=Key.TAB))
+    router.handle(KeyEvent(key=Key.TAB))
+    for ch in "@emcomm,@ares":
+        router.handle(KeyEvent(char=ch))
+    router.handle(KeyEvent(key=Key.ENTER))
+    # Router uppercases each char; the buffer therefore holds the
+    # uppercase form. The comma is preserved.
+    assert captured["groups"] == "@EMCOMM,@ARES"
+
+
+def test_groups_field_accepts_slash_and_digits():
+    """Typing '@DX/NA' should land verbatim in the buffer — '/' and
+    digits are part of the JS8Call group regex."""
+    from microjs8.input.router import InputRouter
+    from microjs8.input.events import Key, KeyEvent
+    state = _setup_state_for_router_tests()
+    def save(callsign, grid, units, new_groups=None): return True
+    def emergency(): pass
+    router = InputRouter(state, save_config=save, emergency_bypass=emergency)
+
+    router.handle(KeyEvent(key=Key.TAB))
+    router.handle(KeyEvent(key=Key.TAB))
+    for ch in "@dx/na":
+        router.handle(KeyEvent(char=ch))
+    assert state.edit_buffer() == "@DX/NA"
+
+
+def test_groups_field_backspace_works_in_edit():
+    """Edit then backspace removes characters one at a time."""
+    from microjs8.input.router import InputRouter
+    from microjs8.input.events import Key, KeyEvent
+    state = _setup_state_for_router_tests()
+    def save(callsign, grid, units, new_groups=None): return True
+    def emergency(): pass
+    router = InputRouter(state, save_config=save, emergency_bypass=emergency)
+
+    router.handle(KeyEvent(key=Key.TAB))
+    router.handle(KeyEvent(key=Key.TAB))
+    for ch in "@FOO":
+        router.handle(KeyEvent(char=ch))
+    assert state.edit_buffer() == "@FOO"
+    router.handle(KeyEvent(key=Key.BACKSPACE))
+    assert state.edit_buffer() == "@FO"
+    router.handle(KeyEvent(key=Key.BACKSPACE))
+    router.handle(KeyEvent(key=Key.BACKSPACE))
+    assert state.edit_buffer() == "@"
+
+
+def test_groups_field_esc_cancels_edit():
+    """ESC during edit discards the buffer without saving."""
+    from microjs8.input.router import InputRouter
+    from microjs8.input.events import Key, KeyEvent
+    state = _setup_state_for_router_tests()
+
+    save_calls = []
+    def save(callsign, grid, units, new_groups=None):
+        save_calls.append(new_groups)
+        return True
+    def emergency(): pass
+
+    router = InputRouter(state, save_config=save, emergency_bypass=emergency)
+    router.handle(KeyEvent(key=Key.TAB))
+    router.handle(KeyEvent(key=Key.TAB))
+    for ch in "@TEST":
+        router.handle(KeyEvent(char=ch))
+    router.handle(KeyEvent(key=Key.ESC))
+    assert not state.is_editing()
+    assert save_calls == []  # nothing committed
+
+
+
