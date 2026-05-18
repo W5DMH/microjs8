@@ -1416,6 +1416,19 @@ def _setup_rows(state: UISnapshot) -> list[tuple[str, str, str, tuple[int, int, 
     callsign_color = theme.FG if state.callsign != "N0CALL" else theme.FG_BAD
     grid_color = theme.FG if state.grid else theme.FG_BAD
     grid_display = state.grid if state.grid else "(unset)"
+    # Groups row: displays the comma-separated configured groups, or
+    # "(none)" in dim grey when empty. The display value is what the
+    # operator types — comma-separated with the '@' prefix on each.
+    # Dim grey for empty (not red): groups are optional, an empty
+    # list isn't a misconfiguration. Layout fits the same row height
+    # as the other Setup rows (Phase 4 reworked screens.py for the
+    # 320×170 panel — see header notes in this file).
+    if state.groups:
+        groups_display = ", ".join(state.groups)
+        groups_color = theme.FG
+    else:
+        groups_display = "(none)"
+        groups_color = theme.FG_DIM
     freq_mhz = state.freq_hz / 1_000_000.0
     # Radio row: show the human-readable display name from the
     # registry. Pressing Enter on this row cycles to the next radio,
@@ -1430,14 +1443,15 @@ def _setup_rows(state: UISnapshot) -> list[tuple[str, str, str, tuple[int, int, 
         # rejects unknowns). Show the raw id as a defensive fallback.
         radio_label = state.radio_id
     return [
-        ("callsign", "Call",  state.callsign,                      callsign_color),
-        ("grid",     "Grid",  grid_display,                        grid_color),
-        ("units",    "Units", state.units,                         theme.FG),
+        ("callsign", "Call",   state.callsign,                      callsign_color),
+        ("grid",     "Grid",   grid_display,                        grid_color),
+        ("groups",   "Groups", groups_display,                      groups_color),
+        ("units",    "Units",  state.units,                         theme.FG),
         # Step 6: editable. Frequency goes through CAT to the radio.
-        ("freq_hz",  "Freq",  f"{freq_mhz:.3f} MHz",               theme.FG),
-        ("radio",    "Radio", radio_label,                         theme.FG),
-        ("mode",     "Mode",  state.mode,                          theme.FG_DIM),
-        ("logs",     "Logs",  "30 days",                           theme.FG_DIM),
+        ("freq_hz",  "Freq",   f"{freq_mhz:.3f} MHz",               theme.FG),
+        ("radio",    "Radio",  radio_label,                         theme.FG),
+        ("mode",     "Mode",   state.mode,                          theme.FG_DIM),
+        ("logs",     "Logs",   "30 days",                           theme.FG_DIM),
     ]
 
 

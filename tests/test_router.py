@@ -134,6 +134,10 @@ def test_tab_cycles_setup_focus():
     r.handle(KeyEvent(key=Key.TAB))
     assert s.focused_field_name() == "grid"
     r.handle(KeyEvent(key=Key.TAB))
+    # Phase 10: 'groups' (JS8Call group memberships) sits between
+    # grid and units in the focus cycle. Empty by default.
+    assert s.focused_field_name() == "groups"
+    r.handle(KeyEvent(key=Key.TAB))
     assert s.focused_field_name() == "units"
     r.handle(KeyEvent(key=Key.TAB))
     assert s.focused_field_name() == "freq_hz"
@@ -195,8 +199,8 @@ def test_typing_directly_does_not_auto_edit_emergency_button():
     s = _state(configured=True, screen=Screen.SETUP)
     r, _, _ = _router(s)
     # Tab to emergency_bypass: callsign -> grid -> units -> freq_hz
-    # -> radio -> emergency_bypass (5 tabs).
-    for _ in range(5):
+    # callsign -> grid -> groups -> units -> freq_hz -> radio -> emergency_bypass (6 tabs).
+    for _ in range(6):
         r.handle(KeyEvent(key=Key.TAB))
     assert s.focused_field_name() == "emergency_bypass"
     r.handle(KeyEvent(char="x"))
@@ -281,8 +285,8 @@ def test_emergency_bypass_button_invokes_callback():
     s = _state(configured=False, screen=Screen.SETUP)
     r, _, bypass = _router(s)
     # Tab five times: callsign -> grid -> units -> freq_hz -> radio
-    # -> emergency_bypass.
-    for _ in range(5):
+    # callsign -> grid -> groups -> units -> freq_hz -> radio -> emergency_bypass.
+    for _ in range(6):
         r.handle(KeyEvent(key=Key.TAB))
     assert s.focused_field_name() == "emergency_bypass"
     r.handle(KeyEvent(key=Key.ENTER))
@@ -334,8 +338,8 @@ def test_enter_on_radio_invokes_cycle_callback():
         emergency_bypass=_BypassCapture(),
         cycle_radio=cycle,
     )
-    # Tab to radio: callsign -> grid -> units -> freq_hz -> radio (4 tabs).
-    for _ in range(4):
+    # Tab to radio: callsign -> grid -> groups -> units -> freq_hz -> radio (5 tabs).
+    for _ in range(5):
         r.handle(KeyEvent(key=Key.TAB))
     assert s.focused_field_name() == "radio"
 
@@ -357,7 +361,9 @@ def test_enter_on_radio_without_callback_is_safe():
         emergency_bypass=_BypassCapture(),
         cycle_radio=None,  # explicitly no cycle handler
     )
-    for _ in range(4):
+    # Phase 10: 5 tabs to reach radio (callsign → grid → groups →
+    # units → freq_hz → radio).
+    for _ in range(5):
         r.handle(KeyEvent(key=Key.TAB))
     assert s.focused_field_name() == "radio"
 
@@ -379,7 +385,9 @@ def test_typing_directly_does_not_auto_edit_radio():
         emergency_bypass=_BypassCapture(),
         cycle_radio=cycle,
     )
-    for _ in range(4):
+    # Phase 10: 5 tabs to reach radio (callsign → grid → groups →
+    # units → freq_hz → radio).
+    for _ in range(5):
         r.handle(KeyEvent(key=Key.TAB))
     assert s.focused_field_name() == "radio"
 

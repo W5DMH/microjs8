@@ -37,8 +37,8 @@ def _tab_to_freq_and_start_edit(r: InputRouter, s: UIState) -> None:
     On entering edit mode, the buffer is pre-filled with the current
     frequency formatted as MHz, e.g. "7.078".
     """
-    # 3 tabs: callsign -> grid -> units -> freq_hz.
-    for _ in range(3):
+    # 4 tabs: callsign -> grid -> groups -> units -> freq_hz.
+    for _ in range(4):
         r.handle(KeyEvent(key=Key.TAB))
     assert s.focused_field_name() == "freq_hz"
     r.handle(KeyEvent(key=Key.ENTER))

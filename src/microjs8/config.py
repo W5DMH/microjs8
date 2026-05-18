@@ -1,4 +1,4 @@
-"""Configuration loading and validation for MicroJS8.
+"""Configuration loading and validation for MiniJS8.
 
 Configuration lives in TOML at ``paths.config_path()`` (default
 ``/var/lib/microjs8/config.toml``). On first boot, if no live config exists,
@@ -40,6 +40,29 @@ _log = logging.getLogger(__name__)
 # database; we only need to reject obvious garbage.
 _CALLSIGN_RE = re.compile(r"^[A-Z0-9/]{3,10}$")
 
+# JS8Call group callsign envelope (per JS8Call Guide v2.2 p.10):
+# starts with '@', up to 8 alphanumeric chars with optional slashes
+# (e.g. '@EMCOMM', '@ARESGA', '@DX/NA', '@REGION/1', '@GROUP/0').
+# We're slightly stricter than the published regex
+# ``[@][A-Z0-9/]{0,3}[/]?[A-Z0-9/]{0,3}[/]?[A-Z0-9/]{0,3}`` — we just
+# require 1-8 chars after the '@' so the validation is intuitive
+# to operators ("8 chars after the at-sign, letters digits and
+# slashes"). All in-the-wild groups we've observed comply.
+_GROUP_RE = re.compile(r"^@[A-Z0-9/]{1,8}$")
+
+# Groups that every JS8Call station is implicitly in. Listing these
+# explicitly in config is redundant and confuses the address-set
+# logic (we'd double-count), so we reject them at validation.
+_IMPLICIT_GROUPS: frozenset[str] = frozenset({"@ALLCALL", "@HB"})
+
+# Max number of operator-configured custom groups. JS8Call has no
+# documented limit but more than a handful gets unwieldy: every
+# message to any of these groups counts as "for us", every
+# group SNR? query triggers an auto-respond burst, and the Setup
+# field becomes a wall of comma-separated text. Cap at 4 per the
+# W5DMH spec discussion (May 2026).
+MAX_GROUPS = 4
+
 # Maidenhead 4 or 6 character grid. 4-char: FF99. 6-char: FF99ll.
 _GRID4_RE = re.compile(r"^[A-R]{2}[0-9]{2}$")
 _GRID6_RE = re.compile(r"^[A-R]{2}[0-9]{2}[a-x]{2}$")
@@ -64,6 +87,14 @@ class StationConfig:
 
     callsign: str = UNCONFIGURED_CALLSIGN
     grid: str = ""
+    # Configured JS8Call group memberships, e.g. ``("@EMCOMM", "@ARES")``.
+    # Each entry is uppercase, prefixed with '@', and matches the
+    # GROUP_RE format. We use a frozen tuple so this dataclass stays
+    # hashable for the existing equality-based dirty-checking in
+    # UIState. ``@ALLCALL`` and ``@HB`` are NEVER stored here —
+    # every station is implicitly in them and we deduplicate at
+    # load time to avoid double-counting in the address set.
+    groups: tuple[str, ...] = ()
 
     @property
     def is_configured(self) -> bool:
@@ -158,6 +189,71 @@ def _validate_units(value: str) -> str:
     return value
 
 
+def _validate_groups(value: Any) -> tuple[str, ...]:
+    """Normalize and validate a list of JS8Call group callsigns.
+
+    Accepts:
+      - A TOML array: ``groups = ["@EMCOMM", "@ARES"]``
+      - A single comma-separated string: ``groups = "@EMCOMM, @ARES"``
+        (the Setup UI writes this format; we accept both to keep
+        hand-edited config.toml from being surprising)
+
+    Each entry is uppercased, stripped of surrounding whitespace,
+    and matched against ``_GROUP_RE``. Implicit groups (@ALLCALL,
+    @HB) are silently dropped — they're never explicit config.
+    Duplicates are removed preserving first-seen order. Returns a
+    tuple capped at ``MAX_GROUPS``; raises ConfigError if more
+    entries appear after deduplication or any entry is malformed.
+    """
+    if value is None or value == "":
+        return ()
+
+    # Accept either an array or a comma-separated string.
+    if isinstance(value, str):
+        candidates = [s for s in (p.strip() for p in value.split(",")) if s]
+    elif isinstance(value, (list, tuple)):
+        candidates = []
+        for item in value:
+            if not isinstance(item, str):
+                raise ConfigError(
+                    f"groups entries must be strings, got "
+                    f"{type(item).__name__} in {value!r}"
+                )
+            stripped = item.strip()
+            if stripped:
+                candidates.append(stripped)
+    else:
+        raise ConfigError(
+            f"groups must be an array or comma-separated string, "
+            f"got {type(value).__name__}"
+        )
+
+    seen: set[str] = set()
+    out: list[str] = []
+    for raw in candidates:
+        normalized = raw.upper()
+        if normalized in _IMPLICIT_GROUPS:
+            # Silently drop — every station is in these by default.
+            continue
+        if not _GROUP_RE.match(normalized):
+            raise ConfigError(
+                f"group {raw!r} is not a valid format "
+                f"(expected '@NAME' with 1-8 letters/digits/slashes, "
+                f"e.g. '@EMCOMM', '@DX/NA')"
+            )
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        out.append(normalized)
+
+    if len(out) > MAX_GROUPS:
+        raise ConfigError(
+            f"too many groups configured: {len(out)} > {MAX_GROUPS} max "
+            f"(got {out!r})"
+        )
+    return tuple(out)
+
+
 def _from_dict(data: dict[str, Any], source_path: Path) -> Config:
     """Build a Config from a parsed TOML dict, validating each field."""
     station_data = data.get("station", {})
@@ -167,6 +263,7 @@ def _from_dict(data: dict[str, Any], source_path: Path) -> Config:
     station = StationConfig(
         callsign=_validate_callsign(station_data.get("callsign", UNCONFIGURED_CALLSIGN)),
         grid=_validate_grid(station_data.get("grid", "")),
+        groups=_validate_groups(station_data.get("groups", ())),
     )
 
     units = _validate_units(data.get("units_distance", "miles"))
@@ -268,6 +365,7 @@ def save_atomic(
     grid: str,
     units: str,
     radio_id: Optional[str] = None,
+    groups: Optional[tuple[str, ...]] = None,
 ) -> Config:
     """Validate and atomically write a new live configuration.
 
@@ -287,6 +385,11 @@ def save_atomic(
         save-station-fields call sites (callsign / grid / units edits
         from the Setup screen) keep working without dropping the
         operator's radio selection on every edit.
+    groups : optional tuple of str
+        Configured JS8Call group memberships. When None (default),
+        reads the current live config to preserve whatever groups
+        are already set. Same preservation rationale as radio_id —
+        a single-field edit shouldn't blow away unrelated fields.
 
     The write target is ``paths.config_path()``, NOT the
     ``shipped_default_path()`` — defaults are read-only on the image.
@@ -299,24 +402,40 @@ def save_atomic(
     # If radio_id wasn't explicitly supplied, preserve whatever the
     # current live config has (or fall back to the default). Avoids
     # the trap of "edit callsign → next restart, [radio] is gone".
-    if radio_id is None:
+    if radio_id is None or groups is None:
         try:
             current = load()
-            radio_id = current.radio_id
+            if radio_id is None:
+                radio_id = current.radio_id
+            if groups is None:
+                groups = current.station.groups
         except ConfigError:
-            radio_id = "qdx"  # safe fallback — same as Config dataclass default
+            if radio_id is None:
+                radio_id = "qdx"  # safe fallback — same as Config dataclass default
+            if groups is None:
+                groups = ()
     radio_id = _validate_radio_id(radio_id)
+    groups = _validate_groups(groups)
 
     live = paths.config_path()
     paths.ensure_writable_dirs()
 
+    # Serialize groups as a TOML array — the canonical form, easier
+    # to round-trip than a comma-separated string. If empty, omit
+    # the line entirely so config.toml stays clean.
+    if groups:
+        groups_toml = "groups = [" + ", ".join(f'"{g}"' for g in groups) + "]\n"
+    else:
+        groups_toml = ""
+
     body = (
-        "# MicroJS8 — live configuration (written by setup wizard)\n"
+        "# MiniJS8 — live configuration (written by setup wizard)\n"
         f'units_distance = "{units}"\n'
         "\n"
         "[station]\n"
         f'callsign = "{callsign}"\n'
         f'grid = "{grid}"\n'
+        f"{groups_toml}"
         "\n"
         "[radio]\n"
         f'id = "{radio_id}"\n'
@@ -338,8 +457,8 @@ def save_atomic(
         raise ConfigError(f"failed to write {live}: {exc}") from exc
 
     _log.info(
-        "config saved: callsign=%s grid=%s units=%s radio=%s",
-        callsign, grid, units, radio_id,
+        "config saved: callsign=%s grid=%s units=%s radio=%s groups=%s",
+        callsign, grid, units, radio_id, list(groups),
     )
     # Re-load to return a parsed Config — also catches the (unlikely)
     # case where what we just wrote doesn't round-trip cleanly.

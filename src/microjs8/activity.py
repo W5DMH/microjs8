@@ -88,6 +88,14 @@ class DirectedActivityEntry:
     body: str                       # remaining text after the verb (may be empty)
     snr_db: Optional[int] = None    # inbound only
     freq_hz: Optional[float] = None # inbound only
+    # When this inbound entry was a frame addressed to a JS8Call
+    # group we belong to (e.g. ``K1ABC: @ARESGA QSL?``), ``for_group``
+    # holds the group name including the leading '@'. None for
+    # personally-directed traffic. The DIRECTED screen renders
+    # ``K1ABC@@ARESGA`` instead of just ``K1ABC`` when this is set,
+    # so the operator immediately sees that the message was a
+    # group blast rather than personal traffic.
+    for_group: Optional[str] = None
 
 
 class DirectedActivityLog:
@@ -119,6 +127,7 @@ class DirectedActivityLog:
         snr_db: Optional[int] = None,
         freq_hz: Optional[float] = None,
         at_unix: Optional[float] = None,
+        for_group: Optional[str] = None,
     ) -> DirectedActivityEntry:
         """Record an inbound directed frame (from a remote station to us).
 
@@ -127,6 +136,11 @@ class DirectedActivityLog:
 
         ``at_unix=None`` (the default) timestamps with ``time.time()``;
         tests pass a fixed value for determinism.
+
+        ``for_group`` is set when the frame was addressed to a JS8Call
+        group we belong to rather than to our callsign directly. The
+        DIRECTED renderer uses this to show ``from@@group`` so the
+        operator distinguishes group blasts from personal messages.
         """
         entry = DirectedActivityEntry(
             at_unix=at_unix if at_unix is not None else time.time(),
@@ -136,6 +150,7 @@ class DirectedActivityLog:
             body=body,
             snr_db=snr_db,
             freq_hz=freq_hz,
+            for_group=for_group.upper() if for_group else None,
         )
         with self._lock:
             self._buf.append(entry)
