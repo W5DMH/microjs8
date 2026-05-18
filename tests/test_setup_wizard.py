@@ -143,7 +143,8 @@ def test_units_field_editable(isolated_paths):
         state, save_config=_make_save(state), emergency_bypass=_emergency,
     )
 
-    # Tab callsign -> grid -> units
+    # Tab callsign -> grid -> groups -> units
+    router.handle(KeyEvent(key=Key.TAB))
     router.handle(KeyEvent(key=Key.TAB))
     router.handle(KeyEvent(key=Key.TAB))
     assert state.focused_field_name() == "units"
@@ -172,8 +173,8 @@ def test_emergency_bypass_activates_override(isolated_paths):
 
     router = InputRouter(state, save_config=_save, emergency_bypass=bypass)
 
-    # Tab callsign -> grid -> units -> freq_hz -> radio -> emergency_bypass
-    for _ in range(5):
+    # Tab callsign -> grid -> groups -> units -> freq_hz -> radio -> emergency_bypass
+    for _ in range(6):
         router.handle(KeyEvent(key=Key.TAB))
     assert state.focused_field_name() == "emergency_bypass"
 

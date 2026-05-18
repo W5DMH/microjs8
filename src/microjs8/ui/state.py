@@ -209,7 +209,7 @@ _FOCUSABLE_FIELDS: dict[Screen, tuple[str, ...]] = {
     Screen.ALLCALL: (),  # populated in Step 6
     Screen.DIRECTED_MENU: (),  # populated in Step 6
     Screen.EMERGENCY: (),  # populated in Step 4/6
-    Screen.SETUP: ("callsign", "grid", "units", "freq_hz", "radio", "emergency_bypass"),
+    Screen.SETUP: ("callsign", "grid", "groups", "units", "freq_hz", "radio", "emergency_bypass"),
     Screen.SHUTTING_DOWN: (),
     # INBOX_DETAIL has no named focusable fields — focus is the
     # implicit "the message being viewed". Up/Down scroll the body.
@@ -266,6 +266,14 @@ class UISnapshot:
     units: str                # "miles" or "km"
     tx_allowed: bool          # True when configured OR emergency_override
     emergency_override: bool  # set by the unconfigured-bypass flow
+
+    # JS8Call group memberships, e.g. ('@EMCOMM','@ARESGA').
+    # Operator-configured custom groups only — '@ALLCALL' / '@HB'
+    # are NEVER in this tuple (every station is implicitly in those;
+    # storing them here would cause double-counting in the parser's
+    # address set). Kept as a frozen tuple so UISnapshot stays
+    # hashable for the dirty-checking diff at the renderer boundary.
+    groups: tuple[str, ...] = ()
 
     # Shutdown countdown — populated when in SHUTTING_DOWN screen.
     shutdown_remaining: float = 1.0
@@ -373,7 +381,15 @@ class UISnapshot:
 class UIState:
     """Mutable UI state. Mutate from asyncio thread only."""
 
-    def __init__(self, callsign: str, grid: str, tx_allowed: bool, units: str = "miles") -> None:
+    def __init__(
+        self,
+        callsign: str,
+        grid: str,
+        tx_allowed: bool,
+        units: str = "miles",
+        *,
+        groups: tuple[str, ...] = (),
+    ) -> None:
         self._screen: Screen = Screen.HOME
         self._previous_screen: Screen = Screen.HOME
         self._callsign = callsign
@@ -381,6 +397,12 @@ class UIState:
         self._units = units
         self._configured_tx_allowed = tx_allowed
         self._emergency_override = False
+        # JS8Call group memberships. Tuple of uppercase strings each
+        # starting with '@', e.g. ('@EMCOMM','@ARESGA'). NEVER
+        # contains the implicit '@ALLCALL' / '@HB' groups — those
+        # are handled by the parser's address-set builder so we
+        # don't double-count.
+        self._groups: tuple[str, ...] = groups
         self._shutdown_remaining: float = 1.0
         # Focus index per screen, default 0.
         self._focus_index: dict[Screen, int] = {s: 0 for s in Screen}
@@ -435,6 +457,12 @@ class UIState:
         self._compose_to: str = ""
         self._compose_cmd: ComposeCmd = ComposeCmd.FREE
         self._compose_text: str = ""
+        # Pointer into the heard+groups cycle so successive ↑/↓ keypresses
+        # walk the list in order rather than jumping back to position 0.
+        # None means "no cycle position yet" — next press lands on index 0
+        # (or n-1 for ↑). Reset to None whenever the operator hand-types
+        # a new TO value via begin_edit/commit.
+        self._compose_to_heard_index: Optional[int] = None
 
         # Phase 6: battery snapshot (None until BatteryReader fires
         # the first successful poll, or back to None if discovery
@@ -543,6 +571,14 @@ class UIState:
             self._edit_buffer = self._grid
         elif field == "units":
             self._edit_buffer = self._units
+        elif field == "groups":
+            # Pre-fill with the current groups as a comma-separated
+            # string. The Setup screen edits and saves this format —
+            # the on-wire intuition: "type the groups, separated by
+            # commas, with @ in front of each". On commit, the router
+            # passes the raw buffer to config._validate_groups, which
+            # canonicalises (uppercase, dedup, drop implicit).
+            self._edit_buffer = ", ".join(self._groups)
         elif field == "freq_hz":
             # Pre-fill with the current frequency in MHz, e.g. "7.078".
             # Easier for the operator than typing 7 digits of Hz.
@@ -599,16 +635,31 @@ class UIState:
         grid: str,
         units: str,
         tx_allowed: bool,
+        *,
+        groups: tuple[str, ...] = (),
     ) -> None:
         """Refresh identity — used after config save or reload."""
-        if (callsign, grid, units, tx_allowed) != (
-            self._callsign, self._grid, self._units, self._configured_tx_allowed,
+        if (callsign, grid, units, tx_allowed, groups) != (
+            self._callsign, self._grid, self._units,
+            self._configured_tx_allowed, self._groups,
         ):
             self._callsign = callsign
             self._grid = grid
             self._units = units
             self._configured_tx_allowed = tx_allowed
+            self._groups = groups
             self._dirty.set()
+
+    # ── Read-only groups accessor (used by parser and Setup screen) ──
+
+    @property
+    def groups(self) -> tuple[str, ...]:
+        """Current operator-configured group memberships.
+
+        NEVER contains the implicit ``@ALLCALL`` or ``@HB`` groups —
+        the parser's address-set builder handles those separately.
+        """
+        return self._groups
 
     def set_freq_hz(self, freq_hz: int) -> None:
         """Refresh the displayed frequency.
@@ -991,6 +1042,81 @@ class UIState:
         self._compose_cmd = COMPOSE_CMD_ORDER[idx]
         self._dirty.set()
 
+    # ── TO field ↑/↓ cycle (heard stations + groups) ──────────────────
+
+    def _heard_for_compose_dropdown(self) -> tuple[HeardStation, ...]:
+        """Return the heard list as the COMPOSE TO dropdown sees it.
+
+        Filters out our own callsign (operators don't compose messages
+        to themselves and gfsk8's AUTO_REMOVE_MYCALL would strip them
+        on the wire anyway). Order is most-recent first, matching the
+        HEARD screen.
+        """
+        our = self._callsign.upper() if self._callsign else ""
+        return tuple(
+            st for st in self._heard
+            if (st.callsign or "").upper() != our
+        )
+
+    def _compose_to_picks(self) -> tuple[str, ...]:
+        """Build the ordered list of TO-field picks for ↑/↓ cycling.
+
+        The cycle covers both:
+          1. Heard stations (most-recent first), minus our own callsign
+          2. Configured JS8Call group memberships (alphabetical)
+
+        Groups land at the END of the cycle. Operators are most likely
+        to want a heard station (real reply target), so we lead with
+        those; pressing ↓ enough times reaches the groups. Alphabetical
+        order within groups gives predictable navigation regardless of
+        which order they were typed into Setup.
+
+        Both lists are de-duplicated against each other (a heard call
+        that happens to start with '@' won't appear twice).
+        """
+        seen: set[str] = set()
+        picks: list[str] = []
+        for st in self._heard_for_compose_dropdown():
+            cs = st.callsign
+            if cs and cs.upper() not in seen:
+                seen.add(cs.upper())
+                picks.append(cs)
+        for g in sorted(self._groups):
+            if g and g.upper() not in seen:
+                seen.add(g.upper())
+                picks.append(g)
+        return tuple(picks)
+
+    def _compose_to_cycle(self, *, forward: bool) -> None:
+        """Cycle the TO field through heard stations + configured groups.
+
+        First call (when ``_compose_to_heard_index`` is None) lands on
+        index 0 (most-recent heard, or the first group if there are no
+        heard stations); subsequent calls advance / retreat with wrap.
+        Empty pick list → no-op.
+        """
+        picks = self._compose_to_picks()
+        if not picks:
+            return
+        n = len(picks)
+        if self._compose_to_heard_index is None:
+            idx = 0 if forward else (n - 1)
+        else:
+            i = self._compose_to_heard_index
+            idx = (i + 1) % n if forward else (i - 1) % n
+        self._compose_to_heard_index = idx
+        self._compose_to = picks[idx]
+        self._dirty.set()
+
+    def compose_to_cycle_heard_next(self) -> None:
+        """Operator pressed ↓ on focused TO field."""
+        self._compose_to_cycle(forward=True)
+
+    def compose_to_cycle_heard_prev(self) -> None:
+        """Operator pressed ↑ on focused TO field."""
+        self._compose_to_cycle(forward=False)
+
+
     def compose_clear(self) -> None:
         """Reset COMPOSE to its initial state. Called on Esc and after send.
 
@@ -1128,6 +1254,7 @@ class UIState:
             units=self._units,
             tx_allowed=self.tx_allowed,
             emergency_override=self._emergency_override,
+            groups=self._groups,
             shutdown_remaining=self._shutdown_remaining,
             previous_screen=self._previous_screen,
             focused_field=self.focused_field_name(),
