@@ -315,15 +315,30 @@ def _render_home(state: UISnapshot, fonts: Fonts) -> Image.Image:
 
 
 def _gps_status_label(state: UISnapshot) -> tuple[str, tuple[int, int, int]]:
-    """Map GPS fix state to a short label + color for display."""
+    """Map GPS fix state to a short label + color for display.
+
+    Shows ``acquiring`` (amber) when the fix kind is 2D/3D but the
+    receiver hasn't produced a real position yet. This happens during
+    cold-start: gpsd asserts a mode-3 fix as soon as it has the time
+    + ephemeris pieces, but the actual coordinates take several more
+    seconds to compute. Without this distinction, HOME would
+    confidently say "3D fix (6 sat)" while EMERGENCY would show
+    "no position" — operator gets mixed signals about whether the
+    station is location-ready. The amber acquiring state signals
+    "fix declared, position pending" so both screens stay consistent.
+    """
     from microjs8.gps.types import FixKind  # local to avoid cycle
     kind = state.gps.kind
     sats = state.gps.satellites_used
     sat_suffix = f" ({sats} sat)" if sats is not None else ""
     if kind == FixKind.FIX_3D:
-        return f"3D fix{sat_suffix}", theme.FG_GOOD
+        if state.gps.has_position:
+            return f"3D fix{sat_suffix}", theme.FG_GOOD
+        return f"acquiring{sat_suffix}", theme.FG_WARN
     if kind == FixKind.FIX_2D:
-        return f"2D fix{sat_suffix}", theme.FG_WARN
+        if state.gps.has_position:
+            return f"2D fix{sat_suffix}", theme.FG_WARN
+        return f"acquiring{sat_suffix}", theme.FG_WARN
     if kind == FixKind.NO_FIX:
         return "no fix" + sat_suffix, theme.FG_DIM
     return "unknown", theme.FG_DIM

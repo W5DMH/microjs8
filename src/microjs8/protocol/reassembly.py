@@ -70,6 +70,7 @@ now keeping it lock-free saves us a layer of complexity.
 from __future__ import annotations
 
 import logging
+import re
 import time
 from dataclasses import dataclass, field
 from typing import Optional
@@ -101,6 +102,24 @@ _BUFFERED_VERBS: frozenset[str] = frozenset({
 # absorbs that jitter while still discriminating two stations that
 # TX'd 50 Hz apart.
 _OFFSET_BUCKET_HZ = 25.0
+
+
+# Matches the body of a single-frame ``QUERY MSG <id>`` (after the
+# verb has been stripped — i.e., what remains is ``MSG <int>`` or
+# ``MSG ID <int>``). JS8Call's "Get message" button emits this form
+# when fetching a held inbox row by id. Accepts a trailing CRC token
+# (typically 3 base32 chars) to be robust to JS8Call versions that
+# do or don't append a checksum for this short, fixed-shape body.
+_QUERY_MSG_ID_INLINE_RE = re.compile(
+    r"""^\s*
+        MSG\s+
+        (?:ID\s+)?            # optional "ID" keyword between MSG and digits
+        (?P<id>\d+)
+        (?:\s+\S+)?           # optional trailing token (CRC or noise)
+        \s*$
+    """,
+    re.IGNORECASE | re.VERBOSE,
+)
 
 # Default timeout for buffered-command buffers. JS8 slot is 15 s; a
 # 4-frame message takes ~60 s to TX. We use a per-frame timeout of
@@ -214,7 +233,21 @@ def _classify_first_frame(parsed: ParsedFrame) -> Optional[tuple[str, str]]:
     as DIRECTED_MESSAGE while "MSG TO:..." classifies as
     DIRECTED_COMMAND. Both need reassembly.
     """
-    if parsed.kind not in (FrameKind.DIRECTED_MESSAGE, FrameKind.DIRECTED_COMMAND):
+    if parsed.kind not in (
+        FrameKind.DIRECTED_MESSAGE,
+        FrameKind.DIRECTED_COMMAND,
+        # Accept DIRECTED_QUERY too: when frame 1 of a buffered
+        # ``QUERY MSG <id>`` arrives split across two frames, the
+        # operator's first frame is just ``QUERY `` (verb + word-
+        # boundary space). The parser sees no follow-up token in
+        # this frame and classifies it as DIRECTED_QUERY (bare
+        # ``QUERY`` is in its query-set). The reassembler knows
+        # better — ``QUERY`` is a buffered verb regardless of how
+        # frame 1 was classified, and the body-starts-with checks
+        # below will correctly identify it. See W5DMH bench, May
+        # 2026 for the on-air capture that motivated this.
+        FrameKind.DIRECTED_QUERY,
+    ):
         return None
     # Preserve trailing whitespace: when the verb is followed by body
     # content that ends with a space (because the next frame's content
@@ -378,12 +411,30 @@ class MessageAssembler:
         # a body, but whose verb isn't a buffered command. We buffer
         # these so multi-frame replies (e.g., "YES MSG ID 57") get
         # reassembled rather than dropping the continuation.
+        #
+        # HEARTBEAT replies are included here: JS8Call piggy-backs
+        # "MSG ID <n>" onto heartbeat responses when the replying
+        # station holds buffered mail for us. The wire is e.g.
+        # ``KD8PGB: W5DMH HEARTBEAT SNR +04 MSG ID 61`` which JS8
+        # splits across two frames (frame 1: envelope + HEARTBEAT
+        # SNR +04; frame 2: MSG ID 61). Without registering a
+        # non-buffered buffer for the HEARTBEAT first-frame, the
+        # continuation arrives orphaned and the MSG ID is lost.
+        # Broadcast heartbeats (``to=@HB`` / ``to=@ALLCALL``) are
+        # excluded — they're routine sightings that never carry
+        # follow-up content, so buffering them just wastes memory.
+        is_directed_heartbeat = (
+            parsed.kind is FrameKind.HEARTBEAT
+            and parsed.to_call
+            and not parsed.to_call.startswith("@")
+        )
+        is_directed_non_heartbeat = parsed.kind in (
+            FrameKind.DIRECTED_MESSAGE,
+            FrameKind.DIRECTED_COMMAND,
+            FrameKind.DIRECTED_QUERY,
+        )
         if (
-            parsed.kind in (
-                FrameKind.DIRECTED_MESSAGE,
-                FrameKind.DIRECTED_COMMAND,
-                FrameKind.DIRECTED_QUERY,
-            )
+            (is_directed_non_heartbeat or is_directed_heartbeat)
             and parsed.from_call
             and parsed.body
         ):
@@ -539,6 +590,51 @@ class MessageAssembler:
                 frame_count=1,
             )
 
+        # ``QUERY MSG <id>`` single-frame emit (with or without checksum).
+        #
+        # Observed on-air with JS8Call (W5DMH bench, May 2026): when
+        # the operator clicks "Get" on a pending mailbox item, the
+        # transmitted wire is ``<us> QUERY MSG <n>`` — sometimes with
+        # a CRC suffix appended per the buffered-command rule,
+        # sometimes without (varies by JS8Call version and config).
+        # The checksum-validated branch above handles the "with CRC"
+        # case. The buffer-and-wait fallback handles the "with CRC"
+        # case correctly too if the body decodes cleanly in one
+        # frame. But the "without CRC" case landed us in the multi-
+        # frame buffer waiting forever (the CRC suffix the assembler
+        # tried to verify wasn't there), so the operator's QUERY MSG
+        # request never produced a reply on our side.
+        #
+        # The body is bounded (small int) and the message is
+        # inherently single-frame, so we can match the canonical
+        # forms directly and emit. We accept:
+        #   ``MSG <int>``           — bare numeric body
+        #   ``MSG ID <int>``        — JS8Call's alternate "MSG ID" form
+        # Both with optional trailing whitespace. The normalised
+        # body we emit is always ``MSG <int>`` so the downstream
+        # dispatcher needs only one wire form to handle.
+        if verb == "QUERY" and rest:
+            m = _QUERY_MSG_ID_INLINE_RE.match(rest)
+            if m:
+                msg_id = m.group("id")
+                self._buffers.pop(key, None)
+                _log.debug(
+                    "reassembly: QUERY MSG <id> single-frame from=%s to=%s id=%s",
+                    from_call, to_call, msg_id,
+                )
+                return AssembledMessage(
+                    from_call=from_call,
+                    to_call=to_call,
+                    verb=verb,
+                    body=f"MSG {msg_id}",   # normalised form
+                    checksum_valid=True,
+                    raw_text=rest,
+                    offset_hz=bucket,
+                    started_at=now,
+                    completed_at=now,
+                    frame_count=1,
+                )
+
         # Otherwise start (or restart) the buffer for this key.
         # Restart is correct on collision: if we somehow get a fresh
         # MSG starter while an old one was in-flight at the same key,
@@ -616,7 +712,18 @@ class MessageAssembler:
         # the verb separately so the renderer can color it; the
         # body field carries the full text including the verb so
         # the operator sees the literal frame contents reassembled.
-        body = (parsed.body or "").rstrip()
+        #
+        # IMPORTANT: do NOT rstrip whitespace here. JS8's wire
+        # encoding can place a word-boundary space at the END of a
+        # frame ahead of the next word in frame N+1. If we strip
+        # that trailing space, the continuation-frame concatenation
+        # produces ``"QUERY"+"MSG 1 T/R" = "QUERYMSG 1 T/R"`` —
+        # silently corrupting the reassembled body. We strip only
+        # the EOT control character (which is meaningful) and
+        # leave whitespace alone; the timeout-emit path is happy
+        # to deliver a body with trailing space, and the
+        # downstream parsers tolerate it.
+        body = parsed.body or ""
         # Strip any incidental EOT characters (defensive — gfsk8
         # normally consumes them but be safe).
         body = _strip_eot(body)
@@ -719,20 +826,45 @@ class MessageAssembler:
         eot_seen = _EOT_CHAR in addition
         addition = addition.replace(_EOT_CHAR, "")
 
-        # JS8 packs continuation frames bit-for-bit but at character
+        # JS8 packs continuation frames bit-for-bit at character
         # boundaries (Varicode.cpp packs whole huffman codes only —
         # if a code wouldn't fit, it's deferred to the next frame and
-        # the bits are padded). So inter-frame concatenation NEVER
-        # needs separator insertion: the original characters' bits
-        # are preserved exactly across the boundary, and any inter-
-        # word space is encoded as a literal space character in
-        # whichever frame's bits it happens to fit. Concat-with-no-
-        # separator yields the exact original body.
+        # the bits are padded). For FREE-TEXT bodies, the original
+        # characters' bits are preserved exactly across the boundary,
+        # and any inter-word space is encoded as a literal space
+        # character in whichever frame's bits it happens to fit.
+        # Concat-with-no-separator yields the exact original body.
+        #
+        # NON-BUFFERED commands have one quirk: JS8Call's structured
+        # field extensions (e.g., the ``HEARTBEAT SNR +04 MSG ID 61``
+        # heartbeat reply) sometimes don't emit the inter-field
+        # space when the field break aligns with a frame break.
+        # Observed on-air (W5DMH bench, May 2026): the assembled
+        # body came back as ``"HEARTBEAT SNR +04MSG ID 61"`` — the
+        # space between ``+04`` and ``MSG`` was eaten. Pattern: prior
+        # frame ends with a digit, next frame begins with an
+        # uppercase letter.
+        #
+        # Heuristic for NON-BUFFERED only: insert one space at the
+        # join when prior char is a digit and addition's first char
+        # is an uppercase letter. We do NOT apply this to buffered
+        # commands — those carry a CRC suffix that's bit-packed
+        # against the exact body, so any byte we add would break
+        # checksum validation. (Real case: CRC suffix "J6X" arriving
+        # split as ...J6" + "X — without the digit→letter check we'd
+        # corrupt it.)
         if buf.is_buffered_command:
             buf.body = buf.body + addition
         else:
-            # Non-buffered: same JS8Call protocol contract applies —
-            # whole-character packing means no separator needed.
+            if addition and buf.body:
+                prev_c = buf.body[-1]
+                next_c = addition[0]
+                if (
+                    prev_c.isdigit()
+                    and next_c.isalpha()
+                    and next_c.isupper()
+                ):
+                    addition = " " + addition
             buf.body = buf.body + addition
         buf.last_frame_at = now
         buf.raw_offset_hz = parsed.decoded.frequency_hz

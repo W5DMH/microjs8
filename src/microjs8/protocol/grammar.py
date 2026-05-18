@@ -119,14 +119,37 @@ _KNOWN_COMMANDS = frozenset({
 })
 
 
-def parse(decoded: DecodedFrame, our_callsign: Optional[str]) -> ParsedFrame:
+def parse(
+    decoded: DecodedFrame,
+    our_callsign: Optional[str],
+    our_groups: Optional[tuple[str, ...]] = None,
+) -> ParsedFrame:
     """Classify a decoded frame.
 
     ``our_callsign`` is None when station identity isn't configured
     (so ``is_for_us`` is always False). When configured, we match
     case-insensitively because the protocol normalizes everything
     to uppercase but operator config might be lowercase.
+
+    ``our_groups`` is the operator-configured set of JS8Call group
+    callsigns (e.g. ``("@EMCOMM", "@ARESGA")``). A directed frame
+    addressed to any of these groups is treated as ``is_for_us=True``
+    — group members process group-directed traffic the same way they
+    process personally-directed traffic, per JS8Call Guide v2.2 p.10.
+    Passing None defaults to the empty set (no group memberships;
+    only personally-directed frames are for us).
     """
+    # Build the set of addresses we answer to. Always uppercase to
+    # match the wire convention. The empty case (unconfigured) ends
+    # up with an empty set and ``is_for_us`` is False throughout.
+    if our_callsign:
+        our_addresses = {our_callsign.upper()}
+    else:
+        our_addresses = set()
+    if our_groups:
+        for g in our_groups:
+            if g:
+                our_addresses.add(g.upper())
     # Preserve trailing whitespace from gfsk8's huffDecode output —
     # multi-frame buffered MSG reassembly depends on inter-frame
     # spaces being preserved at frame boundaries. Only strip leading
@@ -168,11 +191,11 @@ def parse(decoded: DecodedFrame, our_callsign: Optional[str]) -> ParsedFrame:
         # Strip the from/to prefix to leave just "HEARTBEAT SNR -10".
         body_start = m.end("to")
         body = text[body_start:].strip()
-        # "for us" if the heartbeat reply was acknowledging our HB.
-        is_for_us = (
-            our_callsign is not None
-            and to.upper() == our_callsign.upper()
-        )
+        # "for us" if the heartbeat reply was acknowledging our HB,
+        # OR was directed at a group we belong to. Heartbeat replies
+        # are normally personal (one station replying to another),
+        # but JS8Call permits `@GROUP HEARTBEAT SNR ...` too.
+        is_for_us = to.upper() in our_addresses
         return ParsedFrame(
             decoded=decoded,
             kind=FrameKind.HEARTBEAT,
@@ -218,10 +241,7 @@ def parse(decoded: DecodedFrame, our_callsign: Optional[str]) -> ParsedFrame:
                 is_for_us=False,
             )
 
-        is_for_us = (
-            our_callsign is not None
-            and to.upper() == our_callsign.upper()
-        )
+        is_for_us = to.upper() in our_addresses
 
         # Classify the body's first token as a known command/query
         # to set the FrameKind accurately.
@@ -255,9 +275,20 @@ def _classify_directed_body(body: str) -> FrameKind:
     Order matters: ACK is its own kind, queries end in '?', everything
     else with a recognized first token is a COMMAND, otherwise a plain
     DIRECTED_MESSAGE.
+
+    Defensive against whitespace-only bodies — Python's
+    ``str.split(None)`` returns ``[]`` (not ``[""]``) when called on
+    a string of only whitespace characters, so the prior
+    ``upper.split(None, 1)[0] if upper else ""`` form raised
+    IndexError when ``body`` was e.g. ``"   "`` (truthy, but yields
+    no tokens). Observed in the wild when JS8 frames carried only
+    a continuation/padding character that decoded to whitespace.
+    Use ``upper.strip()`` for the truthy test so empty-after-strip
+    bodies short-circuit to ``first = ""`` and we fall through to
+    DIRECTED_MESSAGE — the catch-all classification.
     """
     upper = body.upper()
-    first = upper.split(None, 1)[0] if upper else ""
+    first = upper.split(None, 1)[0] if upper.strip() else ""
 
     if first.startswith("ACK"):
         return FrameKind.ACK
