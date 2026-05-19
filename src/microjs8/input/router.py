@@ -217,9 +217,9 @@ class InputRouter:
         if event.key is Key.FN_Q:
             if self._shutdown_gesture is not None:
                 if event.pressed:
-                    self._shutdown_gesture.arm()
+                    self._shutdown_gesture.arm(source="keyboard Fn+Q")
                 else:
-                    self._shutdown_gesture.cancel()
+                    self._shutdown_gesture.cancel(source="keyboard Fn+Q release")
             return
 
         # 1) If we're in edit mode, the field eats every key first.
@@ -404,6 +404,28 @@ class InputRouter:
     # ── Per-screen handlers ──────────────────────────────────────────
 
     def _handle_screen_key(self, event: KeyEvent, snapshot) -> None:
+        # Phase 15: SHUTTING_DOWN — any keystroke that means "cancel"
+        # rolls the gesture back. Esc and Ctrl-C are the natural
+        # cancels; other keys are ignored so an operator who happens
+        # to be typing when Fn+Q fires doesn't accidentally affect
+        # the countdown (which is automatic on hold completion).
+        # The button watcher's cancel path is separate (key release);
+        # they share the gesture object so cancellation from either
+        # path takes effect via the idempotent cancel() return.
+        if snapshot.screen is Screen.SHUTTING_DOWN:
+            if event.key is Key.ESC or event.key is Key.CTRL_C:
+                if self._shutdown_gesture is not None:
+                    self._shutdown_gesture.cancel(source="keyboard Esc")
+                else:
+                    # Defensive: no gesture object configured but
+                    # somehow we landed on SHUTTING_DOWN. Roll back
+                    # the UI so the operator isn't stranded.
+                    self._ui.cancel_shutdown()
+                return
+            # Other keystrokes are dropped — the countdown ticks on
+            # to completion. Operator can press Esc at any moment.
+            return
+
         # Inbox detail view: only Esc (back to list) is meaningful.
         # ↑/↓ are reserved for future scroll-within-body, currently
         # no-op. Other keys ignored — explicitly NOT including ←/→

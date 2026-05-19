@@ -1046,17 +1046,27 @@ class _FakeBacklight:
 
 
 class _FakeShutdownGesture:
-    """Records arm()/cancel() calls for assertion."""
+    """Records arm()/cancel() calls for assertion.
+
+    Phase 15: matches the new ShutdownGesture API (source kwarg,
+    bool returns). Tests can inspect ``sources`` to confirm the
+    expected diagnostic origin was passed.
+    """
 
     def __init__(self) -> None:
         self.armed = 0
         self.cancelled = 0
+        self.sources: list[tuple[str, str]] = []  # (action, source) tuples
 
-    def arm(self) -> None:
+    def arm(self, *, source: str = "unknown") -> bool:
         self.armed += 1
+        self.sources.append(("arm", source))
+        return True
 
-    def cancel(self) -> None:
+    def cancel(self, *, source: str = "unknown") -> bool:
         self.cancelled += 1
+        self.sources.append(("cancel", source))
+        return True
 
 
 def test_fn_b_press_toggles_backlight():
