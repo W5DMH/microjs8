@@ -854,8 +854,8 @@ def _router_with_compose_callback(state, accept=True):
     bypass = _BypassCapture()
     calls: list[tuple] = []
 
-    def _send(to: str, cmd, text: str) -> bool:
-        calls.append((to, cmd, text))
+    def _send(to: str, cmd, text: str, for_call: str = "") -> bool:
+        calls.append((to, cmd, text, for_call))
         return accept
 
     r = InputRouter(
@@ -896,9 +896,9 @@ def test_compose_backspace_in_to_drops_last_char():
     assert s.snapshot().compose_to == "K1AB"
 
 
-def test_compose_typing_in_text_preserves_case_and_spaces():
-    """TEXT field is case-sensitive (operator's literal body) and
-    accepts spaces via the SPACE key."""
+def test_compose_typing_in_text_uppercases_and_accepts_spaces():
+    """Phase 14b: TEXT field auto-uppercases (JS8Call wire is
+    uppercase-only) and accepts spaces via the SPACE key."""
     s = _state(screen=Screen.COMPOSE)
     s.compose_set_to("K1ABC")
     r, _ = _router_with_compose_callback(s)
@@ -911,7 +911,7 @@ def test_compose_typing_in_text_preserves_case_and_spaces():
     r.handle(KeyEvent(key=Key.SPACE))
     for ch in "Dave":
         r.handle(KeyEvent(char=ch))
-    assert s.snapshot().compose_text == "Hello Dave"
+    assert s.snapshot().compose_text == "HELLO DAVE"
 
 
 def test_compose_up_down_on_cmd_cycles_dropdown():
@@ -964,8 +964,10 @@ def test_compose_enter_on_send_fires_callback_and_jumps_to_directed():
         r.handle(KeyEvent(key=Key.TAB))
     assert s.snapshot().compose_focused_field == "compose_send"
     r.handle(KeyEvent(key=Key.ENTER))
-    # Callback fired with the right args
-    assert calls == [("K1ABC", ComposeCmd.FREE, "hello dave")]
+    # Callback fired with the right args. Phase 14b: text is
+    # uppercased on the wire (JS8Call protocol), and the callback
+    # tuple now includes the FOR field (empty here since CMD is FREE).
+    assert calls == [("K1ABC", ComposeCmd.FREE, "hello dave", "")]
     # State cleared and screen jumped to DIRECTED for the activity log.
     snap = s.snapshot()
     assert snap.compose_to == ""

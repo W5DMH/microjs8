@@ -111,10 +111,22 @@ class ComposeCmd(enum.Enum):
     """Compose-screen CMD dropdown values.
 
     The enum value is the on-air verb token (or empty for FREE-form
-    directed messages, which carry no verb). ``MYLOC`` is a special
-    case — it's UI-only and renders as "GRID <my_grid>" on the wire,
-    so the operator can broadcast their location with a single keypress
-    instead of typing the grid square.
+    directed messages, which carry no verb). ``MYLOC`` and ``STORE``
+    are special cases:
+      - ``MYLOC`` is UI-only and renders as ``GRID <my_grid>`` on the
+        wire so the operator can broadcast their location with one
+        keypress instead of typing the grid square.
+      - ``STORE`` is a LOCAL action — it writes a row to our mailbox
+        for later delivery to the TO callsign, and nothing goes on
+        the air at compose time. When the TO station later sends us
+        ``QUERY MSGS`` we deliver the stored body. The verb is held
+        here for UI consistency but never appears on the wire.
+
+    ``MSG_TO`` is store-and-forward via a relay station: we ask the
+    TO station to hold a message addressed to a third party (the FOR
+    callsign). The wire form is ``<TO> MSG TO:<FOR> <TEXT>``. The
+    FOR callsign is supplied via the extra COMPOSE field that only
+    renders for this command.
 
     Operators cycle through these with ↑/↓ when CMD is focused, in
     the order declared here (most-common first). FREE is the default
@@ -122,25 +134,29 @@ class ComposeCmd(enum.Enum):
     and send.
     """
 
-    FREE = ""           # no verb — wire is "<TO> <TEXT>"
-    MSG = "MSG"         # buffered, CRC-checksummed mail item
-    STORE = "STORE"     # ask peer to hold for forward
-    AGN_Q = "AGN?"      # "again?" — ask peer to retransmit last
-    SNR_Q = "SNR?"      # request signal report
-    GRID = "GRID"       # ask "what's your grid?"
-    QUERY = "QUERY"     # generic — TEXT supplies the rest (MSGS / MSG <id> / CALL)
-    MYLOC = "MYLOC"     # UI-only; expands to "GRID <my_grid>" on wire
+    FREE = ""               # no verb — wire is "<TO> <TEXT>"
+    MSG = "MSG"             # buffered, CRC-checksummed mail item
+    MSG_TO = "MSG TO"       # relay via TO: hold for FOR. Wire: "<TO> MSG TO:<FOR> <TEXT>"
+    STORE = "STORE"         # LOCAL action — store for TO in our mailbox; no wire
+    AGN_Q = "AGN?"          # "again?" — ask peer to retransmit last
+    SNR_Q = "SNR?"          # request signal report
+    GRID_Q = "GRID?"        # ask "what's your grid?"  (JS8Call ignores GRID without the ?)
+    QUERY_MSGS = "QUERY MSGS"   # ask if peer holds messages for us
+    QUERY_MSG = "QUERY MSG"     # fetch a specific buffered message by id; TEXT is the integer id
+    MYLOC = "MYLOC"         # UI-only; expands to "GRID <my_grid>" on wire
 
 
 # Display order for the CMD dropdown — controls cycle direction.
 COMPOSE_CMD_ORDER: tuple[ComposeCmd, ...] = (
     ComposeCmd.FREE,
     ComposeCmd.MSG,
+    ComposeCmd.MSG_TO,
     ComposeCmd.STORE,
     ComposeCmd.AGN_Q,
     ComposeCmd.SNR_Q,
-    ComposeCmd.GRID,
-    ComposeCmd.QUERY,
+    ComposeCmd.GRID_Q,
+    ComposeCmd.QUERY_MSGS,
+    ComposeCmd.QUERY_MSG,
     ComposeCmd.MYLOC,
 )
 
@@ -151,32 +167,42 @@ def build_compose_wire(
     text: str,
     my_grid: str,
     my_call: str = "",
+    for_call: str = "",
 ) -> Optional[str]:
     """Build the wire-format string for a compose action.
 
     Returns the string that would go on the air (without the
     auto-prefixed "<from>: " envelope — that's added by the
-    encoder). Returns ``None`` if the compose is incomplete (no TO
-    callsign, or a CMD that requires TEXT but TEXT is empty), OR if
-    the operator targeted their own callsign — see the SELF-CALL
-    note below.
+    encoder). Returns ``None`` if the compose is incomplete (no TO,
+    or a CMD that requires TEXT but TEXT is empty, or MSG TO with
+    no FOR), OR if the operator targeted their own callsign — see
+    the SELF-CALL note below.
+
+    STORE is a special case: it returns ``None`` because nothing
+    goes on the air for STORE. The caller (app.py's
+    ``_compose_store_sync``) reads (to, text) directly from the
+    UIState and writes a mailbox row; no wire is involved. The
+    ``None`` return from this function for STORE is "no wire built,
+    don't enqueue", NOT "incomplete compose" — callers must
+    distinguish.
 
     Wire forms by command:
 
-      FREE     "<TO> <TEXT>"            — directed free-form
-      MSG      "<TO> MSG <TEXT>"        — buffered mail
-      STORE    "<TO> STORE <TEXT>"      — store-and-forward
-      AGN?     "<TO> AGN?"              — verb-only, no body
-      SNR?     "<TO> SNR?"              — verb-only
-      GRID     "<TO> GRID"              — verb-only ("what's your grid?")
-      QUERY    "<TO> QUERY <TEXT>"      — TEXT is "MSGS" / "MSG <id>" / "CALL"
-      MYLOC    "<TO> GRID <my_grid>"    — auto-expand grid from station config
+      FREE        "<TO> <TEXT>"                      — directed free-form
+      MSG         "<TO> MSG <TEXT>"                  — buffered mail
+      MSG TO      "<TO> MSG TO:<FOR> <TEXT>"         — relay via TO, hold for FOR
+      STORE       (no wire — local mailbox action)
+      AGN?        "<TO> AGN?"                        — verb-only
+      SNR?        "<TO> SNR?"                        — verb-only
+      GRID?       "<TO> GRID?"                       — verb-only (JS8Call requires the ?)
+      QUERY MSGS  "<TO> QUERY MSGS"                  — verb-only, ask peer for held msgs
+      MYLOC       "<TO> GRID <my_grid>"              — broadcast our grid
 
-    The TO field is uppercased on output (JS8Call protocol convention)
-    and stripped of leading/trailing whitespace. TEXT is used as-typed
-    (whitespace-trimmed at the boundary, internal spaces preserved
-    because the protocol layer handles multi-frame whitespace
-    correctly per the recent reassembly fixes).
+    The TO field is uppercased on output (JS8Call protocol
+    convention) and stripped of leading/trailing whitespace. TEXT is
+    used as-typed (whitespace-trimmed at the boundary, internal
+    spaces preserved — the protocol layer handles multi-frame
+    whitespace correctly per the reassembly fix).
 
     SELF-CALL note: the gfsk8 library (Varicode.cpp::buildMessageFrames,
     AUTO_REMOVE_MYCALL block) silently strips the leading callsign
@@ -187,23 +213,58 @@ def build_compose_wire(
     just "MSG hi" — stripping the to-callsign entirely, producing
     a malformed frame with no directed-message envelope. The receiver
     sees plain text, not a directed MSG. We reject TO == my_call
-    here to prevent silently-malformed transmissions; sending to
-    yourself isn't a meaningful JS8 op anyway.
+    here to prevent silently-malformed transmissions for ALL
+    transmitting CMDs; STORE is allowed to have TO == self since it
+    doesn't transmit.
     """
     to = (to or "").strip().upper()
     if not to:
         return None
-    # Reject TO == self — see SELF-CALL note above. The check is
-    # case-insensitive and also rejects "W5DMH" matching "w5dmh".
+    text = (text or "").strip()
+
+    # STORE has no wire — caller must use the local-mailbox path.
+    if cmd is ComposeCmd.STORE:
+        return None
+
+    # Reject TO == self for everything else (transmits would be
+    # malformed by gfsk8's AUTO_REMOVE_MYCALL strip).
     if my_call and to == my_call.strip().upper():
         return None
-    text = (text or "").strip()
+
+    if cmd is ComposeCmd.MSG_TO:
+        # Need FOR + TEXT. FOR cannot equal TO (relay holding for
+        # itself isn't meaningful and is almost certainly an
+        # operator typo).
+        for_call_n = (for_call or "").strip().upper()
+        if not for_call_n or not text:
+            return None
+        if for_call_n == to:
+            return None
+        return f"{to} MSG TO:{for_call_n} {text}"
+
+    if cmd is ComposeCmd.QUERY_MSG:
+        # QUERY MSG <id> — fetch a buffered message by its mailbox row
+        # ID from the TO station. The body is the integer id only;
+        # we accept the operator's text input but reject anything that
+        # isn't a positive integer to keep malformed protocol off the
+        # air. JS8Call's mailbox row IDs are 1-based and small (rarely
+        # > 100 for a single station's queue), so 1..999999 is a more
+        # than generous range. Leading/trailing whitespace in text is
+        # already stripped above; we just need the remaining content
+        # to be digits.
+        if not text or not text.isdigit():
+            return None
+        try:
+            msg_id = int(text)
+        except ValueError:
+            return None
+        if msg_id < 1:
+            return None
+        return f"{to} QUERY MSG {msg_id}"
 
     body_required = cmd in (
         ComposeCmd.FREE,
         ComposeCmd.MSG,
-        ComposeCmd.STORE,
-        ComposeCmd.QUERY,
     )
     if body_required and not text:
         return None
@@ -256,6 +317,31 @@ _FOCUSABLE_FIELDS: dict[Screen, tuple[str, ...]] = {
 }
 
 
+def _compose_focus_cycle(cmd: ComposeCmd) -> tuple[str, ...]:
+    """Return the COMPOSE field-cycle for the given CMD.
+
+    Phase 14b: MSG_TO inserts ``compose_for`` between ``compose_cmd``
+    and ``compose_text`` so the operator can fill in the final-
+    recipient callsign. All other CMDs use the standard 4-field
+    cycle. The router uses this for Tab/Shift-Tab navigation and
+    the renderer uses it to decide whether to draw the FOR row.
+    """
+    if cmd is ComposeCmd.MSG_TO:
+        return (
+            "compose_to",
+            "compose_cmd",
+            "compose_for",
+            "compose_text",
+            "compose_send",
+        )
+    return (
+        "compose_to",
+        "compose_cmd",
+        "compose_text",
+        "compose_send",
+    )
+
+
 @dataclass(frozen=True)
 class DirectedRow:
     """A directed message to be displayed on the Directed screen.
@@ -285,6 +371,19 @@ class InboxRow:
     record was stored with — formatted for display by the renderer.
 
     Frozen so it's safe to embed directly in a UISnapshot.
+
+    Store-row support (Phase 14b)
+    -----------------------------
+    ``is_stored=True`` indicates this row is a held STORE — mail we
+    hold to deliver to another station's QUERY MSGS, NOT inbound
+    traffic for us. The renderer flips the row color to amber and
+    swaps the FROM/TO so the operator sees ``→KD8PGB`` (= "for
+    KD8PGB"). The ``recipient`` field holds the destination
+    callsign in that case (= what ``→KD8PGB`` is showing).
+
+    For UNREAD/READ rows (= our own inbox), ``is_stored=False``,
+    ``recipient`` is None, and we display the ``from_call`` field
+    as the sender — the existing convention.
     """
 
     id: int
@@ -293,6 +392,10 @@ class InboxRow:
     utc_iso: str
     snr_db: Optional[int]
     is_read: bool
+    # STORE-row metadata (Phase 14b unified-mailbox UI). For non-STORE
+    # rows these stay at their defaults and the renderer ignores them.
+    is_stored: bool = False
+    recipient: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -425,13 +528,23 @@ class UISnapshot:
     # (may be empty until the operator types or pre-population fires).
     # CMD is one of the ComposeCmd enum values (defaulting to FREE).
     # TEXT is the operator-typed message body.
+    # FOR is the final-recipient callsign used only when CMD is
+    # MSG_TO; for all other CMDs the field is hidden and the value
+    # is ignored.
     # ``compose_focused_field`` is the focusable-field name string
-    # ("compose_to", "compose_cmd", "compose_text", "compose_send")
-    # OR None when not on the COMPOSE screen.
+    # ("compose_to", "compose_cmd", "compose_for", "compose_text",
+    # "compose_send") OR None when not on the COMPOSE screen.
+    # ``compose_to_heard_index`` / ``compose_for_heard_index`` are
+    # set when the field's value was picked from the heard-list
+    # dropdown (so the renderer can colour the field by HEARD-age);
+    # None when the operator typed free-form.
     compose_to: str = ""
     compose_cmd: ComposeCmd = ComposeCmd.FREE
     compose_text: str = ""
+    compose_for: str = ""
     compose_focused_field: Optional[str] = None
+    compose_to_heard_index: Optional[int] = None
+    compose_for_heard_index: Optional[int] = None
 
     # Phase 6: battery snapshot from the BQ27220 fuel gauge. None
     # when the reader hasn't run yet (or when discovery has failed
@@ -544,12 +657,20 @@ class UIState:
         self._compose_to: str = ""
         self._compose_cmd: ComposeCmd = ComposeCmd.FREE
         self._compose_text: str = ""
+        # FOR callsign — used only when CMD is MSG_TO. The wire is
+        # "<TO> MSG TO:<FOR> <TEXT>", asking TO to hold the body for
+        # FOR. The field is rendered conditionally and the field
+        # cycle (Tab order) skips it when CMD is anything else.
+        self._compose_for: str = ""
         # Pointer into the heard+groups cycle so successive ↑/↓ keypresses
         # walk the list in order rather than jumping back to position 0.
         # None means "no cycle position yet" — next press lands on index 0
         # (or n-1 for ↑). Reset to None whenever the operator hand-types
         # a new TO value via begin_edit/commit.
         self._compose_to_heard_index: Optional[int] = None
+        # FOR-field heard-index — same semantics as TO's, but for the
+        # MSG_TO field. Reset to None when the operator hand-types.
+        self._compose_for_heard_index: Optional[int] = None
 
         # Phase 6: battery snapshot (None until BatteryReader fires
         # the first successful poll, or back to None if discovery
@@ -635,7 +756,13 @@ class UIState:
     # ── Focus cycling ────────────────────────────────────────────────
 
     def cycle_focus(self) -> None:
-        fields = _FOCUSABLE_FIELDS.get(self._screen, ())
+        # Phase 14b: COMPOSE has a dynamic field cycle (4 or 5
+        # fields depending on whether CMD is MSG_TO). Use the
+        # helper so Tab navigation respects the conditional FOR row.
+        if self._screen is Screen.COMPOSE:
+            fields = _compose_focus_cycle(self._compose_cmd)
+        else:
+            fields = _FOCUSABLE_FIELDS.get(self._screen, ())
         if not fields:
             return
         idx = self._focus_index.get(self._screen, 0)
@@ -1117,7 +1244,18 @@ class UIState:
         for r in records:
             # MailboxStore returns UNREAD + READ rows for list_inbox().
             # Map the type discriminator to is_read for UI styling.
+            #
+            # Phase 14b: STORE rows (unified mailbox view) — inbox +
+            # STORE share the same list. We carry through ``is_stored``
+            # and the destination callsign so the renderer can
+            # distinguish them visually (amber color, ``→TO`` label
+            # instead of FROM).
             type_str = getattr(r, "type", "")
+            is_stored = (type_str == "STORE")
+            recipient = (
+                str(getattr(r, "to_call", "") or "")
+                if is_stored else None
+            ) or None
             new_messages.append(
                 InboxRow(
                     id=int(getattr(r, "id")),
@@ -1125,7 +1263,13 @@ class UIState:
                     body=str(getattr(r, "text", "") or ""),
                     utc_iso=str(getattr(r, "utc_iso", "") or ""),
                     snr_db=getattr(r, "snr_db", None),
-                    is_read=(type_str == "READ"),
+                    # STORE rows never start as UNREAD-styled; the
+                    # operator's never going to "open and read" their
+                    # own held mail. Render at FG_DIM by default so
+                    # the screen draws them as quiet/secondary content.
+                    is_read=(type_str in ("READ", "STORE")),
+                    is_stored=is_stored,
+                    recipient=recipient,
                 )
             )
         new_tuple = tuple(new_messages)
@@ -1321,9 +1465,18 @@ class UIState:
         Empty string is a valid intermediate value — the operator may
         be deleting characters before typing a new callsign. The wire-
         format builder rejects an empty TO at send time, so transient
-        empties don't matter here.
+        empties don't matter here. Typing clears the heard-index
+        marker (the operator is hand-typing now, not cycling).
         """
         self._compose_to = value
+        self._compose_to_heard_index = None
+        self._dirty.set()
+
+    def compose_set_for(self, value: str) -> None:
+        """Set the COMPOSE FOR field (used by MSG TO). Same semantics
+        as ``compose_set_to`` — typing clears the heard-index marker."""
+        self._compose_for = value
+        self._compose_for_heard_index = None
         self._dirty.set()
 
     def compose_set_text(self, value: str) -> None:
@@ -1338,6 +1491,12 @@ class UIState:
         first). ``forward=False`` means ↑ (previous, wraps to last).
         Operators cycle this when CMD is the focused field; other
         fields don't consume ↑/↓.
+
+        Phase 14b: if the new CMD does not use the FOR field (i.e.
+        is anything other than MSG_TO), and the current focus index
+        is out of range for the smaller cycle, we clamp it back to
+        CMD (index 1). This keeps the focus index sensible across
+        CMD changes that remove the FOR field from the cycle.
         """
         try:
             idx = COMPOSE_CMD_ORDER.index(self._compose_cmd)
@@ -1346,6 +1505,15 @@ class UIState:
         n = len(COMPOSE_CMD_ORDER)
         idx = (idx + 1) % n if forward else (idx - 1) % n
         self._compose_cmd = COMPOSE_CMD_ORDER[idx]
+        # If we just stepped away from MSG TO, the FOR field is no
+        # longer in the focus cycle — clamp the focus index to CMD
+        # (index 1) so the next Tab lands on TEXT, not in undefined
+        # territory.
+        if self._compose_cmd is not ComposeCmd.MSG_TO:
+            cur_focus = self._focus_index.get(Screen.COMPOSE, 0)
+            cycle = _compose_focus_cycle(self._compose_cmd)
+            if cur_focus >= len(cycle):
+                self._focus_index[Screen.COMPOSE] = 1  # park on CMD
         self._dirty.set()
 
     # ── TO field ↑/↓ cycle (heard stations + groups) ──────────────────
@@ -1422,6 +1590,34 @@ class UIState:
         """Operator pressed ↑ on focused TO field."""
         self._compose_to_cycle(forward=False)
 
+    def _compose_for_cycle(self, *, forward: bool) -> None:
+        """Same as _compose_to_cycle but for the FOR field.
+
+        Used only when CMD is MSG_TO. The dropdown is the heard-list
+        (no groups — the FOR field is the FINAL recipient, which is
+        always a real station, not a group). Empty heard list → no-op.
+        """
+        dropdown = self._heard_for_compose_dropdown()
+        if not dropdown:
+            return
+        n = len(dropdown)
+        if self._compose_for_heard_index is None:
+            idx = 0 if forward else (n - 1)
+        else:
+            i = self._compose_for_heard_index
+            idx = (i + 1) % n if forward else (i - 1) % n
+        self._compose_for_heard_index = idx
+        self._compose_for = dropdown[idx].callsign
+        self._dirty.set()
+
+    def compose_for_cycle_heard_next(self) -> None:
+        """Operator pressed ↓ on focused FOR field (MSG_TO only)."""
+        self._compose_for_cycle(forward=True)
+
+    def compose_for_cycle_heard_prev(self) -> None:
+        """Operator pressed ↑ on focused FOR field (MSG_TO only)."""
+        self._compose_for_cycle(forward=False)
+
 
     def compose_clear(self) -> None:
         """Reset COMPOSE to its initial state. Called on Esc and after send.
@@ -1435,6 +1631,10 @@ class UIState:
         self._compose_to = ""
         self._compose_cmd = ComposeCmd.FREE
         self._compose_text = ""
+        # Phase 14b: also reset FOR field + heard indices.
+        self._compose_for = ""
+        self._compose_to_heard_index = None
+        self._compose_for_heard_index = None
         # Reset focus to the TO field (index 0 in COMPOSE focusables).
         self._focus_index[Screen.COMPOSE] = 0
         self._editing_field = None
@@ -1451,8 +1651,10 @@ class UIState:
 
         Behavior:
           - If ``callsign`` is non-empty AND TO is currently empty,
-            populate TO. This preserves any in-progress compose if
-            the operator left and came back.
+            populate TO. Set ``_compose_to_heard_index`` to 0 (most-
+            recent slot in the filtered dropdown) when the picked
+            callsign matches that slot, so the renderer can use the
+            HEARD-age color.
           - If ``callsign`` is None or empty, no-op.
           - We never overwrite a non-empty TO — operators frequently
             type a callsign manually and we don't want to clobber
@@ -1463,6 +1665,12 @@ class UIState:
         if self._compose_to:
             return
         self._compose_to = callsign.upper()
+        # Pre-population always corresponds to the most-recent heard
+        # slot (index 0). Set the marker so the renderer can use the
+        # HEARD-age color.
+        dropdown = self._heard_for_compose_dropdown()
+        if dropdown and dropdown[0].callsign.upper() == self._compose_to:
+            self._compose_to_heard_index = 0
         self._dirty.set()
 
     @property
@@ -1477,17 +1685,34 @@ class UIState:
     def compose_text(self) -> str:
         return self._compose_text
 
+    @property
+    def compose_for(self) -> str:
+        return self._compose_for
+
+    @property
+    def compose_to_heard_index(self) -> Optional[int]:
+        return self._compose_to_heard_index
+
+    @property
+    def compose_for_heard_index(self) -> Optional[int]:
+        return self._compose_for_heard_index
+
     def compose_focused_field(self) -> Optional[str]:
         """Return the currently-focused COMPOSE field name, or None.
 
         Returns one of ``"compose_to"``, ``"compose_cmd"``,
-        ``"compose_text"``, ``"compose_send"`` when on the COMPOSE
-        screen, else ``None``. The router uses this to dispatch
-        keystrokes (type-to-edit on TO/TEXT, ↑/↓ on CMD, Enter on SEND).
+        ``"compose_for"`` (MSG_TO only), ``"compose_text"``,
+        ``"compose_send"`` when on the COMPOSE screen, else ``None``.
+
+        Phase 14b: when CMD is MSG_TO the field cycle inserts
+        ``compose_for`` between ``compose_cmd`` and ``compose_text``.
+        For all other CMDs, the FOR field is hidden and skipped in
+        the Tab order. The router uses this to dispatch keystrokes
+        (type-to-edit on TO/FOR/TEXT, ↑/↓ on CMD, Enter on SEND).
         """
         if self._screen is not Screen.COMPOSE:
             return None
-        fields = _FOCUSABLE_FIELDS.get(Screen.COMPOSE, ())
+        fields = _compose_focus_cycle(self._compose_cmd)
         if not fields:
             return None
         idx = self._focus_index.get(Screen.COMPOSE, 0)
@@ -1588,7 +1813,10 @@ class UIState:
             compose_to=self._compose_to,
             compose_cmd=self._compose_cmd,
             compose_text=self._compose_text,
+            compose_for=self._compose_for,
             compose_focused_field=self.compose_focused_field(),
+            compose_to_heard_index=self._compose_to_heard_index,
+            compose_for_heard_index=self._compose_for_heard_index,
             hb_mode=self._hb_mode,
             allcall_focus=self._allcall_focus,
             hb_select_focus=self._hb_select_focus,

@@ -73,9 +73,10 @@ def test_compose_send_myloc_uses_station_grid():
     assert app._outbound_queue.calls == [("K1ABC GRID FN42", None, "K1ABC")]
 
 
-def test_compose_send_query_with_msgs_argument():
+def test_compose_send_query_msgs():
+    """QUERY MSGS is now verb-only — no TEXT body required."""
     app = _make_app()
-    ok = app._compose_send_sync("K1ABC", ComposeCmd.QUERY, "MSGS")
+    ok = app._compose_send_sync("K1ABC", ComposeCmd.QUERY_MSGS, "")
     assert ok is True
     assert app._outbound_queue.calls == [("K1ABC QUERY MSGS", None, "K1ABC")]
 
@@ -93,10 +94,45 @@ def test_compose_send_rejects_empty_to():
 
 
 def test_compose_send_rejects_empty_body_for_body_cmds():
+    """FREE and MSG require a non-empty body; without it nothing is
+    enqueued. STORE doesn't transmit so it doesn't apply here.
+    MSG_TO is tested separately (also requires FOR)."""
     app = _make_app()
-    for cmd in (ComposeCmd.FREE, ComposeCmd.MSG, ComposeCmd.STORE, ComposeCmd.QUERY):
+    for cmd in (ComposeCmd.FREE, ComposeCmd.MSG):
         ok = app._compose_send_sync("K1ABC", cmd, "")
         assert ok is False, cmd
+    assert app._outbound_queue.calls == []
+
+
+def test_compose_send_store_returns_false_no_wire():
+    """STORE never produces a wire — _compose_send_sync returns False.
+    The router routes STORE through _compose_store_sync instead, which
+    has its own tests."""
+    app = _make_app()
+    ok = app._compose_send_sync("K1ABC", ComposeCmd.STORE, "body")
+    assert ok is False
+    assert app._outbound_queue.calls == []
+
+
+def test_compose_send_msg_to_with_for_call_enqueues():
+    """MSG TO + FOR + TEXT produces 'TO MSG TO:FOR TEXT' on the wire."""
+    app = _make_app()
+    ok = app._compose_send_sync(
+        "K1ABC", ComposeCmd.MSG_TO, "hello", for_call="KD8GIJ",
+    )
+    assert ok is True
+    assert app._outbound_queue.calls == [
+        ("K1ABC MSG TO:KD8GIJ hello", None, "K1ABC"),
+    ]
+
+
+def test_compose_send_msg_to_rejects_empty_for():
+    """MSG TO without FOR → builder returns None → no enqueue."""
+    app = _make_app()
+    ok = app._compose_send_sync(
+        "K1ABC", ComposeCmd.MSG_TO, "hello", for_call="",
+    )
+    assert ok is False
     assert app._outbound_queue.calls == []
 
 

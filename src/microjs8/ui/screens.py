@@ -28,7 +28,15 @@ from PIL import Image, ImageDraw
 
 from microjs8.ui import theme
 from microjs8.ui.fonts import Fonts
-from microjs8.ui.state import HB_MODES_ORDERED, HbMode, RING, Screen, UISnapshot
+from microjs8.ui.state import (
+    COMPOSE_CMD_ORDER,
+    ComposeCmd,
+    HB_MODES_ORDERED,
+    HbMode,
+    RING,
+    Screen,
+    UISnapshot,
+)
 
 _log = logging.getLogger(__name__)
 
@@ -1039,57 +1047,105 @@ def _wrap_message_body(text: str, max_chars: int) -> list[str]:
     return out
 
 
-def _render_compose(state: UISnapshot, fonts: Fonts) -> Image.Image:
-    """COMPOSE screen: TO / CMD / TEXT / SEND with field focus.
+def _compose_field_color(
+    *,
+    value: str,
+    heard_index: Optional[int],
+    heard_list,
+    callsign: str,
+) -> tuple[int, int, int]:
+    """Pick a color for the COMPOSE TO or FOR field's value.
 
-    Layout:
+    Three cases:
+      - Empty value → FG_DIM (placeholder).
+      - Picked from heard dropdown (heard_index is not None) →
+        HEARD-age colour for the matching row, so the operator sees
+        "is this contact fresh?" at a glance. We filter out self when
+        looking up the row, mirroring the dropdown's own filter.
+      - Typed free-form (value non-empty but heard_index is None) →
+        FG (plain white). Operator's own input gets neutral colour;
+        we don't pretend it's age-attested data.
+
+    Defensive against stale indices (heard list changed since the
+    operator picked); falls back to FG.
+    """
+    if not value:
+        return theme.FG_DIM
+    if heard_index is None:
+        return theme.FG
+    # Filter heard list the same way the dropdown does (self excluded).
+    our = (callsign or "").upper()
+    filtered = [
+        st for st in heard_list
+        if (st.callsign or "").upper() != our
+    ]
+    if 0 <= heard_index < len(filtered):
+        return _age_color(time.time() - filtered[heard_index].last_heard)
+    # Index out of range — heard list changed under us. Render in
+    # plain FG rather than crash.
+    return theme.FG
+
+
+def _render_compose(state: UISnapshot, fonts: Fonts) -> Image.Image:
+    """COMPOSE screen: TO / CMD / [FOR] / TEXT / SEND with field focus.
+
+    Layout (standard layout, CMD != MSG_TO):
 
       ┌────────────────────────────────────────┐
       │ COMPOSE                  UTC HH:MM:SS  │
       ├────────────────────────────────────────┤
-      │  TO    [K1ABC▎          ]              │ ← cursor when focused
+      │  TO    [K1ABC▎          ]              │
       │  CMD    ▾ FREE          (↑↓ to cycle)  │
       │  TEXT  ┌────────────────────────────┐  │
       │        │ hello dave!▎               │  │
       │        └────────────────────────────┘  │
-      │              [   SEND   ]              │ ← inverted when focused
+      │              [   SEND   ]              │
       ├────────────────────────────────────────┤
       │ Tab next · Enter send · Esc cancel     │
       └────────────────────────────────────────┘
 
-    Focus styling:
-      - The focused field's label is bright green (FG_GOOD), unfocused
-        labels are dim (FG_DIM). Same convention used on the SETUP
-        screen so the operator's eye is already trained.
-      - Text fields show a small caret (▎) at the end of the buffer
-        when focused; absent when not.
-      - The CMD field has ↕ glyphs flanking the value when focused
-        (visual hint that ↑/↓ cycle the dropdown).
-      - The SEND button is rendered with an inverted background
-        (HEADER_BG fill, FG_GOOD text) when focused — looks like a
-        physical button you'd press.
+    Layout for MSG TO (extra FOR row between CMD and TEXT):
 
-    Footer hint adapts to focused field so the operator always
-    knows what their next keypress will do.
+      │  TO    [K1ABC▎          ]              │
+      │  CMD    ▾ MSG TO       (↑↓ to cycle)   │
+      │  FOR   [KD8GIJ▎         ]              │  ← only for MSG TO
+      │  TEXT  ┌────────────────────────────┐  │
+
+    Focus styling:
+      - Focused field's label is FG_GOOD; unfocused labels are FG_DIM.
+      - The TO and FOR values are coloured by HEARD-age (green/amber/
+        grey) when the value was picked from the heard dropdown
+        (i.e., ``compose_to_heard_index`` / ``compose_for_heard_index``
+        is not None). When the operator typed free-form, the colour
+        is plain FG. Empty fields are FG_DIM.
+      - The CMD field has ↕ glyphs flanking the value when focused.
+      - The SEND button inverts when focused.
+
+    TX warning priority (highest first):
+      1. TO empty                    → "TO callsign required"
+      2. FOR empty (MSG TO only)     → "FOR callsign required"
+      3. TO == our own call (non-STORE) → "TO cannot be your own call"
+      4. MSG TO with FOR == TO       → "FOR cannot equal TO"
+      5. TX OFF                      → "TX OFF — configure station"
+      6. No time source              → "queued — awaiting time sync"
+
+    STORE is exempt from #3 and #5 (it's a local action, doesn't
+    transmit — no gfsk8 strip risk, no TX gate required).
     """
     img, draw = _new_canvas()
     _draw_header(draw, fonts, "COMPOSE", state)
 
     focused = state.compose_focused_field
     label_w = 44
+    cmd = state.compose_cmd
+    is_msg_to = (cmd is ComposeCmd.MSG_TO)
 
-    # Phase 4: 320×170 retune. The TO/CMD/TEXT/SEND stack used to fit
-    # comfortably in MiniJS8's 192px body; the CardputerZero's 128px
-    # body forces tighter spacing and a 2-line TEXT box (was 3). The
-    # TEXT label is now inline-left of the box (matching the docstring
-    # diagram above) so we don't burn a full row on the label.
-    y = theme.BODY_Y0 + 4
+    y = theme.BODY_Y0 + 6
 
     # ── TO row ──────────────────────────────────────────────────────
     is_to_focus = (focused == "compose_to")
     label_color = theme.FG_GOOD if is_to_focus else theme.FG_DIM
     draw.text((theme.PAD_X, y), "TO", font=fonts.body, fill=label_color)
-    # Value box: bordered when focused for clarity, plain when not.
     box_x0 = theme.PAD_X + label_w
     box_x1 = theme.SCREEN_W - theme.PAD_X
     if is_to_focus:
@@ -1099,48 +1155,68 @@ def _render_compose(state: UISnapshot, fonts: Fonts) -> Image.Image:
         )
     to_text = state.compose_to or ""
     if is_to_focus:
-        to_text = to_text + "▎"  # visible cursor at the end
-    draw.text(
-        (box_x0, y),
-        to_text,
-        font=fonts.body,
-        fill=theme.FG if state.compose_to else theme.FG_DIM,
+        to_text = to_text + "▎"
+    # Colour by source: if picked from heard dropdown, use HEARD-age
+    # colour so operator sees freshness; else plain FG / FG_DIM.
+    to_color = _compose_field_color(
+        value=state.compose_to,
+        heard_index=state.compose_to_heard_index,
+        heard_list=state.heard,
+        callsign=state.callsign,
     )
+    draw.text((box_x0, y), to_text, font=fonts.body, fill=to_color)
     y += 18
 
     # ── CMD row ─────────────────────────────────────────────────────
     is_cmd_focus = (focused == "compose_cmd")
     label_color = theme.FG_GOOD if is_cmd_focus else theme.FG_DIM
     draw.text((theme.PAD_X, y), "CMD", font=fonts.body, fill=label_color)
-    cmd = state.compose_cmd
     cmd_label = cmd.value if cmd.value else "(free)"
-    if is_cmd_focus:
-        # Surround with ↕ glyphs to hint that ↑/↓ cycle.
-        cmd_text = f"↕ {cmd_label}"
-    else:
-        cmd_text = cmd_label
+    cmd_text = f"↕ {cmd_label}" if is_cmd_focus else cmd_label
     if is_cmd_focus:
         draw.rectangle(
             [(box_x0 - 2, y - 2), (box_x1, y + 16)],
             outline=theme.FG_GOOD,
         )
-    draw.text(
-        (box_x0, y),
-        cmd_text,
-        font=fonts.body,
-        fill=theme.FG,
-    )
+    draw.text((box_x0, y), cmd_text, font=fonts.body, fill=theme.FG)
     y += 18
 
+    # ── FOR row (only when MSG TO) ──────────────────────────────────
+    if is_msg_to:
+        is_for_focus = (focused == "compose_for")
+        label_color = theme.FG_GOOD if is_for_focus else theme.FG_DIM
+        draw.text(
+            (theme.PAD_X, y), "FOR",
+            font=fonts.body, fill=label_color,
+        )
+        if is_for_focus:
+            draw.rectangle(
+                [(box_x0 - 2, y - 2), (box_x1, y + 16)],
+                outline=theme.FG_GOOD,
+            )
+        for_text = state.compose_for or ""
+        if is_for_focus:
+            for_text = for_text + "▎"
+        for_color = _compose_field_color(
+            value=state.compose_for,
+            heard_index=state.compose_for_heard_index,
+            heard_list=state.heard,
+            callsign=state.callsign,
+        )
+        draw.text((box_x0, y), for_text, font=fonts.body, fill=for_color)
+        y += 18
+
     # ── TEXT row ────────────────────────────────────────────────────
-    # Label is inline-left of the box (saves the 18px the prior layout
-    # spent on a separate label row). 2 visible lines instead of 3.
     is_text_focus = (focused == "compose_text")
     label_color = theme.FG_GOOD if is_text_focus else theme.FG_DIM
     draw.text((theme.PAD_X, y), "TEXT", font=fonts.body, fill=label_color)
-    text_box_y0 = y
-    text_box_y1 = text_box_y0 + 36           # 2 visible lines @ 14 pt + padding
-    box = (box_x0 - 2, text_box_y0 - 2, theme.SCREEN_W - theme.PAD_X, text_box_y1)
+    text_box_y0 = y + 14
+    # Phase 14b 320x170 layout: shorter TEXT box when MSG_TO is
+    # showing the FOR row, so the whole layout still fits above
+    # the SEND button without overflowing the screen.
+    text_box_h = 28 if is_msg_to else 40
+    text_box_y1 = text_box_y0 + text_box_h
+    box = (theme.PAD_X, text_box_y0, theme.SCREEN_W - theme.PAD_X, text_box_y1)
     draw.rectangle(
         box,
         outline=theme.FG_GOOD if is_text_focus else theme.SEPARATOR,
@@ -1149,21 +1225,14 @@ def _render_compose(state: UISnapshot, fonts: Fonts) -> Image.Image:
     inner_x = box[0] + 4
     inner_y_top = box[1] + 4
     inner_w = (box[2] - box[0]) - 8
-    line_h = 16  # body 14 pt + 2 px leading
+    line_h = 16
     n_lines_visible = max(1, (box[3] - box[1] - 8) // line_h)
 
-    # Word-wrap helper. Greedy: pack words onto a line until adding
-    # the next word would exceed inner_w; then start a new line.
-    # A single word longer than inner_w is broken character-by-
-    # character (rare for callsign-and-body messages, but defensive).
     def _wrap_to_lines(s: str, with_caret: bool) -> list[str]:
         if not s and not with_caret:
             return [""]
         if with_caret:
             s = s + "▎"
-        # Treat existing newlines as hard line breaks (currently no
-        # way to type one, but defensive for future multi-line
-        # paste/import).
         out: list[str] = []
         for paragraph in s.split("\n"):
             words = paragraph.split(" ")
@@ -1244,43 +1313,65 @@ def _render_compose(state: UISnapshot, fonts: Fonts) -> Image.Image:
     send_x = btn_x0 + (btn_w - send_w) // 2
     send_y = y + (btn_h - 14) // 2 - 1
     draw.text((send_x, send_y), "SEND", font=fonts.body, fill=send_color)
-    y = btn[3] + 2
+    y = btn[3] + 4
 
     # ── TX-state hint ───────────────────────────────────────────────
-    # If the operator presses SEND, the message will enqueue. Whether
-    # it actually fires depends on (a) tx_allowed (station configured
-    # / emergency override), (b) timing consensus (chrony OR ≥3
-    # decoded frames), and (c) TO != our own callsign (gfsk8 strips
-    # the leading callsign when it matches ours, producing a
-    # malformed transmission — see build_compose_wire's SELF-CALL
-    # note). Surface the most-pressing gate so the operator knows
-    # what to expect before pressing SEND.
-    tx_warning: Optional[str] = None
+    # Validation priority (highest first):
+    #   1. TO empty                       → "TO callsign required"
+    #   2. FOR empty (MSG TO only)        → "FOR callsign required"
+    #   3. TO == our own call (non-STORE) → "TO cannot be your own call"
+    #   4. MSG TO with FOR == TO          → "FOR cannot equal TO"
+    #   5. TX OFF (non-STORE)             → "TX OFF — configure station"
+    #   6. No time source (non-STORE)     → "queued — awaiting time sync"
+    #
+    # STORE is exempt from the SELF and TX-OFF gates — it's a local
+    # mailbox write, no on-air activity. STORE still requires a
+    # non-empty TO and TEXT.
+    is_store = (cmd is ComposeCmd.STORE)
+    is_query_msg = (cmd is ComposeCmd.QUERY_MSG)
     to_upper = (state.compose_to or "").strip().upper()
+    for_upper = (state.compose_for or "").strip().upper()
     own_upper = (state.callsign or "").strip().upper()
-    if to_upper and own_upper and to_upper == own_upper:
-        # Self-target — would silently produce a malformed frame.
-        # Highest-priority warning since it's a content/protocol error
-        # the operator can fix immediately.
+    text_stripped = (state.compose_text or "").strip()
+
+    tx_warning: Optional[str] = None
+    if not to_upper:
+        tx_warning = "TO callsign required"
+    elif is_msg_to and not for_upper:
+        tx_warning = "FOR callsign required"
+    elif (
+        not is_store
+        and to_upper and own_upper
+        and to_upper == own_upper
+    ):
         tx_warning = "TO cannot be your own call"
-    elif not state.tx_allowed:
+    elif is_msg_to and for_upper and to_upper and for_upper == to_upper:
+        tx_warning = "FOR cannot equal TO"
+    elif is_query_msg and not text_stripped:
+        # QUERY MSG needs a numeric mailbox id — empty TEXT field has
+        # its own distinct error so the operator knows what to type.
+        tx_warning = "MSG ID required (number)"
+    elif is_query_msg and not text_stripped.isdigit():
+        # Caught typo / accidental keyboard input. Numeric-only is
+        # the JS8Call wire contract for buffered-id lookup.
+        tx_warning = "MSG ID must be a number"
+    elif not is_store and not state.tx_allowed:
         tx_warning = "TX OFF — configure station"
     elif (
-        state.battery is not None
+        not is_store
+        and state.battery is not None
         and state.battery.is_critical
         and not state.emergency_override
     ):
-        # Phase 6 §6.11: battery ≤ 5% blocks TX in the normal path.
-        # The emergency override (help beacon) is exempt — life-
-        # safety traffic transmits regardless of battery state — so
-        # we explicitly check `not state.emergency_override` here to
-        # mirror the same exemption that TxSafetyGate applies.
+        # Phase 6 §6.11: battery ≤5% blocks TX in the normal path.
+        # Emergency-override bypasses this (life-safety traffic
+        # transmits regardless of battery). STORE never reaches this
+        # branch — local-mailbox writes are CPU-only, no TX power
+        # draw, so it's safe even on critical battery.
         tx_warning = "TX OFF — battery critical"
-    elif not state.time_source:
-        # No chrony, no consensus — scheduler won't fire until 3+
-        # frames are decoded OR chrony comes back. The compose will
-        # enqueue and wait.
+    elif not is_store and not state.time_source:
         tx_warning = "queued — awaiting time sync"
+
     if tx_warning:
         try:
             w = int(draw.textlength(tx_warning, font=fonts.small))
@@ -1293,13 +1384,32 @@ def _render_compose(state: UISnapshot, fonts: Fonts) -> Image.Image:
 
     # ── Footer hint, contextual to focus ────────────────────────────
     if is_to_focus:
-        hint = "type call · Tab next · Esc cancel"
+        # Empty heard list → no dropdown available, just typing.
+        has_heard = any(
+            (st.callsign or "").upper() != own_upper
+            for st in state.heard
+        )
+        if has_heard:
+            hint = "↑↓ heard · type call · Tab next"
+        else:
+            hint = "type call · Tab next · Esc cancel"
     elif is_cmd_focus:
         hint = "↑↓ cycle · Tab next · Esc cancel"
+    elif focused == "compose_for":
+        has_heard = any(
+            (st.callsign or "").upper() != own_upper
+            for st in state.heard
+        )
+        if has_heard:
+            hint = "↑↓ heard · type call · Tab next"
+        else:
+            hint = "type call · Tab next · Esc cancel"
     elif is_text_focus:
         hint = "type · Bksp del · Tab next · Esc cancel"
     elif is_send_focus:
-        hint = "Enter send · Tab next · Esc cancel"
+        # STORE's verb is "store locally"; transmits is "send".
+        action = "store" if is_store else "send"
+        hint = f"Enter {action} · Tab next · Esc cancel"
     else:
         hint = "Tab pick field · Esc cancel"
     _draw_footer(draw, fonts, hint)
