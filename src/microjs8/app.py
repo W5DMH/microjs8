@@ -82,6 +82,7 @@ from microjs8.tx import (
     default_chrony_ok,
 )
 from microjs8.tx.auto_response import plan_auto_response
+from microjs8.tx.beacon import EmergencyBeacon
 from microjs8.ui import (
     DirectedRow,
     DisplayDevice,
@@ -203,6 +204,31 @@ class MicroJS8App:
         if not self._config.tx_allowed:
             self._ui_state.set_screen(Screen.SETUP)
 
+        # ── Phase 12: emergency arm gesture + beacon lifecycle ──────
+        # 3-second ENTER hold on EMERGENCY screen arms the SOS
+        # beacon; 3-second ESC hold disarms. The completion
+        # callbacks invoke arm_emergency_beacon / disarm_emergency_beacon
+        # on the UIState, which then fire our _on_emergency_arm_change
+        # hook (registered below) to start/stop the actual TX thread.
+        from microjs8.input.emergency_arm_gesture import EmergencyArmGesture
+
+        async def _do_arm():
+            self._ui_state.arm_emergency_beacon()
+
+        async def _do_disarm():
+            self._ui_state.disarm_emergency_beacon()
+
+        self._emergency_arm_gesture = EmergencyArmGesture(
+            self._ui_state, loop, _do_arm, _do_disarm,
+        )
+        # Register the armed-state-change callback BEFORE the gesture
+        # can fire so we don't miss the initial transition.
+        self._ui_state.set_emergency_arm_change_callback(
+            self._on_emergency_arm_change,
+        )
+        # EmergencyBeacon instance — constructed lazily on first arm.
+        self._emergency_beacon: Optional[EmergencyBeacon] = None
+
         # ── Input router ────────────────────────────────────────────
         # Note: set_frequency callback is supplied later via
         # _wire_router_set_frequency() after the CAT service starts.
@@ -216,6 +242,7 @@ class MicroJS8App:
             mark_inbox_read=self._mark_inbox_read_sync,
             delete_inbox_row=self._delete_inbox_row_sync,
             compose_send=self._compose_send_sync,
+            emergency_arm_gesture=self._emergency_arm_gesture,
         )
 
         # ── Display, shutdown gesture, backlight, keyboard, GPS ──────
@@ -809,6 +836,27 @@ class MicroJS8App:
 
         # 4. Outbound queue, sharing the message store's connection.
         self._outbound_queue = OutboundQueue(self._store.connection)
+
+        # Phase 12: purge stale broadcasts FIRST so any SOS/CQ/HB
+        # from a crashed previous run is deleted before the encoder
+        # sees them. Without this, a stale SOS could auto-resume
+        # after a reboot (W5DMH bench, May 2026). Must precede
+        # reset_unencoded_to_encoding (which would otherwise push
+        # the stale broadcasts back to ENCODING for the worker).
+        try:
+            n_purged = self._outbound_queue.purge_stale_broadcasts()
+            if n_purged:
+                _log.warning(
+                    "encode recovery: purged stale broadcasts: %s "
+                    "(operator must consciously re-arm beacons / re-send CQ)",
+                    ", ".join(
+                        f"{kind}={count}" for kind, count in n_purged.items()
+                    ),
+                )
+        except Exception:
+            _log.exception(
+                "purge_stale_broadcasts failed — proceeding with reset",
+            )
 
         # Recover from any prior daemon run: encoded-audio cache is
         # in-memory only, so any rows in QUEUED state from before the
@@ -1826,6 +1874,110 @@ class MicroJS8App:
         self._enqueue_directed_reply(
             text=text, to_call=to_call, kind=OutboundKind.REPLY,
         )
+
+    # ── Phase 12: Emergency beacon lifecycle ─────────────────────────
+
+    def _on_emergency_arm_change(self, armed: bool) -> None:
+        """Construct or tear down the EmergencyBeacon thread on arm/disarm.
+
+        Called from the asyncio thread by UIState.arm_emergency_beacon /
+        disarm_emergency_beacon, which fire from the gesture's
+        completion coroutine.
+
+        Lifecycle:
+          - armed=True → construct EmergencyBeacon if not already
+            running; start the thread. The beacon does its first TX
+            immediately (``immediate_on_start=True``) then loops at
+            ``EMERGENCY_BEACON_INTERVAL_S``.
+          - armed=False → stop the existing beacon, join briefly.
+
+        Safe to call when ``_outbound_queue`` is None — the
+        unconfigured-emergency-bypass flow can fire the armed=True
+        transition before the queue is constructed. We log and skip
+        the beacon construction in that case; once the bypass also
+        sets tx_allowed=True, a subsequent re-arm will succeed.
+        """
+        if armed:
+            if self._emergency_beacon is not None:
+                _log.debug("emergency beacon already running")
+                return
+            if self._outbound_queue is None:
+                _log.warning(
+                    "emergency beacon armed but outbound queue not ready — "
+                    "TX will not occur until queue is online"
+                )
+                return
+            self._emergency_beacon = EmergencyBeacon(
+                queue=self._outbound_queue,
+                identity_factory=self._emergency_identity,
+            )
+            self._emergency_beacon.start()
+            _log.warning(
+                "emergency beacon ARMED — TXing SOS every %.0f s",
+                3 * 60.0,  # EMERGENCY_BEACON_INTERVAL_S
+            )
+        else:
+            if self._emergency_beacon is None:
+                _log.debug("emergency beacon already stopped")
+                return
+            _log.warning("emergency beacon DISARMED")
+            self._emergency_beacon.stop()
+            self._emergency_beacon.join(timeout=2.0)
+            if self._emergency_beacon.is_alive():
+                _log.warning(
+                    "emergency beacon did not stop within join timeout"
+                )
+            self._emergency_beacon = None
+
+    def _emergency_identity(self) -> Optional[
+        tuple[str, Optional[str], Optional[float], Optional[float]]
+    ]:
+        """Identity factory for the EmergencyBeacon.
+
+        Returns (callsign, grid, lat, lon) where lat/lon are optional
+        floats. The beacon prefers GPS lat/lon (most actionable to a
+        rescuer) and falls back to the configured grid only when no
+        fix is available. Refuses (returns None) only if BOTH the
+        callsign AND any location are missing — an SOS with neither
+        is useless. The beacon's ``_build_message`` then formats:
+
+          <call>: @ALLCALL SOS <lat lon>     ← preferred
+          <call>: @ALLCALL SOS <grid>        ← fallback
+
+        Called from the beacon thread on each fire. Reads UIState and
+        config — both are thread-safe for read access.
+        """
+        # Callsign: prefer config; fall back to N0CALL in emergency-
+        # override mode so an unconfigured station can still call for
+        # help. Return None only if NOTHING is set (no config, no
+        # override) — that path shouldn't reach here, but be defensive.
+        cs = self._config.station.callsign if self._config else None
+        if not cs or cs == "N0CALL":
+            # In override mode, EmergencyBeacon._build_message will
+            # render "N0CALL" for us. Pass the empty/N0CALL through
+            # so the beacon handles the fallback consistently.
+            cs = cs or ""
+        # Grid: use whatever the operator has configured.
+        grid = self._config.station.grid if self._config else None
+        # Position: live GPS lat/lon if available.
+        gps = self._ui_state.snapshot().gps if self._ui_state else None
+        if (
+            gps is not None
+            and gps.has_position
+            and gps.lat is not None
+            and gps.lon is not None
+        ):
+            lat: Optional[float] = float(gps.lat)
+            lon: Optional[float] = float(gps.lon)
+        else:
+            lat = None
+            lon = None
+        # If we have neither a position nor a grid, the beacon can't
+        # produce a useful SOS. Return None so it skips the TX. The
+        # gesture won't see this — only the beacon's per-tick check.
+        if not lat and not lon and not grid:
+            return None
+        return (cs, grid, lat, lon)
 
     # ── Phase 11: ALLCALL action callbacks ───────────────────────────
 

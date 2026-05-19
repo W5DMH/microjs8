@@ -24,10 +24,17 @@ the entire keyboard pipeline testable without GPIO, evdev, or the TFT.
 from __future__ import annotations
 
 import logging
-from typing import Awaitable, Callable, Optional, Protocol
+from typing import TYPE_CHECKING, Awaitable, Callable, Optional, Protocol
 
 from microjs8.input.events import Key, KeyEvent
 from microjs8.ui.state import ComposeCmd, Screen, UIState
+
+if TYPE_CHECKING:
+    # Phase 12: emergency arm gesture is wired via forward reference so
+    # tests that don't exercise the emergency flow can pass None without
+    # paying the import cost. The actual instance is constructed in
+    # app.py at daemon startup.
+    from microjs8.input.emergency_arm_gesture import EmergencyArmGesture
 
 _log = logging.getLogger(__name__)
 
@@ -85,6 +92,7 @@ class InputRouter:
         compose_send: Optional[Callable[[str, "ComposeCmd", str], bool]] = None,
         backlight: Optional["_Backlight"] = None,
         shutdown_gesture: Optional["_ShutdownGesture"] = None,
+        emergency_arm_gesture: Optional["EmergencyArmGesture"] = None,
     ) -> None:
         self._ui = ui
         # save_config(callsign, grid, units) -> True if saved cleanly.
@@ -130,6 +138,11 @@ class InputRouter:
         # before the backlight node exists.
         self._backlight = backlight
         self._shutdown_gesture = shutdown_gesture
+        # Phase 12: emergency arm gesture owns the 3-second arm/disarm
+        # hold for the SOS beacon. Optional so tests that don't
+        # exercise the emergency flow can omit it; ENTER/ESC on the
+        # EMERGENCY screen are quiet no-ops when not provided.
+        self._emergency_arm_gesture = emergency_arm_gesture
 
     # ── Late-binding setters ────────────────────────────────────────
     # These exist so app.py can construct the router early (before
@@ -143,6 +156,16 @@ class InputRouter:
     def set_shutdown_gesture(self, gesture: Optional["_ShutdownGesture"]) -> None:
         """Inject (or replace) the shutdown gesture handler. ``None`` disables Fn+Q."""
         self._shutdown_gesture = gesture
+
+    def set_emergency_arm_gesture(
+        self, gesture: Optional["EmergencyArmGesture"],
+    ) -> None:
+        """Inject (or replace) the emergency arm/disarm gesture handler.
+
+        ``None`` disables ENTER/ESC processing on the EMERGENCY
+        screen (those keys fall through to ring nav).
+        """
+        self._emergency_arm_gesture = gesture
 
     def handle(self, event: KeyEvent) -> None:
         """Top-level dispatcher. Wraps any handler exception so a
@@ -408,6 +431,17 @@ class InputRouter:
                 return
             # Otherwise fall through to ring nav / generic handling.
 
+        # Phase 12: EMERGENCY screen — arm/disarm gesture handling.
+        # ENTER on idle begins a 3-second arm hold. ESC during arming
+        # cancels. ESC on armed begins a 3-second disarm hold. The
+        # handler returns True (consume) during a hold to prevent
+        # accidental key-stroke escape; False (fall through) when
+        # the operator is armed and pressing LEFT/RIGHT to navigate
+        # away while the beacon keeps TXing in the background.
+        if snapshot.screen is Screen.EMERGENCY:
+            if self._handle_emergency_key(event, snapshot):
+                return
+
         # Ring nav with ← / → (locked when unconfigured).
         if event.key is Key.LEFT:
             if self._ring_locked(snapshot):
@@ -454,6 +488,83 @@ class InputRouter:
                 ch = event.char if field == "units" else event.char.upper()
                 self._ui.edit_append(ch)
                 return
+
+    def _handle_emergency_key(
+        self, event: KeyEvent, snapshot,
+    ) -> bool:
+        """EMERGENCY screen — arm/disarm via 3-second hold gestures.
+
+        Returns True if the key was consumed; False if it should fall
+        through to ring nav (left/right cycle to other screens).
+
+        The state machine has four states:
+          1. IDLE (not armed, no hold)
+          2. ARMING (3-second arm hold in progress)
+          3. ARMED (beacon TXing)
+          4. DISARMING (3-second disarm hold in progress)
+
+        Transitions:
+          IDLE  + ENTER → begin_arming
+          ARMING + ESC → cancel hold (back to IDLE)
+          ARMING + other → ignored
+          ARMED + ESC → begin_disarming
+          ARMED + non-Esc nav keys → fall through to ring nav
+          DISARMING + ENTER → cancel hold (back to ARMED)
+          DISARMING + other → ignored
+
+        Returning False allows the operator to navigate away from
+        EMERGENCY while ARMED — the beacon continues to TX from its
+        background thread, and the SOS badge in every screen header
+        keeps the armed state visible.
+        """
+        if self._emergency_arm_gesture is None:
+            # No gesture wired — quiet no-op so test fixtures that
+            # don't exercise this path don't crash.
+            return False
+
+        gesture = self._emergency_arm_gesture
+        is_holding = gesture.is_active()
+        is_armed = snapshot.emergency_beacon_armed
+
+        # ── During a hold: handle cancel, ignore everything else ────
+        if is_holding:
+            if gesture.is_arming():
+                # Arming → ESC cancels.
+                if event.key is Key.ESC:
+                    gesture.cancel(source="keyboard ESC")
+                    return True
+            else:
+                # Disarming → ENTER cancels (since ESC started it,
+                # we'd loop on ESC; ENTER is the "go back" key here).
+                if event.key is Key.ENTER:
+                    gesture.cancel(source="keyboard ENTER")
+                    return True
+            # Any other key during a hold: ignored. This prevents
+            # accidental cancel via stray keypresses but also blocks
+            # ring nav — operator must complete or cancel the hold
+            # before navigating.
+            return True
+
+        # ── No hold in progress: handle ENTER / ESC ─────────────────
+        if not is_armed:
+            # IDLE state.
+            if event.key is Key.ENTER:
+                gesture.begin_arming(source="keyboard ENTER")
+                return True
+            # ESC on idle — let it bubble. Esc usually means "back"
+            # but EMERGENCY has nothing to back out of. Falling
+            # through to ring nav is harmless (ring nav doesn't
+            # consume Esc either, so this is effectively a no-op).
+            return False
+        else:
+            # ARMED state — beacon is running.
+            if event.key is Key.ESC:
+                gesture.begin_disarming(source="keyboard ESC")
+                return True
+            # Other keys (LEFT/RIGHT for ring nav, ENTER, etc.):
+            # fall through. Operator can navigate to INBOX/HEARD
+            # while the beacon keeps transmitting.
+            return False
 
     def _ring_locked(self, snapshot) -> bool:
         """Ring navigation is locked when station is unconfigured AND

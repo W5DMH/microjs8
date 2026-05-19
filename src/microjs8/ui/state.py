@@ -32,7 +32,7 @@ import enum
 import threading
 import time
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Callable, Optional
 
 from microjs8.activity import DirectedActivityEntry
 from microjs8.gps.types import FixKind, GpsFix, no_fix
@@ -279,6 +279,21 @@ class UISnapshot:
     shutdown_remaining: float = 1.0
     previous_screen: Screen = Screen.HOME
 
+    # Phase 12: emergency beacon state. ``emergency_beacon_armed`` is
+    # the persistent ARMED flag set by the 3-second ENTER-hold
+    # gesture on the EMERGENCY screen; the beacon thread starts
+    # transmitting SOS broadcasts when armed. A red SOS badge
+    # renders in every screen header while armed.
+    emergency_beacon_armed: bool = False
+    # 1.0 → 0.0 over 3 seconds while a hold gesture is in progress.
+    # None when no hold is active. The renderer uses this to draw
+    # the arming/disarming progress bar.
+    emergency_hold_progress: Optional[float] = None
+    # "arm" or "disarm" — None when no hold active. Tells the
+    # renderer whether to label the countdown "Arming…" or
+    # "Disarming…".
+    emergency_hold_direction: Optional[str] = None
+
     # Focus + edit state. focused_field is None when the current screen
     # has no focusable items.
     focused_field: Optional[str] = None
@@ -404,6 +419,19 @@ class UIState:
         # don't double-count.
         self._groups: tuple[str, ...] = groups
         self._shutdown_remaining: float = 1.0
+        # Phase 12: emergency beacon state — see UISnapshot for the
+        # field semantics. Mutators below: begin_emergency_arm_hold,
+        # begin_emergency_disarm_hold, update_emergency_hold_progress,
+        # cancel_emergency_hold, arm_emergency_beacon,
+        # disarm_emergency_beacon.
+        self._emergency_beacon_armed: bool = False
+        self._emergency_hold_progress: Optional[float] = None
+        self._emergency_hold_direction: Optional[str] = None
+        # App.py registers a callback here that constructs/starts/
+        # stops the EmergencyBeacon thread when armed-state changes.
+        # Mirrors the heartbeat-mode callback pattern that arrives
+        # in Phase 13.
+        self._em_arm_change_cb: Optional[Callable[[bool], None]] = None
         # Focus index per screen, default 0.
         self._focus_index: dict[Screen, int] = {s: 0 for s in Screen}
         # Edit state.
@@ -747,6 +775,123 @@ class UIState:
             self._screen = self._previous_screen
             self._shutdown_remaining = 1.0
             self._dirty.set()
+
+    # ── Phase 12: Emergency beacon arm/disarm gesture state ──────────
+
+    def set_emergency_arm_change_callback(
+        self, cb: Callable[[bool], None],
+    ) -> None:
+        """Register a callback invoked when the armed state changes.
+
+        Mirrors ``set_hb_mode_change_callback`` — app.py wires this
+        to construct/start/stop the EmergencyBeacon thread. Single-
+        slot (latest registration wins).
+        """
+        self._em_arm_change_cb = cb
+
+    def begin_emergency_arm_hold(self) -> None:
+        """Operator pressed ENTER on EMERGENCY (idle) — start arm hold.
+
+        Sets the hold-progress to 1.0 (full) and the direction to
+        'arm'. The gesture's countdown task will tick this down
+        toward 0.0 over 3 seconds; when it reaches 0 the gesture
+        calls ``arm_emergency_beacon`` which flips the armed flag
+        and fires the app-level callback to start the TX thread.
+        """
+        self._emergency_hold_progress = 1.0
+        self._emergency_hold_direction = "arm"
+        self._dirty.set()
+
+    def begin_emergency_disarm_hold(self) -> None:
+        """Operator pressed ESC on EMERGENCY (armed) — start disarm hold.
+
+        Same shape as ``begin_emergency_arm_hold`` but with the
+        opposite direction. Completion calls ``disarm_emergency_beacon``.
+        """
+        self._emergency_hold_progress = 1.0
+        self._emergency_hold_direction = "disarm"
+        self._dirty.set()
+
+    def update_emergency_hold_progress(self, remaining: float) -> None:
+        """Tick the in-progress hold's progress bar.
+
+        Called by the gesture's countdown coroutine at 20 Hz. ``remaining``
+        is clamped to [0.0, 1.0]. Idempotent if the value hasn't changed,
+        so the render-dirty flag only fires on actual visible change.
+        """
+        clamped = max(0.0, min(1.0, remaining))
+        if clamped != self._emergency_hold_progress:
+            self._emergency_hold_progress = clamped
+            self._dirty.set()
+
+    def cancel_emergency_hold(self) -> None:
+        """Operator cancelled the in-flight hold — abort transition.
+
+        Does NOT change the armed flag — that flips only on hold-
+        completion via ``arm_emergency_beacon`` / ``disarm_emergency_beacon``.
+        Cancel just clears the hold-progress state so the screen
+        renders the appropriate idle view (either "Beacon: not
+        armed" or "Beacon: ARMED" depending on what the operator
+        was doing).
+        """
+        if (
+            self._emergency_hold_progress is not None
+            or self._emergency_hold_direction is not None
+        ):
+            self._emergency_hold_progress = None
+            self._emergency_hold_direction = None
+            self._dirty.set()
+
+    def arm_emergency_beacon(self) -> None:
+        """Called by the gesture on completion of an arm-hold.
+
+        Flips the armed flag to True, clears the hold state, and
+        fires the registered callback so app.py can spin up the
+        beacon thread. Idempotent: arming an already-armed beacon
+        is a no-op (the callback isn't refired, so we won't
+        accidentally start two beacons).
+        """
+        if self._emergency_beacon_armed:
+            # Already armed — clear any leftover hold state defensively
+            # and return without refiring the callback.
+            self._emergency_hold_progress = None
+            self._emergency_hold_direction = None
+            self._dirty.set()
+            return
+        self._emergency_beacon_armed = True
+        self._emergency_hold_progress = None
+        self._emergency_hold_direction = None
+        self._dirty.set()
+        if self._em_arm_change_cb is not None:
+            try:
+                self._em_arm_change_cb(True)
+            except Exception:
+                # The renderer / state mutation already happened; a
+                # raising callback shouldn't roll us back since the
+                # operator already saw the armed transition. App.py
+                # logs the exception via its own exception handler.
+                pass
+
+    def disarm_emergency_beacon(self) -> None:
+        """Called by the gesture on completion of a disarm-hold.
+
+        Flips the armed flag to False, clears hold state, fires the
+        callback so app.py can stop the beacon thread. Idempotent.
+        """
+        if not self._emergency_beacon_armed:
+            self._emergency_hold_progress = None
+            self._emergency_hold_direction = None
+            self._dirty.set()
+            return
+        self._emergency_beacon_armed = False
+        self._emergency_hold_progress = None
+        self._emergency_hold_direction = None
+        self._dirty.set()
+        if self._em_arm_change_cb is not None:
+            try:
+                self._em_arm_change_cb(False)
+            except Exception:
+                pass
 
     # ── Heard list / Directed list (Step 5) ──────────────────────────
 
@@ -1257,6 +1402,9 @@ class UIState:
             groups=self._groups,
             shutdown_remaining=self._shutdown_remaining,
             previous_screen=self._previous_screen,
+            emergency_beacon_armed=self._emergency_beacon_armed,
+            emergency_hold_progress=self._emergency_hold_progress,
+            emergency_hold_direction=self._emergency_hold_direction,
             focused_field=self.focused_field_name(),
             editing_field=self._editing_field,
             edit_buffer=self._edit_buffer,
