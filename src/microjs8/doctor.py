@@ -256,8 +256,58 @@ _DEFAULT_KEYBOARD_PATH = Path(
 
 
 def check_keyboard(*, evdev_path: Path = _DEFAULT_KEYBOARD_PATH) -> list[Check]:
-    """Probe the CardputerZero's TCA8418 evdev keyboard."""
+    """Probe the CardputerZero's TCA8418 evdev keyboard.
+
+    Phase 16: also reports the multi-source discovery view
+    (``discover_keyboards()``) so operators can see which
+    keyboards the daemon will read from at startup. The CardputerZero
+    can have both an on-board TCA8418 and a USB keyboard plugged in;
+    a bare Pi Zero 2 W will only have USB.
+    """
     checks: list[Check] = []
+
+    # Phase 16: multi-source discovery probe. Best-effort — if the
+    # by-id directory doesn't exist (dev host) we get an empty list,
+    # which is reported as a WARN with "expected on dev host" framing.
+    try:
+        from microjs8.input.keyboard import discover_keyboards
+        keyboards = discover_keyboards()
+    except Exception:
+        keyboards = []
+
+    if keyboards:
+        tca8418 = [k for k in keyboards if k[0] == "tca8418"]
+        usb = [k for k in keyboards if k[0] == "usb"]
+        detail_lines = []
+        if tca8418:
+            detail_lines.append(
+                f"TCA8418: {len(tca8418)} ({', '.join(k[1] for k in tca8418)})"
+            )
+        if usb:
+            detail_lines.append(
+                f"USB: {len(usb)} ({', '.join(k[1] for k in usb)})"
+            )
+        checks.append(Check(
+            subsystem="keyboard",
+            title=f"{len(keyboards)} keyboard(s) discovered",
+            status=STATUS_OK,
+            detail=" · ".join(detail_lines),
+        ))
+    else:
+        checks.append(Check(
+            subsystem="keyboard",
+            title="No keyboards discovered via /dev/input/by-id/*-event-kbd",
+            status=STATUS_WARN,
+            detail=(
+                "Expected on dev host. On hardware, check that either "
+                "the TCA8418 kernel driver is loaded OR a USB keyboard "
+                "is plugged in before microjs8.service starts."
+            ),
+            fix_hint=(
+                "Run `ls /dev/input/by-id/` to list current devices. "
+                "Look for *-event-kbd entries."
+            ),
+        ))
 
     if not evdev_path.exists():
         # On the dev box, this evdev path is meaningless. Mark warn

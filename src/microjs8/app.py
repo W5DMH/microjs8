@@ -111,7 +111,11 @@ class MicroJS8App:
         self._backlight: Optional[Backlight] = None
         self._battery_reader: Optional[BatteryReader] = None
         self._display: Optional[DisplayDevice] = None
-        self._keyboard: Optional[KeyboardThread] = None
+        # Phase 16: list of keyboard threads (one per discovered device).
+        # On the CardputerZero this typically holds [tca8418]; on a
+        # bare Pi Zero 2 W it holds [usb]; on a CardputerZero with a
+        # USB keyboard attached for bench typing it holds both.
+        self._keyboards: list[KeyboardThread] = []
         self._router: Optional[InputRouter] = None
         self._gps: Optional[GpsReader] = None
         # Step 5: audio capture + decode pipeline + message store.
@@ -383,14 +387,63 @@ class MicroJS8App:
             _log.info("running headless — keyboard thread skipped")
             return
         assert self._router is not None
+
+        # Phase 16: discover all keyboards (TCA8418 + USB) and spawn
+        # one reader thread per device. All threads marshal events
+        # through the same callback (the router), so the router sees
+        # a unified KeyEvent stream regardless of which physical
+        # keyboard produced it. Source tagging lets each thread
+        # apply the correct Fn-mapping (TCA8418 uses kernel-keymap
+        # scancodes; USB uses Ctrl+B → FN_B remap).
         try:
-            self._keyboard = KeyboardThread(loop, self._router.handle)
-            self._keyboard.start()
+            from microjs8.input.keyboard import discover_keyboards
+            keyboards = discover_keyboards()
         except Exception:
-            _log.exception(
-                "could not start keyboard thread — UI will be input-locked"
+            _log.exception("keyboard discovery raised; UI will be input-locked")
+            keyboards = []
+
+        if not keyboards:
+            _log.warning(
+                "no keyboards found at /dev/input/by-id/*-event-kbd — "
+                "UI will be input-locked. Plug in a USB keyboard or "
+                "verify the TCA8418 kernel driver is loaded."
             )
-            self._keyboard = None
+            return
+
+        # Spawn one thread per discovered keyboard. Failures on
+        # one device don't prevent the others from starting.
+        for source, path in keyboards:
+            try:
+                # Pass a path-specific device factory so each thread
+                # opens its assigned device (not whichever the default
+                # discovery picks).
+                def _factory(p=path):
+                    from evdev import InputDevice  # type: ignore[import-not-found]
+                    try:
+                        return InputDevice(p)
+                    except OSError as exc:
+                        _log.debug("could not open %s: %s", p, exc)
+                        return None
+                kbd = KeyboardThread(
+                    loop,
+                    self._router.handle,
+                    device_factory=_factory,
+                    name=f"kbd-{source}",
+                    source=source,
+                )
+                kbd.start()
+                self._keyboards.append(kbd)
+                _log.info("keyboard thread started: source=%s path=%s", source, path)
+            except Exception:
+                _log.exception(
+                    "could not start keyboard thread for %s (%s) — continuing",
+                    source, path,
+                )
+
+        if not self._keyboards:
+            _log.warning(
+                "all keyboard threads failed to start — UI will be input-locked"
+            )
 
     def _start_gps_reader_best_effort(self, loop: asyncio.AbstractEventLoop) -> None:
         """Start the GPS reader thread.
@@ -2913,12 +2966,25 @@ class MicroJS8App:
                 _log.warning("gps reader did not stop within 2s")
             self._gps = None
 
-        if self._keyboard is not None:
-            self._keyboard.stop()
-            await asyncio.to_thread(self._keyboard.join, 2.0)
-            if self._keyboard.is_alive():
-                _log.warning("keyboard thread did not stop within 2s")
-            self._keyboard = None
+        # Phase 16: stop all keyboard threads (one per discovered
+        # device). Each thread takes ≤200 ms to notice the stop event
+        # (select() timeout), so we use a 2 s join per thread — more
+        # than enough margin.
+        for kbd in self._keyboards:
+            try:
+                kbd.stop()
+            except Exception:
+                _log.exception("keyboard.stop() raised on %s", kbd.name)
+        for kbd in self._keyboards:
+            try:
+                await asyncio.to_thread(kbd.join, 2.0)
+                if kbd.is_alive():
+                    _log.warning(
+                        "keyboard thread %s did not stop within 2s", kbd.name
+                    )
+            except Exception:
+                _log.exception("keyboard.join() raised on %s", kbd.name)
+        self._keyboards = []
 
         if self._shutdown_gesture is not None:
             self._shutdown_gesture.stop()

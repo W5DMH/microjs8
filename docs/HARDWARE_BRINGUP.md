@@ -331,3 +331,91 @@ Environment=PYTHONLOGLEVEL=DEBUG
 | `/sys/class/power_supply/bq27*/` | BQ27220 fuel gauge sysfs |
 | `/sys/class/backlight/backlight/` | Backlight sysfs |
 | `/dev/input/by-path/platform-3f804000.i2c-event` | TCA8418 keyboard evdev |
+| `/dev/input/by-id/usb-*-event-kbd` | USB keyboard evdev (Phase 16 — bare Pi Zero 2 W or bench typing) |
+
+
+---
+
+
+## Appendix A — Bare Pi Zero 2 W bring-up (Phase 16)
+
+The microjs8 daemon supports running on a regular Raspberry Pi Zero 2 W (not just the M5Stack CardputerZero) with the same 1.9" 170×320 ST7789 display and a USB keyboard for input. This is useful for development hosts, spare-parts builds, and bench replication of operator-reported bugs.
+
+### A.1 What's the same vs the CardputerZero
+
+| Subsystem | Bare Pi Zero 2 W | CardputerZero |
+|---|---|---|
+| SoC | BCM2710A1 (Cortex-A53) | Same |
+| OS | Raspberry Pi OS Bookworm | Same |
+| Display | ST7789 1.9" 170×320 (wired via SPI) | Same chip, on-board |
+| Keyboard | USB keyboard | TCA8418 I²C matrix |
+| Battery | None | BQ27220 fuel gauge |
+| Audio/radio | USB sound card | Same |
+
+### A.2 Display wiring + framebuffer overlay
+
+Wire the ST7789 to the Pi Zero 2 W SPI0 pins. Enable the framebuffer overlay by adding to `/boot/firmware/config.txt`:
+
+```ini
+[all]
+dtparam=spi=on
+dtoverlay=fb_st7789v,rotate=270,speed=40000000,fps=30
+```
+
+Reboot. After boot, verify `/dev/fb1` exists:
+
+```bash
+ls -l /dev/fb*
+# /dev/fb0 → HDMI (if connected)
+# /dev/fb1 → ST7789 over SPI
+```
+
+If `/dev/fb1` is missing, check `dmesg | grep -i st7789` for driver errors and confirm the SPI wiring (GPIO assignments depend on the carrier board).
+
+### A.3 USB keyboard prerequisites
+
+Any standard USB keyboard works. The daemon picks it up automatically — no config needed.
+
+```bash
+ls /dev/input/by-id/
+# usb-*-event-kbd should be present
+```
+
+The daemon's discovery (`discover_keyboards()`) returns all matching devices and spawns one reader thread per device.
+
+### A.4 Key bindings on USB
+
+USB keyboards almost never emit a distinct `Fn` keycode (the Fn key is firmware-handled inside the keyboard). The daemon remaps:
+
+| TCA8418 (CardputerZero) | USB keyboard | Effect |
+|---|---|---|
+| `Fn+B` | `Ctrl+B` | Backlight toggle |
+| `Fn+Q` (3 s hold) | *No mapping* | Shutdown — use SSH + `sudo systemctl poweroff` |
+| `Ctrl+Q` | `Ctrl+Q` | ALLCALL navigation (unchanged) |
+| `Ctrl+C` on SHUTTING_DOWN | Same | Cancel shutdown countdown |
+| `Esc` on SHUTTING_DOWN | Same | Cancel shutdown countdown |
+| `Ctrl+H`, `Ctrl+S` | Same | Various hotkeys |
+
+Shutdown on bare Pi Zero 2 W goes through SSH for now. A future phase may add a config-driven gesture (e.g., a dedicated GPIO button or a long-press Ctrl+Shift+Q).
+
+### A.5 Coexistence
+
+On a CardputerZero with a USB keyboard plugged in for bench typing, BOTH keyboards are active simultaneously. Each gets its own reader thread (`kbd-tca8418`, `kbd-usb`), and events from either flow into the same router. You can type on either and the daemon sees a unified stream.
+
+Verify with the doctor:
+
+```bash
+microjs8-doctor 2>&1 | grep -i keyboard
+# keyboard: 2 keyboard(s) discovered
+#   TCA8418: 1 (...) · USB: 1 (...)
+```
+
+### A.6 Battery row on a host with no fuel gauge
+
+The HOME screen battery row shows `--` and the TX safety gate treats "no battery state" as "not critical" (it doesn't block transmit). This is intentional — the bare Pi Zero 2 W has no fuel gauge but is mains-powered, so the critical-battery gate is meaningless.
+
+### A.7 Known limitations on bare Pi Zero 2 W
+
+- **No shutdown gesture** from the keyboard alone (see A.4). Use SSH.
+- **No backlight hardware control** if your ST7789 module's backlight isn't wired to a PWM pin. The `Ctrl+B` event fires but produces no visible effect — the daemon logs at INFO if backlight control fails.
+- **GPS, time-sync, audio/radio** all work identically to the CardputerZero — they're hardware-agnostic.
