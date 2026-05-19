@@ -259,6 +259,7 @@ class MicroJS8App:
             mark_inbox_read=self._mark_inbox_read_sync,
             delete_inbox_row=self._delete_inbox_row_sync,
             compose_send=self._compose_send_sync,
+            compose_store=self._compose_store_sync,
             emergency_arm_gesture=self._emergency_arm_gesture,
             allcall_query_msgs=self._allcall_query_msgs_sync,
             allcall_cq=self._allcall_cq_sync,
@@ -1391,20 +1392,29 @@ class MicroJS8App:
         to: str,
         cmd,            # ComposeCmd, untyped here to avoid import cycle
         text: str,
+        for_call: str = "",
     ) -> bool:
         """Router callback: build wire string from compose fields and enqueue.
 
-        Operator pressed Enter on the SEND button. We build the wire-
-        format string using ``build_compose_wire`` (which handles the
-        per-CMD format rules and the MYLOC grid-substitution) and
-        enqueue via ``OutboundQueue.enqueue_for_encoding``. The encode
-        worker will pick it up and the scheduler will TX in the next
-        aligned window.
+        Operator pressed Enter on the SEND button (for any
+        non-STORE CMD). We build the wire-format string using
+        ``build_compose_wire`` (which handles the per-CMD format
+        rules, the MYLOC grid-substitution, and the MSG TO FOR-field
+        wiring) and enqueue via ``OutboundQueue.enqueue_for_encoding``.
+        The encode worker will pick it up and the scheduler will TX
+        in the next aligned window.
+
+        ``for_call`` is used only when ``cmd is ComposeCmd.MSG_TO``
+        — it's the final-recipient callsign that the relay (TO)
+        will hold the message for. Ignored for all other commands.
+        STORE never reaches this method (router dispatches it to
+        ``_compose_store_sync`` instead).
 
         Returns True if the message was successfully enqueued, False
         if:
-          - The compose was incomplete (empty TO, or empty TEXT for a
-            CMD that requires it). build_compose_wire returns None.
+          - The compose was incomplete (empty TO, or empty TEXT/FOR
+            for a CMD that requires them, or TO == our own call).
+            build_compose_wire returns None.
           - The outbound queue isn't initialized (test harness, early
             startup).
           - The queue is full (rare — the queue is large).
@@ -1425,11 +1435,12 @@ class MicroJS8App:
             text=text,
             my_grid=self._config.station.grid,
             my_call=self._config.station.callsign,
+            for_call=for_call,
         )
         if wire is None:
             _log.info(
-                "compose_send: incomplete (to=%r cmd=%s text=%r) — not sending",
-                to, cmd, text,
+                "compose_send: incomplete (to=%r cmd=%s text=%r for=%r) — not sending",
+                to, cmd, text, for_call,
             )
             return False
         try:
@@ -1455,6 +1466,94 @@ class MicroJS8App:
             )
         except Exception:
             _log.exception("compose_send: directed-activity log failed")
+        return True
+
+    def _compose_store_sync(self, to: str, text: str) -> bool:
+        """Router callback: write a local STORE row to our mailbox.
+
+        Operator pressed Enter on the SEND button with CMD=STORE.
+        This is a LOCAL operation — nothing transmits. We write a
+        row to ``inbox.db`` keyed for the TO callsign; when that
+        station later sends us a ``QUERY MSGS`` directed at our call,
+        the existing inbound handler delivers the body.
+
+        STORE doesn't validate against self-call (no wire built,
+        so the gfsk8 AUTO_REMOVE_MYCALL strip doesn't apply) but
+        does require TO and TEXT to both be non-empty. The router
+        keeps the compose state on validation failure so the
+        operator can correct the missing field.
+
+        Returns True if the row was written, False if:
+          - TO is empty (validation)
+          - TO is @-prefixed (groups/broadcasts have no canonical
+            recipient station — see comment below)
+          - TEXT is empty (validation)
+          - Our station callsign isn't configured (defensive — STOREs
+            must be attributable to a real originator)
+          - The mailbox isn't initialized (test harness, early startup)
+          - The SQLite insert raises (disk full, corruption)
+        """
+        to_n = (to or "").strip().upper()
+        text_n = (text or "").strip()
+        if not to_n:
+            _log.info("compose_store: empty TO — not stored")
+            return False
+        # @-prefixed STORE destinations don't make protocol sense. The
+        # store-and-forward model holds mail for a SINGLE recipient
+        # callsign and delivers it when THAT callsign's station asks
+        # via QUERY MSGS. Groups (@EMCOMM, @SKYWARN) have no station
+        # of their own — every member is a candidate recipient — so
+        # we'd never know which station's QUERY MSGS should trigger
+        # delivery, OR we'd risk delivering the same message N times
+        # across N group members. Universal broadcasts (@ALLCALL, @HB)
+        # have the same problem plus the semantic absurdity of
+        # "holding mail for everyone". Reject all @-prefixed targets
+        # with an INFO log. W5DMH bench May 2026: this prevents the
+        # "ghost STORE row stuck forever in the mailbox" failure
+        # mode the operator reported when they accidentally typed
+        # @EMCOMM as the STORE TO.
+        if to_n.startswith("@"):
+            _log.info(
+                "compose_store: TO=%r is a group/broadcast — refusing; "
+                "STORE targets must be a personal callsign",
+                to_n,
+            )
+            return False
+        if not text_n:
+            _log.info("compose_store: empty TEXT — not stored")
+            return False
+        our_call = (self._config.station.callsign or "").strip().upper()
+        if not our_call or our_call == "N0CALL":
+            _log.warning("compose_store: station unconfigured — not stored")
+            return False
+        if self._mailbox is None:
+            _log.warning("compose_store: no mailbox available")
+            return False
+        try:
+            row_id = self._mailbox.add_local_store(
+                recipient_call=to_n,
+                text=text_n,
+                our_call=our_call,
+            )
+        except Exception:
+            _log.exception(
+                "compose_store: add_local_store raised (to=%r)", to_n
+            )
+            return False
+        _log.info(
+            "compose_store: stored locally row=%d for=%s text=%r",
+            row_id, to_n, text_n[:40],
+        )
+        # Refresh the inbox UI snapshot so the new row appears
+        # immediately when the router jumps to INBOX. The standard
+        # pattern (used by _handle_inbound_msg_to and friends) is to
+        # re-read inbox rows + counts from the mailbox.
+        try:
+            self._refresh_inbox_ui()
+        except Exception:
+            _log.exception(
+                "compose_store: inbox UI refresh failed (row stored OK)"
+            )
         return True
 
     def _dispatch_inbox(self, parsed, frame) -> None:

@@ -89,7 +89,8 @@ class InputRouter:
         cycle_radio: Optional[Callable[[], bool]] = None,
         mark_inbox_read: Optional[Callable[[int], bool]] = None,
         delete_inbox_row: Optional[Callable[[int], bool]] = None,
-        compose_send: Optional[Callable[[str, "ComposeCmd", str], bool]] = None,
+        compose_send: Optional[Callable[[str, "ComposeCmd", str, str], bool]] = None,
+        compose_store: Optional[Callable[[str, str], bool]] = None,
         backlight: Optional["_Backlight"] = None,
         shutdown_gesture: Optional["_ShutdownGesture"] = None,
         emergency_arm_gesture: Optional["EmergencyArmGesture"] = None,
@@ -134,6 +135,10 @@ class InputRouter:
         # no-op (compose state still clears so the UI doesn't get
         # stuck).
         self._compose_send = compose_send
+        # compose_store(to, text) → True if the local mailbox row
+        # was written. Called when SEND fires with CMD=STORE. Same
+        # optional pattern as compose_send.
+        self._compose_store = compose_store
         # CardputerZero system-key services. Both optional — when None,
         # Fn+B / Fn+Q events are silently dropped, which is the
         # right behaviour in headless tests and during early bring-up
@@ -793,15 +798,19 @@ class InputRouter:
         The handler dispatches based on (focused_field, key) pairs:
 
         Always-handled keys (any focused field):
-          - Tab → cycle_focus (TO → CMD → TEXT → SEND → TO)
+          - Tab → cycle_focus (dynamic — TO → CMD → [FOR for MSG TO] → TEXT → SEND)
           - Esc → compose_clear, return to previous screen
+          - ↑/↓ on TO → cycle heard-list dropdown (wraps)
           - ↑/↓ on CMD → cycle the dropdown enum
+          - ↑/↓ on FOR → cycle heard-list dropdown (wraps)
 
         Field-specific keys:
-          - TO/TEXT focused, printable char → append to value
-          - TO/TEXT focused, Backspace → drop last char
-          - SEND focused, Enter → build wire string and enqueue, then
-            clear and exit COMPOSE
+          - TO/FOR/TEXT focused, printable char → append to value
+            (typing on TO/FOR clears the heard-index marker so the
+            renderer drops the HEARD-age color)
+          - TO/FOR/TEXT focused, Backspace → drop last char
+          - SEND focused, Enter → build wire string and enqueue (or
+            for STORE, write locally + jump to INBOX); clear and exit
 
         Returning False means the router falls through to ring-nav
         (← / → still navigate even from COMPOSE — the in-progress
@@ -823,6 +832,26 @@ class InputRouter:
             self._ui.compose_clear()
             return True
 
+        # ↑/↓ on TO field cycles the heard-list dropdown.
+        if focused == "compose_to":
+            if event.key is Key.UP:
+                self._ui.compose_to_cycle_heard_prev()
+                return True
+            if event.key is Key.DOWN:
+                self._ui.compose_to_cycle_heard_next()
+                return True
+            # Type-to-edit (auto-uppercase callsigns; strip whitespace).
+            if event.char is not None:
+                ch = event.char.upper()
+                if ch.strip():
+                    self._ui.compose_set_to(snapshot.compose_to + ch)
+                return True
+            if event.key is Key.BACKSPACE:
+                if snapshot.compose_to:
+                    self._ui.compose_set_to(snapshot.compose_to[:-1])
+                return True
+            return False
+
         # ↑/↓ on CMD field cycles the dropdown.
         if focused == "compose_cmd":
             if event.key is Key.UP:
@@ -835,25 +864,35 @@ class InputRouter:
             # itself — fall through so ring nav etc. still works.
             return False
 
-        # Type-to-edit on TO and TEXT.
-        if focused == "compose_to":
+        # FOR field: same UX as TO. Only present in the focus cycle
+        # when CMD is MSG_TO, but we handle it defensively here so
+        # any stray Enter doesn't fall through unexpectedly.
+        if focused == "compose_for":
+            if event.key is Key.UP:
+                self._ui.compose_for_cycle_heard_prev()
+                return True
+            if event.key is Key.DOWN:
+                self._ui.compose_for_cycle_heard_next()
+                return True
             if event.char is not None:
-                # Auto-uppercase callsigns. Strip whitespace inline —
-                # callsigns don't contain spaces.
                 ch = event.char.upper()
                 if ch.strip():
-                    self._ui.compose_set_to(snapshot.compose_to + ch)
+                    self._ui.compose_set_for(snapshot.compose_for + ch)
                 return True
             if event.key is Key.BACKSPACE:
-                if snapshot.compose_to:
-                    self._ui.compose_set_to(snapshot.compose_to[:-1])
+                if snapshot.compose_for:
+                    self._ui.compose_set_for(snapshot.compose_for[:-1])
                 return True
-            # Other keys (UP/DOWN) — let them fall through.
             return False
 
         if focused == "compose_text":
             if event.char is not None:
-                self._ui.compose_set_text(snapshot.compose_text + event.char)
+                # JS8Call wire protocol is uppercase-only — see
+                # the same rationale in ``_handle_keystroke_during_edit``
+                # above. Apply the same normalisation to compose
+                # bodies so on-air content stays uppercase regardless
+                # of keyboard state.
+                self._ui.compose_set_text(snapshot.compose_text + event.char.upper())
                 return True
             if event.key is Key.SPACE:
                 self._ui.compose_set_text(snapshot.compose_text + " ")
@@ -873,29 +912,65 @@ class InputRouter:
         return False
 
     def _handle_compose_send(self, snapshot) -> None:
-        """SEND button activated → fire the compose, clear, jump to DIRECTED.
+        """SEND button activated → fire the compose.
 
-        Side effects:
-          1. Invokes the compose_send callback (which builds the wire
-             string and enqueues for TX). Wrapped in try/except so a
-             queue error doesn't crash the input thread.
-          2. compose_clear() blanks all fields and resets focus to TO.
-          3. set_screen(DIRECTED) jumps to the activity log so the
-             operator sees their just-sent message land in the chat
-             stream — closes the loop visually. They can ←/→ back to
-             COMPOSE to send another message.
+        Behaviour branches on CMD:
 
-        The compose state is cleared regardless of callback success —
-        if the queue rejects the message (e.g., empty TO), we still
-        return the operator to a clean state rather than leaving a
-        confusing half-sent message on screen.
+          - **STORE** is a LOCAL action. We call ``compose_store`` to
+            write a row into our mailbox for the TO callsign and jump
+            to INBOX so the operator sees the row land. Nothing goes
+            on the air. If ``compose_store`` returns False (validation
+            failure — e.g., empty TO), we keep the compose state so
+            the operator can correct it.
+
+          - Everything else (FREE, MSG, MSG TO, AGN?, SNR?, GRID?,
+            QUERY MSGS, MYLOC) is a TRANSMIT action. We call
+            ``compose_send`` to build the wire and enqueue. On
+            success the compose state clears and we jump to DIRECTED
+            so the operator watches the activity log for replies.
+
+        For the transmit path, the compose state is cleared
+        regardless of callback success — if the queue rejects the
+        message we still return the operator to a clean state rather
+        than leaving half-typed content on screen. STORE is stricter:
+        it leaves the compose state alone on validation failure so
+        the operator can fix the TO or TEXT.
+
+        We import ``ComposeCmd`` locally to avoid a top-level import
+        cycle (state imports router types via TYPE_CHECKING, router
+        imports state types lazily).
         """
+        from microjs8.ui.state import ComposeCmd
+
+        cmd = snapshot.compose_cmd
+
+        if cmd is ComposeCmd.STORE:
+            ok = True
+            try:
+                if self._compose_store is not None:
+                    ok = bool(self._compose_store(
+                        snapshot.compose_to,
+                        snapshot.compose_text,
+                    ))
+            except Exception:
+                _log.exception(
+                    "compose_store raised; leaving compose state intact"
+                )
+                ok = False
+            if ok:
+                self._ui.compose_clear()
+                # Jump to INBOX so the operator sees the stored row.
+                self._ui.set_screen(Screen.INBOX)
+            return
+
+        # Transmit path (everything else).
         try:
             if self._compose_send is not None:
                 self._compose_send(
                     snapshot.compose_to,
                     snapshot.compose_cmd,
                     snapshot.compose_text,
+                    snapshot.compose_for,
                 )
         except Exception:
             _log.exception("compose_send raised; UI state will be cleared anyway")

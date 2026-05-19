@@ -60,13 +60,52 @@ def _state_compose() -> UIState:
     return s
 
 
-# ── Compose TEXT field auto-uppercase ─────────────────────────────
-#
-# The 3 compose-text uppercase tests are deferred to Phase 14
-# (COMPOSE UI work — STORE + FOR dropdown + directed log). The
-# router-side uppercasing for SETUP fields already lands in Phase 11
-# (see tests below); Phase 14 extends the same uppercase rule to the
-# COMPOSE TEXT and TO fields.
+# ── Compose TEXT field auto-uppercase (Phase 14b) ─────────────────
+
+
+def test_compose_text_lowercase_input_uppercases():
+    s = _state_compose()
+    s.compose_set_to("K1ABC")
+    r = _make_router(s)
+    # Tab to TEXT field.
+    r.handle(KeyEvent(key=Key.TAB))  # to CMD
+    r.handle(KeyEvent(key=Key.TAB))  # to TEXT
+    assert s.snapshot().compose_focused_field == "compose_text"
+    for ch in "hello dave":
+        if ch == " ":
+            r.handle(KeyEvent(key=Key.SPACE))
+        else:
+            r.handle(KeyEvent(char=ch))
+    assert s.snapshot().compose_text == "HELLO DAVE"
+
+
+def test_compose_text_mixed_case_uppercases_all():
+    """Mixed case input (e.g., CapsLock toggling on/off) lands all-
+    uppercase on the wire, matching JS8Call's uppercase-only display."""
+    s = _state_compose()
+    s.compose_set_to("K1ABC")
+    r = _make_router(s)
+    r.handle(KeyEvent(key=Key.TAB))
+    r.handle(KeyEvent(key=Key.TAB))
+    for ch in "HeLLo":
+        r.handle(KeyEvent(char=ch))
+    assert s.snapshot().compose_text == "HELLO"
+
+
+def test_compose_text_digits_and_punctuation_unchanged():
+    """Non-letter characters (digits, punctuation, symbols) pass
+    through .upper() unchanged — JS8Call accepts these as-is."""
+    s = _state_compose()
+    s.compose_set_to("K1ABC")
+    r = _make_router(s)
+    r.handle(KeyEvent(key=Key.TAB))
+    r.handle(KeyEvent(key=Key.TAB))
+    for ch in "73 from 100w!":
+        if ch == " ":
+            r.handle(KeyEvent(key=Key.SPACE))
+        else:
+            r.handle(KeyEvent(char=ch))
+    assert s.snapshot().compose_text == "73 FROM 100W!"
 
 
 # ── Setup-screen callsign / grid auto-uppercase ───────────────────

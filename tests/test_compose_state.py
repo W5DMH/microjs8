@@ -35,22 +35,56 @@ def test_build_wire_msg_inserts_verb():
     assert build_compose_wire("K1ABC", ComposeCmd.MSG, "hello dave", "EN83") == "K1ABC MSG hello dave"
 
 
-def test_build_wire_store_inserts_verb():
-    assert build_compose_wire("K1ABC", ComposeCmd.STORE, "for K2DEF", "EN83") == "K1ABC STORE for K2DEF"
+def test_build_wire_store_returns_none_no_wire():
+    """STORE is a LOCAL action — no wire is built. The caller routes
+    this to the mailbox-write path instead of enqueueing."""
+    assert build_compose_wire("K1ABC", ComposeCmd.STORE, "for K2DEF", "EN83") is None
+    # Empty TEXT or TO: still None (no wire either way).
+    assert build_compose_wire("K1ABC", ComposeCmd.STORE, "", "EN83") is None
+    assert build_compose_wire("", ComposeCmd.STORE, "body", "EN83") is None
 
 
-def test_build_wire_query_requires_text():
-    """QUERY must have an argument like 'MSGS' or 'MSG 57' — the
-    builder rejects an empty TEXT for QUERY."""
-    assert build_compose_wire("K1ABC", ComposeCmd.QUERY, "MSGS", "EN83") == "K1ABC QUERY MSGS"
-    assert build_compose_wire("K1ABC", ComposeCmd.QUERY, "", "EN83") is None
+def test_build_wire_msg_to_with_for_call():
+    """MSG TO requires the FOR callsign — produces 'TO MSG TO:FOR TEXT'."""
+    wire = build_compose_wire(
+        "K1ABC", ComposeCmd.MSG_TO, "hello forward me", "EN83",
+        for_call="KD8GIJ",
+    )
+    assert wire == "K1ABC MSG TO:KD8GIJ hello forward me"
+
+
+def test_build_wire_msg_to_requires_for_call():
+    """MSG TO with empty FOR is not a sendable wire."""
+    assert build_compose_wire(
+        "K1ABC", ComposeCmd.MSG_TO, "body", "EN83", for_call=""
+    ) is None
+    assert build_compose_wire(
+        "K1ABC", ComposeCmd.MSG_TO, "body", "EN83", for_call="   "
+    ) is None
+
+
+def test_build_wire_msg_to_rejects_for_equal_to():
+    """A relay holding for itself isn't meaningful — operator typo."""
+    assert build_compose_wire(
+        "K1ABC", ComposeCmd.MSG_TO, "body", "EN83", for_call="K1ABC"
+    ) is None
+
+
+def test_build_wire_query_msgs_is_verb_only():
+    """QUERY MSGS is verb-only — no TEXT body required. Replaces the
+    old bare QUERY command that needed the operator to type 'MSGS'."""
+    assert build_compose_wire("K1ABC", ComposeCmd.QUERY_MSGS, "", "EN83") == "K1ABC QUERY MSGS"
+    # TEXT is ignored for QUERY MSGS — verb-only protocol exchange.
+    assert build_compose_wire("K1ABC", ComposeCmd.QUERY_MSGS, "ignored", "EN83") == "K1ABC QUERY MSGS"
 
 
 def test_build_wire_verb_only_commands():
-    """AGN?/SNR?/GRID are verb-only — TEXT is ignored, no body on wire."""
+    """AGN?/SNR?/GRID? are verb-only — TEXT is ignored, no body on wire."""
     assert build_compose_wire("K1ABC", ComposeCmd.AGN_Q, "", "EN83") == "K1ABC AGN?"
     assert build_compose_wire("K1ABC", ComposeCmd.SNR_Q, "", "EN83") == "K1ABC SNR?"
-    assert build_compose_wire("K1ABC", ComposeCmd.GRID, "", "EN83") == "K1ABC GRID"
+    # GRID? is the question form (JS8Call requires the ? — bare GRID
+    # is ignored). The reply form is MYLOC, which emits 'GRID <grid>'.
+    assert build_compose_wire("K1ABC", ComposeCmd.GRID_Q, "", "EN83") == "K1ABC GRID?"
     # Even if the operator typed something, verb-only commands ignore
     # TEXT — keeps the protocol semantics clean.
     assert build_compose_wire("K1ABC", ComposeCmd.AGN_Q, "ignored", "EN83") == "K1ABC AGN?"
@@ -362,3 +396,46 @@ def test_build_wire_my_call_unset_does_not_block():
     assert build_compose_wire(
         to="W5DMH", cmd=ComposeCmd.MSG, text="hi", my_grid="EN83",
     ) == "W5DMH MSG hi"
+
+
+# ── QUERY MSG <id> (fetch buffered message by mailbox id) ────────────
+
+
+def test_build_wire_query_msg_with_numeric_id():
+    """QUERY MSG <id> emits 'TO QUERY MSG <id>' on the wire so the
+    operator can fetch a specific buffered message from the TO
+    station's mailbox."""
+    assert build_compose_wire("K1ABC", ComposeCmd.QUERY_MSG, "1", "EN83") == "K1ABC QUERY MSG 1"
+    assert build_compose_wire("K1ABC", ComposeCmd.QUERY_MSG, "42", "EN83") == "K1ABC QUERY MSG 42"
+
+
+def test_build_wire_query_msg_strips_text_whitespace():
+    """Operator-typed leading/trailing spaces in the ID field don't
+    block the wire build — they're stripped by the boundary normaliser
+    above ``isdigit()`` check."""
+    assert build_compose_wire("K1ABC", ComposeCmd.QUERY_MSG, " 7 ", "EN83") == "K1ABC QUERY MSG 7"
+
+
+def test_build_wire_query_msg_rejects_empty_id():
+    assert build_compose_wire("K1ABC", ComposeCmd.QUERY_MSG, "", "EN83") is None
+    assert build_compose_wire("K1ABC", ComposeCmd.QUERY_MSG, "   ", "EN83") is None
+
+
+@pytest.mark.parametrize("bad", ["abc", "1.5", "-1", "one", "0", "1a", "+7"])
+def test_build_wire_query_msg_rejects_non_positive_integer(bad):
+    """Mailbox IDs are positive integers (SQLite AUTOINCREMENT starts
+    at 1). Reject zero, negatives, decimals, and any non-digit
+    content — JS8Call's wire contract requires a clean integer
+    after the verb."""
+    assert build_compose_wire("K1ABC", ComposeCmd.QUERY_MSG, bad, "EN83") is None
+
+
+def test_build_wire_query_msg_in_dropdown_order():
+    """QUERY MSG sits between QUERY MSGS and MYLOC in the cycle —
+    related QUERY commands grouped together for easy navigation."""
+    from microjs8.ui.state import COMPOSE_CMD_ORDER
+    assert ComposeCmd.QUERY_MSG in COMPOSE_CMD_ORDER
+    i_msgs = COMPOSE_CMD_ORDER.index(ComposeCmd.QUERY_MSGS)
+    i_msg = COMPOSE_CMD_ORDER.index(ComposeCmd.QUERY_MSG)
+    i_myloc = COMPOSE_CMD_ORDER.index(ComposeCmd.MYLOC)
+    assert i_msgs < i_msg < i_myloc
