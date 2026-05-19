@@ -10,7 +10,7 @@ import pytest
 
 from microjs8.input.events import Key, KeyEvent
 from microjs8.input.router import InputRouter
-from microjs8.ui.state import RING, Screen, UIState
+from microjs8.ui.state import HbMode, RING, Screen, UIState
 
 
 # ── Fixtures ─────────────────────────────────────────────────────────
@@ -1153,3 +1153,181 @@ def test_fn_b_dispatches_through_edit_mode():
     r.handle(KeyEvent(key=Key.FN_B))
     assert bl.toggles == 1
     assert s.is_editing()
+
+
+# ── ALLCALL screen + HB_MODE_SELECT modal ───────────────────────────
+
+
+def _router_with_allcall_callbacks(state):
+    """Build a router with capturing callbacks for the two ALLCALL
+    fire-and-forget actions."""
+    save = _SaveCapture()
+    bypass = _BypassCapture()
+    qm_calls: list[bool] = []
+    cq_calls: list[bool] = []
+
+    def _qm() -> bool:
+        qm_calls.append(True)
+        return True
+
+    def _cq() -> bool:
+        cq_calls.append(True)
+        return True
+
+    r = InputRouter(
+        state, save_config=save, emergency_bypass=bypass,
+        allcall_query_msgs=_qm,
+        allcall_cq=_cq,
+    )
+    return r, qm_calls, cq_calls
+
+
+def test_allcall_down_cycles_focus_forward():
+    s = _state(screen=Screen.ALLCALL)
+    r, _, _ = _router_with_allcall_callbacks(s)
+    assert s.snapshot().allcall_focus == 0
+    r.handle(KeyEvent(key=Key.DOWN))
+    assert s.snapshot().allcall_focus == 1
+    r.handle(KeyEvent(key=Key.DOWN))
+    assert s.snapshot().allcall_focus == 2
+    # Wrap.
+    r.handle(KeyEvent(key=Key.DOWN))
+    assert s.snapshot().allcall_focus == 0
+
+
+def test_allcall_up_cycles_focus_backward():
+    s = _state(screen=Screen.ALLCALL)
+    r, _, _ = _router_with_allcall_callbacks(s)
+    r.handle(KeyEvent(key=Key.UP))
+    assert s.snapshot().allcall_focus == 2
+
+
+def test_allcall_enter_on_heartbeat_opens_modal():
+    """focus=0 → HEARTBEAT → Enter opens HB_MODE_SELECT."""
+    from microjs8.ui.state import HbMode
+
+    s = _state(screen=Screen.ALLCALL)
+    r, _, _ = _router_with_allcall_callbacks(s)
+    # Focus is already at 0 (HEARTBEAT).
+    r.handle(KeyEvent(key=Key.ENTER))
+    assert s.snapshot().screen is Screen.HB_MODE_SELECT
+    # Sub-screen focus initialized to current mode (OFF = index 0).
+    assert s.snapshot().hb_select_focus == 0
+    assert s.snapshot().hb_mode is HbMode.OFF
+
+
+def test_allcall_enter_on_query_msgs_fires_callback():
+    s = _state(screen=Screen.ALLCALL)
+    r, qm_calls, cq_calls = _router_with_allcall_callbacks(s)
+    r.handle(KeyEvent(key=Key.DOWN))   # focus 0 → 1 (QUERY MSGS)
+    r.handle(KeyEvent(key=Key.ENTER))
+    assert qm_calls == [True]
+    assert cq_calls == []
+    # Screen unchanged — fire-and-forget.
+    assert s.snapshot().screen is Screen.ALLCALL
+
+
+def test_allcall_enter_on_cq_fires_callback():
+    s = _state(screen=Screen.ALLCALL)
+    r, qm_calls, cq_calls = _router_with_allcall_callbacks(s)
+    r.handle(KeyEvent(key=Key.DOWN))   # 0 → 1
+    r.handle(KeyEvent(key=Key.DOWN))   # 1 → 2 (CQ)
+    r.handle(KeyEvent(key=Key.ENTER))
+    assert qm_calls == []
+    assert cq_calls == [True]
+    assert s.snapshot().screen is Screen.ALLCALL
+
+
+def test_allcall_enter_without_callbacks_silently_noop():
+    """Router constructed without ALLCALL callbacks (e.g., tests
+    without an outbound queue) — Enter is a visual no-op, no crash."""
+    s = _state(screen=Screen.ALLCALL)
+    save = _SaveCapture()
+    bypass = _BypassCapture()
+    r = InputRouter(s, save_config=save, emergency_bypass=bypass)
+    r.handle(KeyEvent(key=Key.DOWN))
+    r.handle(KeyEvent(key=Key.ENTER))   # QUERY MSGS — no callback
+    # Doesn't crash; screen stays ALLCALL.
+    assert s.snapshot().screen is Screen.ALLCALL
+
+
+def test_allcall_callback_exception_doesnt_crash_router():
+    """A misbehaving outbound queue must not bring down input."""
+    s = _state(screen=Screen.ALLCALL)
+    save = _SaveCapture()
+    bypass = _BypassCapture()
+
+    def _boom() -> bool:
+        raise RuntimeError("queue exploded")
+
+    r = InputRouter(
+        s, save_config=save, emergency_bypass=bypass,
+        allcall_query_msgs=_boom,
+    )
+    r.handle(KeyEvent(key=Key.DOWN))
+    r.handle(KeyEvent(key=Key.ENTER))   # raises but is caught
+    assert s.snapshot().screen is Screen.ALLCALL
+
+
+# ── HB_MODE_SELECT ──────────────────────────────────────────────────
+
+
+def test_hb_modal_down_cycles_focus():
+    s = _state(screen=Screen.ALLCALL)
+    r, _, _ = _router_with_allcall_callbacks(s)
+    # Open the modal: focus 0 (HEARTBEAT) + Enter.
+    r.handle(KeyEvent(key=Key.ENTER))
+    assert s.snapshot().screen is Screen.HB_MODE_SELECT
+    # ↓ cycles through 4 modes.
+    r.handle(KeyEvent(key=Key.DOWN))
+    assert s.snapshot().hb_select_focus == 1
+    r.handle(KeyEvent(key=Key.DOWN))
+    assert s.snapshot().hb_select_focus == 2
+
+
+def test_hb_modal_enter_commits_and_returns():
+    from microjs8.ui.state import HbMode
+
+    s = _state(screen=Screen.ALLCALL)
+    r, _, _ = _router_with_allcall_callbacks(s)
+    # Open modal: focus on OFF.
+    r.handle(KeyEvent(key=Key.ENTER))
+    # Move to TWENTY_MIN (index 2).
+    r.handle(KeyEvent(key=Key.DOWN))
+    r.handle(KeyEvent(key=Key.DOWN))
+    # Commit.
+    r.handle(KeyEvent(key=Key.ENTER))
+    assert s.snapshot().screen is Screen.ALLCALL
+    assert s.snapshot().hb_mode is HbMode.TWENTY_MIN
+
+
+def test_hb_modal_esc_cancels_without_changing_mode():
+    from microjs8.ui.state import HbMode
+
+    s = _state(screen=Screen.ALLCALL)
+    s.set_hb_mode(HbMode.SINGLE)  # baseline mode
+    r, _, _ = _router_with_allcall_callbacks(s)
+    r.handle(KeyEvent(key=Key.ENTER))   # open modal
+    r.handle(KeyEvent(key=Key.DOWN))     # move focus
+    r.handle(KeyEvent(key=Key.ESC))      # cancel
+    assert s.snapshot().screen is Screen.ALLCALL
+    # Mode unchanged.
+    assert s.snapshot().hb_mode is HbMode.SINGLE
+
+
+def test_hb_modal_arrows_commit_and_exit():
+    """←/→ from inside the modal commit + return (consistent with
+    "leave this modal" gesture). Doesn't ring-navigate inside the
+    modal."""
+    from microjs8.ui.state import HbMode
+
+    s = _state(screen=Screen.ALLCALL)
+    r, _, _ = _router_with_allcall_callbacks(s)
+    r.handle(KeyEvent(key=Key.ENTER))   # open modal
+    r.handle(KeyEvent(key=Key.DOWN))     # focus → SINGLE
+    r.handle(KeyEvent(key=Key.LEFT))     # exit
+    assert s.snapshot().screen is Screen.ALLCALL
+    assert s.snapshot().hb_mode is HbMode.SINGLE
+
+
+

@@ -82,10 +82,11 @@ from microjs8.tx import (
     default_chrony_ok,
 )
 from microjs8.tx.auto_response import plan_auto_response
-from microjs8.tx.beacon import EmergencyBeacon
+from microjs8.tx.beacon import EmergencyBeacon, HeartbeatBeacon
 from microjs8.ui import (
     DirectedRow,
     DisplayDevice,
+    HbMode,
     RenderThread,
     Screen,
     UIState,
@@ -160,6 +161,14 @@ class MicroJS8App:
         # Sounddevice index for the QDX (cached after audio discovery so
         # we can use the same device for capture AND playback).
         self._radio_audio_index: Optional[int] = None
+        # Phase 12: emergency SOS beacon — constructed lazily in run()
+        # on first arm. Declared here as None so test fixtures that
+        # bypass run() still see the attribute.
+        self._emergency_beacon: Optional[EmergencyBeacon] = None
+        # Phase 13: HB beacon — constructed lazily by _on_hb_mode_change
+        # when the operator selects a non-OFF mode on HB_MODE_SELECT.
+        # Same rationale as _emergency_beacon for early init.
+        self._hb_beacon: Optional[HeartbeatBeacon] = None
 
     def request_stop(self) -> None:
         if not self._stop.is_set():
@@ -226,8 +235,16 @@ class MicroJS8App:
         self._ui_state.set_emergency_arm_change_callback(
             self._on_emergency_arm_change,
         )
-        # EmergencyBeacon instance — constructed lazily on first arm.
-        self._emergency_beacon: Optional[EmergencyBeacon] = None
+        # _emergency_beacon was declared as None in __init__.
+
+        # ── Phase 13: heartbeat beacon lifecycle ─────────────────────
+        # _hb_beacon was declared as None in __init__. Register the
+        # mode-change callback BEFORE the operator can interact with
+        # the HB_MODE_SELECT screen so we don't miss the initial
+        # transition.
+        self._ui_state.set_hb_mode_change_callback(
+            self._on_hb_mode_change,
+        )
 
         # ── Input router ────────────────────────────────────────────
         # Note: set_frequency callback is supplied later via
@@ -243,6 +260,8 @@ class MicroJS8App:
             delete_inbox_row=self._delete_inbox_row_sync,
             compose_send=self._compose_send_sync,
             emergency_arm_gesture=self._emergency_arm_gesture,
+            allcall_query_msgs=self._allcall_query_msgs_sync,
+            allcall_cq=self._allcall_cq_sync,
         )
 
         # ── Display, shutdown gesture, backlight, keyboard, GPS ──────
@@ -1874,6 +1893,108 @@ class MicroJS8App:
         self._enqueue_directed_reply(
             text=text, to_call=to_call, kind=OutboundKind.REPLY,
         )
+
+    # ── Phase 13: Heartbeat beacon lifecycle ─────────────────────────
+
+    def _on_hb_mode_change(self, mode: HbMode) -> None:
+        """Reconcile the beacon thread with a newly-selected mode.
+
+        Called by UIState's mode-change hook whenever the operator
+        commits a different mode on the HB_MODE_SELECT sub-screen.
+        We're on the asyncio thread when this fires (UIState mutators
+        run there), so we can manipulate the beacon thread directly.
+
+        Lifecycle:
+          - Stop any existing beacon and wait briefly for it to exit.
+            We use a 2-second join — long enough for an in-flight
+            ``enqueue_for_encoding`` call to complete, short enough
+            that we don't block the asyncio loop noticeably if the
+            thread is hung.
+          - If the new mode is OFF, leave the field None and return.
+          - Otherwise construct a new ``HeartbeatBeacon`` with the
+            interval appropriate to the mode, start it, and store
+            the reference so we can stop it on the next change.
+
+        SINGLE-mode beacons get an ``on_complete`` callback so the
+        UI flips back to OFF after the one shot fires. The callback
+        runs on the beacon thread, so it bounces back into the
+        asyncio loop via ``call_soon_threadsafe``.
+        """
+        # Stop existing
+        if self._hb_beacon is not None:
+            self._hb_beacon.stop()
+            self._hb_beacon.join(timeout=2.0)
+            if self._hb_beacon.is_alive():
+                _log.warning(
+                    "hb beacon did not stop within join timeout"
+                )
+            self._hb_beacon = None
+
+        if mode is HbMode.OFF:
+            _log.info("heartbeat: OFF")
+            return
+
+        # Per-mode interval. SINGLE doesn't loop; it fires once and
+        # the on_complete callback flips us back to OFF.
+        interval_s_map = {
+            HbMode.SINGLE:      0.0,        # not used (single_shot=True)
+            HbMode.TWENTY_MIN:  20 * 60.0,
+            HbMode.ONE_HR:      60 * 60.0,
+        }
+        single_shot = (mode is HbMode.SINGLE)
+        interval_s = interval_s_map[mode]
+
+        if self._outbound_queue is None:
+            _log.warning(
+                "heartbeat mode %s selected but outbound queue not ready",
+                mode.value,
+            )
+            return
+
+        self._hb_beacon = HeartbeatBeacon(
+            queue=self._outbound_queue,
+            identity_factory=self._hb_identity,
+            interval_s=interval_s,
+            single_shot=single_shot,
+            on_complete=(
+                self._hb_single_complete if single_shot else None
+            ),
+        )
+        self._hb_beacon.start()
+        _log.info(
+            "heartbeat: %s started (interval=%.0fs, single_shot=%s)",
+            mode.value, interval_s, single_shot,
+        )
+
+    def _hb_identity(self) -> Optional[tuple[str, str]]:
+        """Beacon's identity-factory callback. Returns the current
+        (callsign, grid) tuple, or None if the station isn't
+        configured. Called from the beacon thread on every fire."""
+        cs = self._config.station.callsign
+        grid = self._config.station.grid
+        if not cs or cs == "N0CALL" or not grid:
+            return None
+        # JS8Call heartbeats include the 4-character grid; truncate
+        # from the 6-character GPS-derived locator for compatibility.
+        return (cs, grid[:4])
+
+    def _hb_single_complete(self) -> None:
+        """SINGLE-mode beacon completion callback. Runs on the beacon
+        thread. Bounce into the asyncio loop to flip hb_mode back to
+        OFF cleanly."""
+        try:
+            self._loop.call_soon_threadsafe(self._hb_revert_to_off)
+        except Exception:
+            _log.exception("hb single-shot completion bounce failed")
+
+    def _hb_revert_to_off(self) -> None:
+        """asyncio-thread tail of the SINGLE-shot completion.
+        Setting hb_mode to OFF fires our own _on_hb_mode_change
+        callback again — that's expected; it joins the now-exited
+        beacon thread and leaves _hb_beacon None."""
+        if self._ui_state is None:
+            return
+        self._ui_state.set_hb_mode(HbMode.OFF)
 
     # ── Phase 12: Emergency beacon lifecycle ─────────────────────────
 

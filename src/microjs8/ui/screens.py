@@ -28,7 +28,7 @@ from PIL import Image, ImageDraw
 
 from microjs8.ui import theme
 from microjs8.ui.fonts import Fonts
-from microjs8.ui.state import RING, Screen, UISnapshot
+from microjs8.ui.state import HB_MODES_ORDERED, HbMode, RING, Screen, UISnapshot
 
 _log = logging.getLogger(__name__)
 
@@ -1221,27 +1221,110 @@ def _render_compose(state: UISnapshot, fonts: Fonts) -> Image.Image:
 
 
 def _render_allcall(state: UISnapshot, fonts: Fonts) -> Image.Image:
+    """ALLCALL screen — three-row menu (HEARTBEAT / QUERY MSGS / CQ).
+
+    The focused row is highlighted with the accent background so the
+    operator knows which row Enter will act on. The HEARTBEAT row's
+    value reads the live mode from ``state.hb_mode`` and tints amber-
+    coloured (FG_WARN) when not OFF — the same convention the HOME
+    HB row uses for "this is actively transmitting on a schedule",
+    catching the eye without screaming.
+
+    Phase 4 320×170 layout: 3 rows × 32 px row_h = 96 px content;
+    body region is 130 px (170 − HEADER_H − FOOTER_H − seps), so
+    fits with margin.
+    """
     img, draw = _new_canvas()
     _draw_header(draw, fonts, "ALLCALL", state)
     y = theme.BODY_Y0 + 12
     items = (
-        ("HEARTBEAT",  "OFF"),
-        ("QUERY MSGS", ""),
-        ("CQ",         ""),
+        ("HEARTBEAT",  state.hb_mode.value),
+        ("QUERY MSGS", "send"),
+        ("CQ",         "send"),
     )
-    for label, value in items:
-        draw.text((theme.PAD_X + 4, y), label, font=fonts.body, fill=theme.FG)
-        if value:
-            bbox = fonts.body.getbbox(value)
-            text_w = bbox[2] - bbox[0]
-            draw.text(
-                (theme.SCREEN_W - text_w - theme.PAD_X - 4, y),
-                value,
-                font=fonts.body,
-                fill=theme.FG_DIM,
+    focus = state.allcall_focus
+    row_h = 32
+    for i, (label, value) in enumerate(items):
+        is_focused = (i == focus)
+        # Selection highlight — subtle dark-blue background band.
+        if is_focused:
+            draw.rectangle(
+                [(0, y - 4), (theme.SCREEN_W, y + row_h - 12)],
+                fill=theme.ACCENT_BG,
             )
-        y += 28
-    _draw_footer(draw, fonts, "↑ ↓ pick · Enter invoke (Step 3)")
+        # Label: accent when focused for unambiguous "this is selected".
+        label_color = theme.ACCENT if is_focused else theme.FG
+        draw.text(
+            (theme.PAD_X + 4, y),
+            label, font=fonts.body, fill=label_color,
+        )
+        if value:
+            try:
+                vw = int(draw.textlength(value, font=fonts.body))
+            except Exception:
+                vw = 7 * len(value)
+            # HEARTBEAT row's value color signals active mode at a
+            # glance: FG_WARN (amber) when running, FG_DIM when OFF.
+            # Other rows ("send") use FG_DIM consistently.
+            if i == 0:
+                value_color = (
+                    theme.FG_WARN
+                    if state.hb_mode is not HbMode.OFF
+                    else theme.FG_DIM
+                )
+            else:
+                value_color = theme.FG_DIM
+            draw.text(
+                (theme.SCREEN_W - vw - theme.PAD_X - 4, y),
+                value, font=fonts.body, fill=value_color,
+            )
+        y += row_h
+    _draw_footer(draw, fonts, "↑ ↓ pick · Enter invoke")
+    return img
+
+
+def _render_hb_mode_select(state: UISnapshot, fonts: Fonts) -> Image.Image:
+    """HB_MODE_SELECT modal sub-screen — pick the heartbeat cadence.
+
+    Renders a 4-row dropdown over the HbMode values. The currently-
+    active mode (state.hb_mode) is shown with a thin amber underline;
+    the focused row (state.hb_select_focus) has the accent-bg highlight.
+    This way the operator sees BOTH "where I am" and "what's running
+    now" simultaneously — crucial for the operator who paused mid-
+    selection and forgot which mode the beacon is actually on.
+
+    Phase 4 320×170 layout: 4 rows × 26 px row_h = 104 px content
+    (header 24 + body 130 = 154; 24 + 12 + 104 = 140, fits with
+    14 px footer margin).
+    """
+    img, draw = _new_canvas()
+    _draw_header(draw, fonts, "HEARTBEAT MODE", state)
+    y = theme.BODY_Y0 + 8
+    row_h = 26
+    focus = state.hb_select_focus
+    for i, mode in enumerate(HB_MODES_ORDERED):
+        is_focused = (i == focus)
+        is_active = (mode is state.hb_mode)
+        if is_focused:
+            draw.rectangle(
+                [(0, y - 4), (theme.SCREEN_W, y + row_h - 10)],
+                fill=theme.ACCENT_BG,
+            )
+        label_color = theme.ACCENT if is_focused else theme.FG
+        draw.text(
+            (theme.PAD_X + 4, y),
+            mode.value, font=fonts.body, fill=label_color,
+        )
+        # Active-mode indicator: dim amber dot at right edge so the
+        # operator never has to guess which mode is currently running.
+        if is_active:
+            dot_x = theme.SCREEN_W - theme.PAD_X - 8
+            draw.ellipse(
+                [(dot_x - 4, y + 4), (dot_x + 4, y + 12)],
+                fill=theme.FG_WARN,
+            )
+        y += row_h
+    _draw_footer(draw, fonts, "↑ ↓ pick · Enter commit · Esc cancel")
     return img
 
 
@@ -1654,6 +1737,7 @@ _RENDERERS: dict[Screen, Callable[[UISnapshot, Fonts], Image.Image]] = {
     Screen.SETUP:          _render_setup,
     Screen.SHUTTING_DOWN:  _render_shutting_down,
     Screen.INBOX_DETAIL:   _render_inbox_detail,
+    Screen.HB_MODE_SELECT: _render_hb_mode_select,
 }
 
 

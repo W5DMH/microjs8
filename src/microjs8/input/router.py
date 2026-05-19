@@ -93,6 +93,8 @@ class InputRouter:
         backlight: Optional["_Backlight"] = None,
         shutdown_gesture: Optional["_ShutdownGesture"] = None,
         emergency_arm_gesture: Optional["EmergencyArmGesture"] = None,
+        allcall_query_msgs: Optional[Callable[[], bool]] = None,
+        allcall_cq: Optional[Callable[[], bool]] = None,
     ) -> None:
         self._ui = ui
         # save_config(callsign, grid, units) -> True if saved cleanly.
@@ -143,6 +145,14 @@ class InputRouter:
         # exercise the emergency flow can omit it; ENTER/ESC on the
         # EMERGENCY screen are quiet no-ops when not provided.
         self._emergency_arm_gesture = emergency_arm_gesture
+        # Phase 13: ALLCALL action callbacks. allcall_query_msgs()
+        # fires the '@ALLCALL QUERY MSGS' broadcast; allcall_cq()
+        # fires 'CQ CQ CQ <grid>'. Both fire-and-forget — REPLY kind
+        # so the scheduler doesn't retransmit. Optional so tests can
+        # construct a router without a TX pipeline; when None, the
+        # corresponding ALLCALL screen row is a visual no-op.
+        self._allcall_query_msgs = allcall_query_msgs
+        self._allcall_cq = allcall_cq
 
     # ── Late-binding setters ────────────────────────────────────────
     # These exist so app.py can construct the router early (before
@@ -166,6 +176,18 @@ class InputRouter:
         screen (those keys fall through to ring nav).
         """
         self._emergency_arm_gesture = gesture
+
+    def set_allcall_query_msgs(
+        self, cb: Optional[Callable[[], bool]],
+    ) -> None:
+        """Inject (or replace) the @ALLCALL QUERY MSGS callback. ``None`` disables the row."""
+        self._allcall_query_msgs = cb
+
+    def set_allcall_cq(
+        self, cb: Optional[Callable[[], bool]],
+    ) -> None:
+        """Inject (or replace) the CQ callback. ``None`` disables the row."""
+        self._allcall_cq = cb
 
     def handle(self, event: KeyEvent) -> None:
         """Top-level dispatcher. Wraps any handler exception so a
@@ -431,6 +453,29 @@ class InputRouter:
                 return
             # Otherwise fall through to ring nav / generic handling.
 
+        # Phase 13: ALLCALL screen — three-row menu (HEARTBEAT / QUERY
+        # MSGS / CQ). UP/DOWN cycle focus, ENTER fires the focused
+        # action (HEARTBEAT opens the HB_MODE_SELECT modal; the other
+        # two enqueue broadcasts). Returns False for keys it doesn't
+        # consume so ring nav (←/→) still works.
+        if snapshot.screen is Screen.ALLCALL:
+            if self._handle_allcall_key(event, snapshot):
+                return
+
+        # Phase 13: HB_MODE_SELECT sub-screen — 4-row dropdown over
+        # the HbMode values. ↑/↓ cycle, Enter commits + returns, Esc
+        # cancels + returns. Block ring nav from inside the modal —
+        # modals don't cycle into the next ring screen; ←/→ commit +
+        # return so navigation gestures don't strand the operator.
+        if snapshot.screen is Screen.HB_MODE_SELECT:
+            if self._handle_hb_mode_select_key(event, snapshot):
+                return
+            if event.key in (Key.LEFT, Key.RIGHT):
+                self._ui.close_hb_mode_select(commit=True)
+                return
+            # Any other key inside the modal: ignore.
+            return
+
         # Phase 12: EMERGENCY screen — arm/disarm gesture handling.
         # ENTER on idle begins a 3-second arm hold. ESC during arming
         # cancels. ESC on armed begins a 3-second disarm hold. The
@@ -488,6 +533,89 @@ class InputRouter:
                 ch = event.char if field == "units" else event.char.upper()
                 self._ui.edit_append(ch)
                 return
+
+    def _handle_allcall_key(self, event: KeyEvent, snapshot) -> bool:
+        """ALLCALL screen — three-row menu (HEARTBEAT / QUERY MSGS / CQ).
+
+        ↑/↓ cycle focus, Enter dispatches based on the focused row.
+        Returns True if the key was consumed; False to let it fall
+        through to ring navigation (←/→) or other defaults.
+
+        Dispatch:
+          - focus 0 (HEARTBEAT) → open HB_MODE_SELECT modal
+          - focus 1 (QUERY MSGS) → fire the @ALLCALL QUERY MSGS broadcast
+          - focus 2 (CQ) → fire the CQ broadcast
+
+        For QUERY MSGS and CQ, an absent callback (router constructed
+        without an outbound queue, e.g. in tests) silently no-ops —
+        the focus stays where it was, no UI state changes.
+        """
+        if event.key is Key.UP:
+            self._ui.allcall_focus_prev()
+            return True
+        if event.key is Key.DOWN:
+            self._ui.allcall_focus_next()
+            return True
+        if event.key is Key.ENTER:
+            focus = snapshot.allcall_focus
+            if focus == 0:
+                # HEARTBEAT — open the mode-select modal. The state
+                # method initializes hb_select_focus to the currently-
+                # active mode so the operator sees "this is what's
+                # running now" when the sub-screen opens.
+                self._ui.open_hb_mode_select()
+            elif focus == 1:
+                # QUERY MSGS — fire-and-forget broadcast. Result
+                # (any held messages from peers) arrives over the
+                # next few slots via the normal decode path and
+                # lands in DIRECTED + INBOX.
+                if self._allcall_query_msgs is not None:
+                    try:
+                        self._allcall_query_msgs()
+                    except Exception:
+                        _log.exception(
+                            "allcall_query_msgs callback raised"
+                        )
+            elif focus == 2:
+                # CQ — fire-and-forget broadcast. The callback
+                # builds the wire form "CQ CQ CQ <grid>" using the
+                # station's configured grid.
+                if self._allcall_cq is not None:
+                    try:
+                        self._allcall_cq()
+                    except Exception:
+                        _log.exception("allcall_cq callback raised")
+            return True
+        return False
+
+    def _handle_hb_mode_select_key(
+        self, event: KeyEvent, snapshot,
+    ) -> bool:
+        """HB_MODE_SELECT modal sub-screen — 4-row dropdown over
+        HbMode (OFF / SINGLE / 20 MIN / 1 HR).
+
+        ↑/↓ cycle focus, Enter commits + returns to ALLCALL, Esc
+        cancels + returns to ALLCALL. Returns True if consumed.
+
+        The commit path goes through UIState.close_hb_mode_select,
+        which calls set_hb_mode under the hood — that fires the
+        app's mode-change hook which then starts/stops/restarts
+        the beacon thread. The router doesn't need to know any
+        of that.
+        """
+        if event.key is Key.UP:
+            self._ui.hb_select_focus_prev()
+            return True
+        if event.key is Key.DOWN:
+            self._ui.hb_select_focus_next()
+            return True
+        if event.key is Key.ENTER:
+            self._ui.close_hb_mode_select(commit=True)
+            return True
+        if event.key is Key.ESC:
+            self._ui.close_hb_mode_select(commit=False)
+            return True
+        return False
 
     def _handle_emergency_key(
         self, event: KeyEvent, snapshot,
