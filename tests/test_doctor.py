@@ -114,9 +114,17 @@ def test_check_display_fails_when_devnode_missing(tmp_path: Path):
 def test_check_keyboard_warns_when_evdev_missing(tmp_path: Path):
     missing = tmp_path / "no_keyboard"
     checks = check_keyboard(evdev_path=missing)
-    assert len(checks) == 1
-    assert checks[0].status == STATUS_WARN
-    assert "not present" in checks[0].title
+    # Phase 16: now 2 checks — the multi-source discovery probe
+    # AND the legacy single-path probe. Both should WARN on dev
+    # host where neither path resolves to a real keyboard.
+    assert len(checks) == 2
+    # Find the legacy single-path check (the one with "not present"
+    # in the title — it includes the path).
+    legacy_check = next(c for c in checks if "not present" in c.title)
+    assert legacy_check.status == STATUS_WARN
+    # The new discovery probe should also WARN (no keyboards on dev host).
+    discovery_check = next(c for c in checks if "discovered" in c.title)
+    assert discovery_check.status == STATUS_WARN
 
 
 def test_check_keyboard_warns_about_placeholder_scancodes(tmp_path: Path, monkeypatch):

@@ -189,23 +189,72 @@ _FN_Q_SCANCODE: int = int(_os.environ.get("MICROJS8_FN_Q_KEYCODE", 88))
 
 
 def find_keyboard_device() -> Optional[str]:
-    """Look up the USB keyboard device path.
+    """Look up the keyboard device path (legacy single-device API).
 
     Prefers the by-id symlink (stable across reboots and across multiple
-    keyboards). Falls back to scanning /dev/input/event* for any device
-    whose evdev ``capabilities`` includes EV_KEY with a typical letter
-    range — that catches keyboards plugged into hubs that don't get
-    by-id symlinks for some reason.
+    keyboards). Returns None if no keyboard found.
 
-    Returns None if no keyboard found.
+    Phase 16: this function is preserved for backward compatibility
+    but new callers should use ``discover_keyboards()`` which returns
+    a tagged list of all available keyboards (TCA8418 + USB
+    simultaneously, for hosts with both).
+    """
+    keyboards = discover_keyboards()
+    if not keyboards:
+        return None
+    # Preference order: TCA8418 first (matches previous behaviour on
+    # the CardputerZero), then USB. Within each source, lexicographic.
+    keyboards.sort(key=lambda kb: (0 if kb[0] == "tca8418" else 1, kb[1]))
+    return keyboards[0][1]
+
+
+# Phase 16: keyboard source tags. The reader uses this to decide
+# whether to apply the Ctrl+B → FN_B remap (USB only — the TCA8418
+# kernel keymap already produces FN_B/FN_Q scancodes directly, and
+# remapping Ctrl on the TCA8418 would steal the operator's Ctrl+Q
+# = ALLCALL hotkey).
+_SOURCE_TCA8418 = "tca8418"
+_SOURCE_USB = "usb"
+KeyboardSource = str  # typing alias: one of "tca8418" | "usb"
+
+
+def _classify_keyboard(by_id_path: str) -> KeyboardSource:
+    """Classify a /dev/input/by-id/*-event-kbd symlink.
+
+    The TCA8418 reaches userspace via the kernel input subsystem
+    just like a USB keyboard, but the by-id symlink name encodes
+    the bus type: USB devices have ``usb-`` in the name, while
+    platform/I²C devices have ``platform-`` or ``i2c-``.
+
+    We default UNKNOWN paths to ``usb`` (the safer default — Ctrl+B
+    remap is a no-op if the operator never presses Ctrl+B, but
+    missing it on an unrecognised device would silently break the
+    backlight gesture on USB hardware that doesn't match our regex).
+    """
+    name = by_id_path.rsplit("/", 1)[-1].lower()
+    if "tca8418" in name or name.startswith("platform-") or name.startswith("i2c-"):
+        return _SOURCE_TCA8418
+    return _SOURCE_USB
+
+
+def discover_keyboards() -> list[tuple[KeyboardSource, str]]:
+    """Return all available keyboards, tagged by source.
+
+    Phase 16: a host can have both a TCA8418 (CardputerZero on-board
+    keypad) and one or more USB keyboards plugged in. Both can be
+    used simultaneously — the daemon spawns one reader thread per
+    discovered device.
+
+    Returns a list of (source, path) tuples. Empty list means no
+    keyboard at all (the daemon will log an error and exit non-zero
+    so systemd doesn't loop).
     """
     by_id_glob = "/dev/input/by-id/*-event-kbd"
-    matches = glob.glob(by_id_glob)
-    if matches:
-        # Pick the lexicographically first — deterministic if the user
-        # has somehow plugged in two keyboards.
-        return sorted(matches)[0]
-    return None
+    paths = sorted(glob.glob(by_id_glob))
+    out: list[tuple[KeyboardSource, str]] = []
+    for p in paths:
+        out.append((_classify_keyboard(p), p))
+    return out
 
 
 # Type alias for the router callback.
@@ -228,6 +277,16 @@ class KeyboardThread(threading.Thread):
         # Override for tests — accepts an evdev.InputDevice-like.
         device_factory: Optional[Callable[[], Optional[_UInputDevice]]] = None,
         name: str = "kbd-reader",
+        # Phase 16: source tag controls Fn-mapping behaviour.
+        #   "tca8418" — keep Phase 3 behaviour; Fn+B/Fn+Q arrive as
+        #     dedicated scancodes via the kernel keymap; Ctrl+letter
+        #     emits Key.CTRL_* (Ctrl+Q reaches ALLCALL navigation).
+        #   "usb"     — no Fn key on most USB keyboards; remap
+        #     Ctrl+B to Key.FN_B so the backlight gesture is still
+        #     reachable. Ctrl+Q is left as Key.CTRL_Q so ALLCALL
+        #     navigation stays available (USB-only shutdown uses
+        #     ssh + systemctl until a config-driven gesture lands).
+        source: KeyboardSource = _SOURCE_TCA8418,
     ) -> None:
         super().__init__(name=name, daemon=True)
         self._loop = loop
@@ -239,6 +298,7 @@ class KeyboardThread(threading.Thread):
         self._ctrl_held = False
         self._capslock_on = False
         self._device: Optional[_UInputDevice] = None
+        self._source: KeyboardSource = source
 
     def stop(self) -> None:
         """Request a clean shutdown. Idempotent."""
@@ -415,6 +475,16 @@ class KeyboardThread(threading.Thread):
         if self._ctrl_held:
             base = _BASE_CHARS.get(kc)
             if base is not None:
+                # Phase 16: USB keyboards have no Fn key (firmware-
+                # handled; the keycode never reaches userspace).
+                # Remap Ctrl+B to Key.FN_B so the backlight gesture
+                # is still reachable for USB-only setups. We do NOT
+                # remap Ctrl+Q because that's a Phase 11 ALLCALL
+                # navigation hotkey — operators have learned that
+                # binding and overloading it would surprise them.
+                if self._source == _SOURCE_USB and base.lower() == "b":
+                    self._emit(KeyEvent(key=Key.FN_B))
+                    return
                 ctrl_key = _CTRL_KEYS.get(base.lower())
                 if ctrl_key is not None:
                     self._emit(KeyEvent(key=ctrl_key))
