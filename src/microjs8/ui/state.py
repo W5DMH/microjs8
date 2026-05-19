@@ -66,6 +66,45 @@ class Screen(enum.IntEnum):
     # in the INBOX screen, exited via Esc back to INBOX. Not part
     # of the main screen ring.
     INBOX_DETAIL = 10
+    # Phase 13: Heartbeat-mode selector — entered via Enter on the
+    # HEARTBEAT row of the ALLCALL screen, exited via Enter (commit)
+    # or Esc (cancel) back to ALLCALL. Not part of the main screen ring.
+    HB_MODE_SELECT = 11
+
+
+class HbMode(enum.Enum):
+    """Heartbeat broadcast cadence. See spec §5.5 / §6.9.
+
+    The mode determines whether the beacon runs, and at what
+    interval. OFF is the default at boot; the operator opts in
+    explicitly via the ALLCALL/HEARTBEAT sub-screen.
+
+    SINGLE is a "fire one and revert" mode: the beacon emits one
+    @HB in the next aligned TX window, then the app flips the mode
+    back to OFF automatically. Useful for "I'm here, who's around?"
+    without committing to a periodic schedule.
+
+    20 MIN / 1 HR are repeating intervals. They cycle until the
+    operator picks OFF or SINGLE on the sub-screen.
+
+    The ``.value`` field is the operator-facing label shown on the
+    HOME row, the ALLCALL row, and the HB_MODE_SELECT sub-screen.
+    """
+
+    OFF = "OFF"
+    SINGLE = "SINGLE"
+    TWENTY_MIN = "20 MIN"
+    ONE_HR = "1 HR"
+
+
+# Ordered tuple of HbMode values for index-based focus on the
+# HB_MODE_SELECT sub-screen. Order matches the spec's display order.
+HB_MODES_ORDERED: tuple[HbMode, ...] = (
+    HbMode.OFF,
+    HbMode.SINGLE,
+    HbMode.TWENTY_MIN,
+    HbMode.ONE_HR,
+)
 
 
 class ComposeCmd(enum.Enum):
@@ -294,6 +333,16 @@ class UISnapshot:
     # "Disarming…".
     emergency_hold_direction: Optional[str] = None
 
+    # Phase 13: heartbeat broadcast mode + ALLCALL screen state.
+    # hb_mode is OFF until the operator picks a non-OFF value on the
+    # HB_MODE_SELECT sub-screen. allcall_focus tracks the highlighted
+    # row on the ALLCALL screen (0=HEARTBEAT, 1=QUERY MSGS, 2=CQ).
+    # hb_select_focus is the highlighted row on the HB_MODE_SELECT
+    # modal sub-screen (0..3 indexing HB_MODES_ORDERED).
+    hb_mode: HbMode = HbMode.OFF
+    allcall_focus: int = 0
+    hb_select_focus: int = 0
+
     # Focus + edit state. focused_field is None when the current screen
     # has no focusable items.
     focused_field: Optional[str] = None
@@ -432,6 +481,16 @@ class UIState:
         # Mirrors the heartbeat-mode callback pattern that arrives
         # in Phase 13.
         self._em_arm_change_cb: Optional[Callable[[bool], None]] = None
+        # Phase 13: heartbeat mode + ALLCALL screen state.
+        self._hb_mode: HbMode = HbMode.OFF
+        self._allcall_focus: int = 0
+        self._hb_select_focus: int = 0
+        # App.py registers a callback here that fires whenever
+        # set_hb_mode is invoked with a different mode. App reconciles
+        # the HeartbeatBeacon thread to match the new mode.
+        self._hb_mode_change_callback: Optional[
+            Callable[["HbMode"], None]
+        ] = None
         # Focus index per screen, default 0.
         self._focus_index: dict[Screen, int] = {s: 0 for s in Screen}
         # Edit state.
@@ -892,6 +951,108 @@ class UIState:
                 self._em_arm_change_cb(False)
             except Exception:
                 pass
+
+    # ── Phase 13: Heartbeat mode + ALLCALL screen ────────────────────
+
+    @property
+    def hb_mode(self) -> "HbMode":
+        return self._hb_mode
+
+    @property
+    def allcall_focus(self) -> int:
+        return self._allcall_focus
+
+    @property
+    def hb_select_focus(self) -> int:
+        return self._hb_select_focus
+
+    def set_hb_mode_change_callback(
+        self, callback: Optional[Callable[["HbMode"], None]],
+    ) -> None:
+        """Wire app.py's beacon-lifecycle handler. Called from
+        ``set_hb_mode`` whenever the mode changes. Stored, not
+        invoked here. Use ``None`` to detach."""
+        self._hb_mode_change_callback = callback
+
+    def set_hb_mode(self, mode: "HbMode") -> None:
+        """Change the heartbeat broadcast mode.
+
+        No-op if ``mode`` equals the current mode (avoids spurious
+        beacon-thread churn on mode-select sub-screen Enter when the
+        operator picked the already-selected mode). Otherwise fires
+        the registered mode-change callback (synchronously, on the
+        asyncio thread) and sets the dirty flag so the renderer
+        repaints HOME + ALLCALL with the new value.
+        """
+        if self._hb_mode is mode:
+            return
+        self._hb_mode = mode
+        if self._hb_mode_change_callback is not None:
+            try:
+                self._hb_mode_change_callback(mode)
+            except Exception:
+                # Same rationale as arm_emergency_beacon: the state
+                # mutation has already happened; a raising callback
+                # shouldn't roll us back. App.py logs via its own
+                # exception handler.
+                pass
+        self._dirty.set()
+
+    def allcall_focus_next(self) -> None:
+        """Cycle the ALLCALL screen focus down (HEARTBEAT → QUERY MSGS → CQ → wrap)."""
+        self._allcall_focus = (self._allcall_focus + 1) % 3
+        self._dirty.set()
+
+    def allcall_focus_prev(self) -> None:
+        """Cycle the ALLCALL screen focus up."""
+        self._allcall_focus = (self._allcall_focus - 1) % 3
+        self._dirty.set()
+
+    def open_hb_mode_select(self) -> None:
+        """Enter the HB_MODE_SELECT modal sub-screen.
+
+        Initializes the sub-screen focus to the currently-active
+        mode, so the operator sees "this is what's running now"
+        when the sub-screen opens.
+        """
+        try:
+            self._hb_select_focus = HB_MODES_ORDERED.index(self._hb_mode)
+        except ValueError:
+            self._hb_select_focus = 0
+        self._screen = Screen.HB_MODE_SELECT
+        self._editing_field = None
+        self._edit_buffer = ""
+        self._dirty.set()
+
+    def close_hb_mode_select(self, *, commit: bool) -> None:
+        """Return from HB_MODE_SELECT to ALLCALL.
+
+        If ``commit`` is True, apply whatever mode the operator has
+        the focus parked on. Otherwise just navigate back without
+        changing the mode.
+        """
+        if self._screen is not Screen.HB_MODE_SELECT:
+            return
+        if commit:
+            self.set_hb_mode(HB_MODES_ORDERED[self._hb_select_focus])
+        self._screen = Screen.ALLCALL
+        self._editing_field = None
+        self._edit_buffer = ""
+        self._dirty.set()
+
+    def hb_select_focus_next(self) -> None:
+        """Cycle HB_MODE_SELECT focus down (OFF → SINGLE → 20 MIN → 1 HR → wrap)."""
+        self._hb_select_focus = (
+            self._hb_select_focus + 1
+        ) % len(HB_MODES_ORDERED)
+        self._dirty.set()
+
+    def hb_select_focus_prev(self) -> None:
+        """Cycle HB_MODE_SELECT focus up."""
+        self._hb_select_focus = (
+            self._hb_select_focus - 1
+        ) % len(HB_MODES_ORDERED)
+        self._dirty.set()
 
     # ── Heard list / Directed list (Step 5) ──────────────────────────
 
@@ -1428,6 +1589,9 @@ class UIState:
             compose_cmd=self._compose_cmd,
             compose_text=self._compose_text,
             compose_focused_field=self.compose_focused_field(),
+            hb_mode=self._hb_mode,
+            allcall_focus=self._allcall_focus,
+            hb_select_focus=self._hb_select_focus,
             battery=self._battery,
         )
 

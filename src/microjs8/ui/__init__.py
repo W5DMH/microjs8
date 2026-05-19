@@ -18,6 +18,8 @@ from microjs8.ui.display import DisplayDevice, FakeDisplayDevice, RenderThread
 from microjs8.ui.fonts import Fonts, load_fonts
 from microjs8.ui.state import (
     DirectedRow,
+    HB_MODES_ORDERED,
+    HbMode,
     InboxRow,
     RING,
     Screen,
@@ -30,6 +32,8 @@ __all__ = [
     "DisplayDevice",
     "FakeDisplayDevice",
     "Fonts",
+    "HB_MODES_ORDERED",
+    "HbMode",
     "InboxRow",
     "RING",
     "RenderThread",
