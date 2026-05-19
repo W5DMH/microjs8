@@ -541,36 +541,99 @@ def _render_directed(state: UISnapshot, fonts: Fonts) -> Image.Image:
 
     # ── List view ────────────────────────────────────────────────
     #
-    # Newest at bottom: render the LAST N entries that fit. At ~16px
-    # per row and ~190px body height we get 11-12 rows on screen.
-    # We slice from the end so eviction at the deque head doesn't
-    # cause visible content to "jump" — the bottom row stays anchored
-    # at the bottom edge and old rows scroll off the top.
+    # Newest at bottom. Bodies that don't fit on one line WRAP onto
+    # continuation lines indented under the body (not the chevron),
+    # so a long "HEARTBEAT SNR -09 MSG ID 1" or a free-text reply
+    # like "thanks for the heartbeat, how's propagation tonight?"
+    # stays fully readable. Operators treat this view as live chat,
+    # not just protocol summary, so we never ellipsize body content.
+    #
+    # Per-entry layout (single line):
+    #   ▸ KI4HDU HEARTBEAT SNR -9              -13 dB
+    #
+    # Per-entry layout (wrapped):
+    #   ▸ KD8GIJ thanks for the heartbeat,        -21 dB
+    #     how's propagation tonight?
+    #   ◂ K1ABC ACK                                12:35
     row_h = 16
-    max_rows = (theme.BODY_Y1 - theme.BODY_Y0 - 8) // row_h
-    visible = entries[-max_rows:]
-
-    y = theme.BODY_Y0 + 6
+    body_height = theme.BODY_Y1 - theme.BODY_Y0 - 8
+    max_total_rows = max(1, body_height // row_h)
     arrow_x = theme.PAD_X
     text_x = theme.PAD_X + 14
-    # Right-aligned metadata column (SNR for inbound, time for outbound)
     meta_x_right = theme.SCREEN_W - theme.PAD_X
+    # Width budget for the FIRST line of an entry (room for chevron
+    # on the left, meta column on the right). Continuation lines get
+    # the full body-text width since they have no meta column.
+    cont_text_w = meta_x_right - text_x
 
-    for entry in visible:
+    # Greedy word-wrap helper. Used per-entry: first call sizes for
+    # the first-line budget (which depends on the meta width), then
+    # subsequent calls (if any) use the continuation budget.
+    def _wrap_body(s: str, first_w: int, cont_w: int) -> list[str]:
+        s = (s or "").strip()
+        if not s:
+            return [""]
+        out: list[str] = []
+        words = s.split()
+        cur = ""
+        budget = first_w
+        for w in words:
+            candidate = w if not cur else (cur + " " + w)
+            try:
+                px = int(draw.textlength(candidate, font=fonts.small))
+            except Exception:
+                px = 6 * len(candidate)
+            if px <= budget:
+                cur = candidate
+                continue
+            # Word doesn't fit on the current line.
+            if cur:
+                out.append(cur)
+                cur = ""
+                budget = cont_w
+                # Retry: does the word fit on a fresh line?
+                try:
+                    pw = int(draw.textlength(w, font=fonts.small))
+                except Exception:
+                    pw = 6 * len(w)
+                if pw <= budget:
+                    cur = w
+                    continue
+            # Single word longer than the line: break on chars.
+            remainder = w
+            while remainder:
+                # Find the longest prefix that fits.
+                lo, hi = 1, len(remainder)
+                fit = 1
+                while lo <= hi:
+                    mid = (lo + hi) // 2
+                    try:
+                        wm = int(draw.textlength(
+                            remainder[:mid], font=fonts.small
+                        ))
+                    except Exception:
+                        wm = 6 * mid
+                    if wm <= budget:
+                        fit = mid
+                        lo = mid + 1
+                    else:
+                        hi = mid - 1
+                out.append(remainder[:fit])
+                remainder = remainder[fit:]
+                budget = cont_w
+        if cur:
+            out.append(cur)
+        return out or [""]
+
+    # Pass 1: build per-entry wrapped-line lists, newest first, until
+    # we've accumulated enough lines to fill the screen. Each entry's
+    # first-line budget depends on its meta width (right-aligned SNR
+    # or time stamp), so we compute meta + first-line budget per
+    # entry before wrapping.
+    rendered: list[tuple] = []   # (entry, lines, meta, meta_w, is_in)
+    rows_consumed = 0
+    for entry in reversed(entries):
         is_in = (entry.direction.value == "IN")
-        # Direction arrow: ▸ (green) for inbound, ◂ (white) for outbound.
-        # Chevron color uses the same FG_GOOD scheme as the inbox focus
-        # marker so the operator's eye is already trained.
-        arrow = "▸" if is_in else "◂"
-        arrow_color = theme.FG_GOOD if is_in else theme.FG
-        draw.text((arrow_x, y), arrow, font=fonts.body, fill=arrow_color)
-
-        # Compute the right-aligned meta first so we know how much
-        # horizontal space the body text has. Inbound: SNR. Outbound:
-        # HH:MM time. We measure the meta's pixel width via PIL's
-        # textlength so the body truncation is pixel-accurate, not
-        # a hard 22-char limit (which previously cut "KD8PGB YES MSG
-        # ID 57" mid-id even though the screen had room).
         if is_in and entry.snr_db is not None:
             meta = f"{entry.snr_db:+d} dB"
         elif not is_in:
@@ -581,63 +644,86 @@ def _render_directed(state: UISnapshot, fonts: Fonts) -> Image.Image:
             meta_w = int(draw.textlength(meta, font=fonts.small)) if meta else 0
         except Exception:
             meta_w = 6 * len(meta)
-
-        # Body text: "CALLSIGN VERB body". We compress the full message
-        # into a single line — protocol verbs and bodies are short.
-        # Long bodies (rare for non-MSG traffic) get ellipsized to fit
-        # the available pixel width, with a 4-px gap before the meta
-        # column so digits don't touch.
+        # First-line budget: text_x → meta_left, with a 4-px gap.
+        first_w = (meta_x_right - meta_w - 4) - text_x
+        if first_w < 30:
+            first_w = 30
+        # Compose the body string. "CALL VERB body" with body
+        # possibly empty (e.g. ACK with no body). When the entry was
+        # addressed to a JS8Call group we belong to (rather than to
+        # us personally), tag the sender with the group affiliation
+        # so the operator distinguishes a group blast from personal
+        # traffic at a glance. The K1ABC@@ARESGA double-'@' form
+        # reads cleanly: "K1ABC speaking to the @ARESGA group". The
+        # group tag is part of the sender label, not a separate
+        # token, so word-wrap keeps it adjacent.
+        sender = entry.other_call
+        if entry.for_group:
+            sender = f"{sender}@{entry.for_group}"
         if entry.body:
-            full = f"{entry.other_call} {entry.verb} {entry.body}"
+            full = f"{sender} {entry.verb} {entry.body}"
         else:
-            full = f"{entry.other_call} {entry.verb}"
-        # Available pixel width = right-edge of meta column, minus
-        # meta width (if any), minus a 4-px gap, minus left-edge text_x.
-        avail_w = (meta_x_right - meta_w - 4) - text_x
-        if avail_w < 30:
-            avail_w = 30  # always render SOMETHING even on extreme overflow
-        # Ellipsize until the line fits the available pixel width.
-        # Cheap iterative truncation — bodies max out at ~30 chars in
-        # practice, so the loop runs at most a few iterations.
-        try:
-            full_w = int(draw.textlength(full, font=fonts.small))
-        except Exception:
-            full_w = 6 * len(full)
-        if full_w > avail_w:
-            ellipsis = "…"
-            try:
-                ellipsis_w = int(draw.textlength(ellipsis, font=fonts.small))
-            except Exception:
-                ellipsis_w = 6
-            # Trim from the right one character at a time until it fits.
-            i = len(full)
-            while i > 0:
-                candidate = full[:i] + ellipsis
-                try:
-                    w = int(draw.textlength(candidate, font=fonts.small))
-                except Exception:
-                    w = 6 * len(candidate)
-                if w <= avail_w:
-                    full = candidate
-                    break
-                i -= 1
-            else:
-                full = ellipsis  # extreme overflow fallback
-        # Body color signals direction at a glance: green chevron +
-        # default FG for inbound (received), red FG for outbound
-        # (transmitted). The red picks up the operator's attention —
-        # "this is YOU on the air" — and matches the JS8Call
-        # convention of TX-text rendered distinctly.
-        body_fill = theme.FG if is_in else theme.FG_BAD
-        draw.text((text_x, y), full, font=fonts.small, fill=body_fill)
+            full = f"{sender} {entry.verb}"
+        lines = _wrap_body(full, first_w, cont_text_w)
+        # Cap the wrap at the screen height so one runaway entry
+        # can't dominate; truncate with ellipsis on the last line
+        # when capped.
+        if rows_consumed + len(lines) > max_total_rows:
+            keep = max_total_rows - rows_consumed
+            if keep <= 0:
+                break
+            if keep < len(lines):
+                # Mark the last visible line with an ellipsis so the
+                # operator sees that content was cut.
+                lines = lines[:keep]
+                if lines:
+                    last = lines[-1]
+                    ellipsis = "…"
+                    # Trim to make room for the ellipsis.
+                    while last and True:
+                        try:
+                            w_last = int(draw.textlength(
+                                last + ellipsis, font=fonts.small
+                            ))
+                        except Exception:
+                            w_last = 6 * (len(last) + 1)
+                        budget = first_w if len(lines) == 1 else cont_text_w
+                        if w_last <= budget:
+                            break
+                        last = last[:-1]
+                    lines[-1] = (last + ellipsis) if last else ellipsis
+        rendered.append((entry, lines, meta, meta_w, is_in))
+        rows_consumed += len(lines)
+        if rows_consumed >= max_total_rows:
+            break
 
+    # Pass 2: render top-to-bottom in NEWEST-FIRST order. Operator
+    # wanted newest at the top of the body region, pushing older
+    # entries downward (news-feed style, not chat-style). Pass 1
+    # built ``rendered`` newest-first by iterating ``reversed(entries)``
+    # so we render directly without re-reversing.
+    y = theme.BODY_Y0 + 6
+
+    for entry, lines, meta, meta_w, is_in in rendered:
+        # First line: chevron + body + meta.
+        arrow = "▸" if is_in else "◂"
+        arrow_color = theme.FG_GOOD if is_in else theme.FG
+        draw.text((arrow_x, y), arrow, font=fonts.body, fill=arrow_color)
+        body_fill = theme.FG if is_in else theme.FG_BAD
+        draw.text((text_x, y), lines[0], font=fonts.small, fill=body_fill)
         if meta:
             draw.text(
                 (meta_x_right - meta_w, y),
                 meta, font=fonts.small, fill=theme.FG_DIM,
             )
-
         y += row_h
+        # Continuation lines: indent at text_x, no chevron, no meta.
+        for cont_line in lines[1:]:
+            draw.text(
+                (text_x, y), cont_line,
+                font=fonts.small, fill=body_fill,
+            )
+            y += row_h
         if y > theme.BODY_Y1 - 2:
             break
 

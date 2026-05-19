@@ -890,3 +890,94 @@ def test_assembled_strip_handles_verb_only_body(tmp_path: Path):
     e = snap[0]
     assert e.verb == "STATUS"
     assert e.body == ""
+
+
+# ── HEARTBEAT supersede: single+multiframe collapse to one entry ──
+
+
+def test_heartbeat_multiframe_supersedes_single_frame_entry(tmp_path):
+    """When the reassembler emits a multi-frame non-buffered message
+    (e.g., HEARTBEAT SNR +04 + continuation MSG ID 61), it should
+    REPLACE the prior single-frame entry the same wire produced,
+    not append a duplicate. End-to-end check that
+    _log_directed_in_assembled routes multi-frame non-buffered emits
+    through record_in_supersede. Per W5DMH bench, May 2026."""
+    import time as _time
+    app = _make_app(tmp_path)
+
+    # Use a timestamp recent enough that the 60 s supersede window
+    # captures the prior entry when _log_directed_in_assembled fires.
+    now = _time.time()
+
+    # Simulate the immediate single-frame dispatch (what
+    # _log_directed_in does on frame 1).
+    app._directed_activity.record_in(
+        from_call="KD8PGB",
+        verb="HEARTBEAT",
+        body="SNR +04",
+        snr_db=14,
+        freq_hz=700.0,
+        at_unix=now - 5.0,    # 5 s ago — inside the window
+    )
+    assert len(app._directed_activity) == 1
+
+    # Now the reassembled multi-frame emit fires with the full body.
+    # frame_count=2 and was_buffered_command=False trigger the
+    # supersede branch.
+    asm = AssembledMessage(
+        from_call="KD8PGB", to_call="W5DMH",
+        verb="HEARTBEAT", body="HEARTBEAT SNR +04 MSG ID 61",
+        checksum_valid=True,
+        raw_text="HEARTBEAT SNR +04 MSG ID 61",
+        offset_hz=700.0,
+        started_at=now - 5.0,
+        completed_at=now,
+        frame_count=2,
+        was_buffered_command=False,
+    )
+    app._log_directed_in_assembled(asm)
+
+    # Single entry — the original was replaced, not appended.
+    snap = app._directed_activity.snapshot()
+    assert len(snap) == 1, (
+        f"expected one entry after supersede, got {len(snap)}: "
+        f"{[(e.verb, e.body) for e in snap]}"
+    )
+    e = snap[0]
+    assert e.verb == "HEARTBEAT"
+    assert e.body == "SNR +04 MSG ID 61"
+    # SNR preserved from the original single-frame entry — the
+    # reassembled emit doesn't carry SNR.
+    assert e.snr_db == 14
+
+
+def test_single_frame_buffered_does_not_supersede(tmp_path):
+    """Single-frame buffered commands (frame_count=1, was_buffered=
+    True) go through the regular record_in path. A prior matching
+    entry won't be collapsed (no supersede branch fires).
+
+    This guards against accidentally consolidating unrelated buffered
+    commands — those have their own protocol semantics distinct from
+    free-text continuation."""
+    import time as _time
+    app = _make_app(tmp_path)
+    now = _time.time()
+    app._directed_activity.record_in(
+        from_call="K1ABC", verb="QUERY MSGS", body="",
+        snr_db=10, at_unix=now - 5.0,
+    )
+    asm = AssembledMessage(
+        from_call="K1ABC", to_call="W5DMH",
+        verb="QUERY MSGS", body="",
+        checksum_valid=True, raw_text="",
+        offset_hz=1500.0,
+        started_at=now - 5.0,
+        completed_at=now,
+        frame_count=1,
+        was_buffered_command=True,
+    )
+    app._log_directed_in_assembled(asm)
+    snap = app._directed_activity.snapshot()
+    # Both entries present — no supersede.
+    assert len(snap) == 2
+
