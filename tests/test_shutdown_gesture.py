@@ -1,204 +1,410 @@
-"""Tests for microjs8.input.shutdown_gesture.
+"""Tests for the shared ShutdownGesture + keyboard Fn+Q path.
 
-The Phase 3 replacement for the MiniJS8 both-buttons gesture. We don't
-poke real keyboard input — the gesture's API is ``arm()`` / ``cancel()``,
-which the router calls in response to ``Fn+Q`` press / release events.
-We exercise the state machine directly, which keeps the tests fast and
-deterministic regardless of the underlying asyncio scheduler.
-
-These tests intentionally mirror the structure of the prior
-``test_buttons.py`` so coverage parity is obvious to anyone diffing the
-two phases.
+Covers:
+  - ShutdownGesture.arm() / cancel() / is_armed() basics
+  - Idempotent arm (two paths racing)
+  - Cancel from a different "source" than the arm (button release
+    can cancel a keyboard-armed countdown and vice versa)
+  - Countdown completion invokes the callback
+  - Router Fn+Q arms the shared gesture
+  - Router Esc on SHUTTING_DOWN cancels
 """
 
 from __future__ import annotations
 
 import asyncio
-from typing import Callable, Awaitable
 
 import pytest
 
+from microjs8.input.events import Key, KeyEvent
+from microjs8.input.router import InputRouter
 from microjs8.input.shutdown_gesture import (
-    SHUTDOWN_HOLD_S,
+    DEFAULT_SHUTDOWN_HOLD_S,
     ShutdownGesture,
 )
 from microjs8.ui.state import Screen, UIState
 
 
-def _noop_shutdown(fired: asyncio.Event) -> Callable[[], Awaitable[None]]:
-    """Build a fake shutdown callback that just sets a flag.
-
-    Mirrors the prior test_buttons helper so behaviour parity is easy
-    to audit.
-    """
-    async def cb() -> None:
-        fired.set()
-    return cb
+def _state(*, screen=Screen.HOME, **kw):
+    s = UIState("W5DMH", "EN83", True, "miles", **kw)
+    s.set_screen(screen)
+    return s
 
 
-@pytest.fixture
-def loop_state():
+# ── ShutdownGesture unit tests ────────────────────────────────────────
+
+
+def test_gesture_initial_state_not_armed():
+    """A brand-new gesture object is not armed and has no task."""
+    s = _state()
+
+    async def _cb():
+        pass
+
     loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    state = UIState(callsign="K1ABC", grid="FN42", tx_allowed=True)
-    yield loop, state
-    # Cancel anything still pending — tests that arm() the gesture
-    # without awaiting completion would otherwise leak a running task
-    # and trigger pytest's unawaited-coroutine warning.
-    pending = asyncio.all_tasks(loop)
-    for t in pending:
-        t.cancel()
-    if pending:
-        loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
-    loop.close()
+    try:
+        g = ShutdownGesture(s, loop, _cb)
+        assert g.is_armed() is False
+        assert g.cancel(source="test") is False  # no-op cancel
+    finally:
+        loop.close()
 
 
-# ── Arm + UI state ────────────────────────────────────────────────────
+def test_gesture_arm_returns_true_first_time_false_when_already_armed():
+    """First arm() returns True, subsequent arm()s while running return False.
 
-
-def test_arm_switches_to_shutting_down_screen(loop_state):
-    """Fn+Q press must immediately switch to the SHUTTING_DOWN screen."""
-    loop, state = loop_state
-    fired = asyncio.Event()
-    gesture = ShutdownGesture(state, loop, shutdown_callback=_noop_shutdown(fired))
-
-    gesture.arm()
-    loop.run_until_complete(asyncio.sleep(0))   # let the task tick once
-
-    assert state.snapshot().screen is Screen.SHUTTING_DOWN
-    assert gesture.is_armed
-    assert not fired.is_set()
-
-
-def test_arm_is_idempotent(loop_state):
-    """A second arm() while already armed must NOT restart the timer.
-
-    This matters for keyboard auto-repeat: if the kernel emits a stream
-    of key_hold events during a 3-second hold, the gesture's countdown
-    must keep ticking from the original press, not reset.
+    Idempotent arming is essential: keyboard Fn+Q during a
+    button-hold (or vice versa) must not produce two countdown
+    tasks racing to call systemctl poweroff.
     """
-    loop, state = loop_state
-    fired = asyncio.Event()
-    gesture = ShutdownGesture(state, loop, shutdown_callback=_noop_shutdown(fired))
+    s = _state()
 
-    gesture.arm()
-    first_task = gesture._task
-    gesture.arm()
-    assert gesture._task is first_task    # same object — not replaced
+    async def _cb():
+        pass
 
+    async def _run():
+        g = ShutdownGesture(s, asyncio.get_running_loop(), _cb,
+                            hold_seconds=10.0)
+        assert g.arm(source="first") is True
+        assert g.is_armed() is True
+        # Race: second arm shouldn't produce a second task.
+        assert g.arm(source="second") is False
+        assert g.is_armed() is True
+        # Clean up the still-running countdown so the test loop closes.
+        g.cancel(source="teardown")
+        # Yield once so cancel propagates through the task.
+        await asyncio.sleep(0)
 
-# ── Cancel paths ──────────────────────────────────────────────────────
-
-
-def test_cancel_before_hold_completes_rolls_back_ui(loop_state):
-    """Fn+Q release before 3s elapses cancels the shutdown."""
-    loop, state = loop_state
-    fired = asyncio.Event()
-    gesture = ShutdownGesture(state, loop, shutdown_callback=_noop_shutdown(fired))
-
-    gesture.arm()
-    loop.run_until_complete(asyncio.sleep(0.1))    # let the countdown tick a bit
-    assert state.snapshot().screen is Screen.SHUTTING_DOWN
-
-    gesture.cancel()
-    loop.run_until_complete(asyncio.sleep(0))
-
-    assert state.snapshot().screen is Screen.HOME
-    assert not gesture.is_armed
-    assert not fired.is_set()
+    asyncio.run(_run())
 
 
-def test_cancel_when_not_armed_is_a_noop(loop_state):
-    """Calling cancel() with no active gesture must not raise or
-    mutate state."""
-    loop, state = loop_state
-    fired = asyncio.Event()
-    gesture = ShutdownGesture(state, loop, shutdown_callback=_noop_shutdown(fired))
+def test_gesture_cancel_rolls_ui_back():
+    """Cancelling restores the screen the operator was on before arming."""
+    s = _state(screen=Screen.HEARD)
 
-    # Unsolicited cancel — operator releases Fn+Q without ever pressing,
-    # which can happen if Fn+Q press is debounced/dropped by the kernel
-    # but the release still fires. Must be a no-op.
-    gesture.cancel()
-    assert state.snapshot().screen is Screen.HOME
-    assert not fired.is_set()
+    async def _cb():
+        pass
 
+    async def _run():
+        g = ShutdownGesture(s, asyncio.get_running_loop(), _cb,
+                            hold_seconds=10.0)
+        assert s.snapshot().screen is Screen.HEARD
+        g.arm(source="t")
+        assert s.snapshot().screen is Screen.SHUTTING_DOWN
+        g.cancel(source="t")
+        await asyncio.sleep(0)  # let the cancelled task settle
+        # UI should be back on HEARD — cancel_shutdown restores it.
+        assert s.snapshot().screen is Screen.HEARD
 
-# ── Full-hold success path ────────────────────────────────────────────
-
-
-def test_full_hold_invokes_shutdown_callback(loop_state):
-    """Holding Fn+Q for the full SHUTDOWN_HOLD_S window fires the callback."""
-    loop, state = loop_state
-    fired = asyncio.Event()
-    gesture = ShutdownGesture(state, loop, shutdown_callback=_noop_shutdown(fired))
-
-    gesture.arm()
-    # Let the countdown finish. Slack of 0.5s covers scheduler jitter
-    # and the final await sleep tick that happens at completion.
-    loop.run_until_complete(asyncio.sleep(SHUTDOWN_HOLD_S + 0.5))
-
-    assert fired.is_set()
-    assert not gesture.is_armed
+    asyncio.run(_run())
 
 
-# ── Re-arm after cancel ───────────────────────────────────────────────
+def test_gesture_cancel_from_different_source_works():
+    """Button release can cancel a keyboard-armed gesture and vice versa.
 
-
-def test_arm_again_after_cancel_works_cleanly(loop_state):
-    """A cancelled gesture must not leave the state machine wedged.
-
-    Equivalent to MiniJS8's
-    test_short_press_after_cancelled_shutdown_still_navigates — verifies
-    the gesture can fire correctly after a cancel.
+    The 'source' parameter is only for log diagnostics; the cancel
+    contract is "if armed, cancel". No source-coupling.
     """
-    loop, state = loop_state
-    fired = asyncio.Event()
-    gesture = ShutdownGesture(state, loop, shutdown_callback=_noop_shutdown(fired))
+    s = _state()
 
-    gesture.arm()
-    loop.run_until_complete(asyncio.sleep(0.05))
-    gesture.cancel()
-    loop.run_until_complete(asyncio.sleep(0))
-    assert state.snapshot().screen is Screen.HOME
+    async def _cb():
+        pass
 
-    # Now re-arm and confirm the SHUTTING_DOWN screen comes up again.
-    gesture.arm()
-    loop.run_until_complete(asyncio.sleep(0))
-    assert state.snapshot().screen is Screen.SHUTTING_DOWN
-    assert gesture.is_armed
+    async def _run():
+        g = ShutdownGesture(s, asyncio.get_running_loop(), _cb,
+                            hold_seconds=10.0)
+        g.arm(source="keyboard Fn+Q")
+        assert g.is_armed() is True
+        # Different source label cancels just fine.
+        assert g.cancel(source="buttons") is True
+        await asyncio.sleep(0)
+        assert g.is_armed() is False
 
-
-def test_stop_releases_pending_task(loop_state):
-    """stop() must cancel any in-flight countdown for clean teardown."""
-    loop, state = loop_state
-    fired = asyncio.Event()
-    gesture = ShutdownGesture(state, loop, shutdown_callback=_noop_shutdown(fired))
-
-    gesture.arm()
-    assert gesture.is_armed
-    gesture.stop()
-    loop.run_until_complete(asyncio.sleep(0))
-    assert not gesture.is_armed
+    asyncio.run(_run())
 
 
-# ── Failing shutdown callback rolls UI back ───────────────────────────
+def test_gesture_completion_invokes_callback():
+    """When the countdown runs to completion, the shutdown callback fires.
 
-
-def test_failing_shutdown_callback_rolls_ui_back(loop_state):
-    """If the shutdown callback raises, the UI must NOT remain on the
-    SHUTTING_DOWN screen indefinitely — the operator needs the device
-    to be usable again.
+    We use a very short hold (0.05 s) so the test doesn't sleep
+    for the full 5-second production duration.
     """
-    loop, state = loop_state
+    s = _state()
+    callback_calls: list[str] = []
 
-    async def failing_cb() -> None:
-        raise RuntimeError("simulated shutdown failure")
+    async def _cb():
+        callback_calls.append("fired")
 
-    gesture = ShutdownGesture(state, loop, shutdown_callback=failing_cb)
+    async def _run():
+        g = ShutdownGesture(
+            s, asyncio.get_running_loop(), _cb,
+            hold_seconds=0.05,
+        )
+        g.arm(source="test")
+        # Wait for the countdown to complete plus a margin.
+        await asyncio.sleep(0.20)
+        assert g.is_armed() is False, "task should be done after completion"
 
-    gesture.arm()
-    loop.run_until_complete(asyncio.sleep(SHUTDOWN_HOLD_S + 0.3))
+    asyncio.run(_run())
+    assert callback_calls == ["fired"], (
+        f"callback should fire exactly once at completion, "
+        f"got {callback_calls}"
+    )
 
-    # After the callback raises, the gesture catches it and cancels
-    # the SHUTTING_DOWN screen. We're back to HOME.
-    assert state.snapshot().screen is Screen.HOME
+
+def test_gesture_cancel_before_completion_does_not_fire_callback():
+    """Cancelling mid-countdown must NOT invoke the shutdown callback —
+    that's the whole point of the cancel."""
+    s = _state()
+    callback_calls: list[str] = []
+
+    async def _cb():
+        callback_calls.append("fired")
+
+    async def _run():
+        g = ShutdownGesture(
+            s, asyncio.get_running_loop(), _cb,
+            hold_seconds=10.0,  # plenty of time to cancel
+        )
+        g.arm(source="t")
+        await asyncio.sleep(0.05)
+        g.cancel(source="t")
+        # Wait longer than a tick to be sure the cancelled task settled
+        # and isn't still about to fire.
+        await asyncio.sleep(0.15)
+
+    asyncio.run(_run())
+    assert callback_calls == [], (
+        f"cancelled gesture should NOT fire callback, got {callback_calls}"
+    )
+
+
+def test_gesture_progress_drains_during_countdown():
+    """The shutdown_remaining frac should decrease from 1.0 toward 0.0
+    as the countdown runs. Pin the contract that the renderer's
+    progress-bar input is being updated."""
+    s = _state()
+
+    async def _cb():
+        pass
+
+    async def _run():
+        g = ShutdownGesture(
+            s, asyncio.get_running_loop(), _cb,
+            hold_seconds=0.30,
+        )
+        g.arm(source="t")
+        # Immediately after arm, progress should be close to 1.0
+        assert s.snapshot().shutdown_remaining > 0.9
+        # Wait until partway through
+        await asyncio.sleep(0.15)
+        partial = s.snapshot().shutdown_remaining
+        assert 0.2 < partial < 0.8, (
+            f"midway shutdown_remaining should be ~0.5, got {partial}"
+        )
+        # Let it finish
+        await asyncio.sleep(0.25)
+        # After completion, gesture is not armed
+        assert g.is_armed() is False
+
+    asyncio.run(_run())
+
+
+def test_gesture_default_hold_seconds_matches_build_spec():
+    """The keyboard Fn+Q path holds for 3 seconds per microjs8
+    Build Spec §6.3.2 (vs MiniJS8's 5 s for the both-buttons
+    gesture). The shorter hold is deliberate: the CardputerZero
+    has no tactile buttons; Fn+Q on the keyboard is more
+    discoverable and less ambiguous than holding two physical
+    buttons, so a shorter hold is comfortable. Pin the constant
+    so a refactor doesn't silently change keyboard UX."""
+    assert DEFAULT_SHUTDOWN_HOLD_S == 3.0
+
+
+# ── Router Fn+Q integration ─────────────────────────────────────────
+
+
+def _router_with_gesture(state, gesture):
+    """Build an InputRouter wired to the gesture, no other callbacks needed."""
+    return InputRouter(
+        state,
+        save_config=lambda *a, **kw: True,
+        emergency_bypass=lambda: True,
+        shutdown_gesture=gesture,
+    )
+
+
+def test_router_ctrl_x_arms_shutdown_gesture():
+    """Pressing Fn+Q on any screen arms the gesture and switches the
+    UI to the SHUTTING_DOWN screen. This is the keyboard parallel
+    of the both-buttons-held hardware gesture."""
+    s = _state(screen=Screen.HOME)
+
+    async def _cb():
+        pass
+
+    async def _run():
+        g = ShutdownGesture(s, asyncio.get_running_loop(), _cb,
+                            hold_seconds=10.0)
+        r = _router_with_gesture(s, g)
+        assert s.snapshot().screen is Screen.HOME
+        r.handle(KeyEvent(key=Key.FN_Q))
+        assert s.snapshot().screen is Screen.SHUTTING_DOWN, (
+            "Fn+Q should switch UI to SHUTTING_DOWN"
+        )
+        assert g.is_armed() is True
+        # Teardown
+        g.cancel(source="teardown")
+        await asyncio.sleep(0)
+
+    asyncio.run(_run())
+
+
+def test_router_ctrl_x_works_on_unconfigured_station():
+    """Operators must be able to shut down regardless of station
+    configuration state. Power-off is a life-cycle gesture, not a
+    radio-operation gesture; it should never be gated by tx_allowed."""
+    # Station with empty callsign → tx_allowed is False
+    s = UIState("", "", False, "miles")
+    s.set_screen(Screen.SETUP)
+    assert s.snapshot().tx_allowed is False
+
+    async def _cb():
+        pass
+
+    async def _run():
+        g = ShutdownGesture(s, asyncio.get_running_loop(), _cb,
+                            hold_seconds=10.0)
+        r = _router_with_gesture(s, g)
+        r.handle(KeyEvent(key=Key.FN_Q))
+        assert g.is_armed() is True, (
+            "Fn+Q should work even when tx_allowed=False — "
+            "shutdown is a life-cycle action, not a TX action"
+        )
+        g.cancel(source="teardown")
+        await asyncio.sleep(0)
+
+    asyncio.run(_run())
+
+
+def test_router_esc_on_shutting_down_cancels_gesture():
+    """The README and on-device behaviour both say: Esc cancels.
+
+    From any screen state where the gesture is armed (which always
+    means screen == SHUTTING_DOWN), Esc rolls back to the previous
+    screen and stops the countdown.
+    """
+    s = _state(screen=Screen.HEARD)
+
+    async def _cb():
+        pass
+
+    async def _run():
+        g = ShutdownGesture(s, asyncio.get_running_loop(), _cb,
+                            hold_seconds=10.0)
+        r = _router_with_gesture(s, g)
+        r.handle(KeyEvent(key=Key.FN_Q))
+        assert s.snapshot().screen is Screen.SHUTTING_DOWN
+        # Now Esc cancels
+        r.handle(KeyEvent(key=Key.ESC))
+        await asyncio.sleep(0)  # let the cancelled task settle
+        assert g.is_armed() is False
+        # UI rolled back to HEARD
+        assert s.snapshot().screen is Screen.HEARD
+
+    asyncio.run(_run())
+
+
+def test_router_ctrl_c_on_shutting_down_also_cancels():
+    """Ctrl-C is already the "cancel" alias for Esc elsewhere in the
+    UI. Behaviour on SHUTTING_DOWN should be consistent — both keys
+    cancel."""
+    s = _state(screen=Screen.INBOX)
+
+    async def _cb():
+        pass
+
+    async def _run():
+        g = ShutdownGesture(s, asyncio.get_running_loop(), _cb,
+                            hold_seconds=10.0)
+        r = _router_with_gesture(s, g)
+        r.handle(KeyEvent(key=Key.FN_Q))
+        assert g.is_armed() is True
+        # Ctrl-C cancels just like Esc
+        r.handle(KeyEvent(key=Key.CTRL_C))
+        await asyncio.sleep(0)
+        assert g.is_armed() is False
+
+    asyncio.run(_run())
+
+
+def test_router_other_keys_on_shutting_down_are_ignored():
+    """While the countdown is running, miscellaneous keystrokes must
+    NOT cancel — only Esc/Ctrl-C do. This prevents an operator who
+    happens to be typing when they fire Fn+Q from accidentally
+    cancelling the shutdown they just requested via a stray keypress."""
+    s = _state(screen=Screen.HOME)
+
+    async def _cb():
+        pass
+
+    async def _run():
+        g = ShutdownGesture(s, asyncio.get_running_loop(), _cb,
+                            hold_seconds=10.0)
+        r = _router_with_gesture(s, g)
+        r.handle(KeyEvent(key=Key.FN_Q))
+        assert g.is_armed() is True
+        # A bunch of non-cancel keys
+        for k in (Key.UP, Key.DOWN, Key.LEFT, Key.RIGHT, Key.TAB,
+                  Key.SPACE, Key.ENTER):
+            r.handle(KeyEvent(key=k))
+            assert g.is_armed() is True, (
+                f"key {k} should NOT cancel — only Esc/Ctrl-C do"
+            )
+        g.cancel(source="teardown")
+        await asyncio.sleep(0)
+
+    asyncio.run(_run())
+
+
+def test_router_ctrl_x_when_no_gesture_is_quiet_no_op():
+    """If the router is constructed without a shutdown gesture (e.g.
+    in a test fixture that doesn't exercise shutdown), Fn+Q is a
+    quiet no-op rather than a crash. Defensive."""
+    s = _state()
+    r = InputRouter(
+        s,
+        save_config=lambda *a, **kw: True,
+        emergency_bypass=lambda: True,
+        # NO shutdown_gesture
+    )
+    # Should not raise
+    r.handle(KeyEvent(key=Key.FN_Q))
+    # And should not have switched screens
+    assert s.snapshot().screen is Screen.HOME
+
+
+def test_router_ctrl_x_idempotent_with_existing_button_arm():
+    """If buttons already armed the shutdown, pressing keyboard Fn+Q
+    is a no-op (returns False from the gesture). The shared gesture
+    handles the deduplication, the router just calls arm() blindly."""
+    s = _state(screen=Screen.HOME)
+
+    async def _cb():
+        pass
+
+    async def _run():
+        g = ShutdownGesture(s, asyncio.get_running_loop(), _cb,
+                            hold_seconds=10.0)
+        r = _router_with_gesture(s, g)
+        # Simulate buttons arming first
+        g.arm(source="buttons")
+        assert g.is_armed() is True
+        # Keyboard Fn+Q — should be quietly absorbed (no second task)
+        r.handle(KeyEvent(key=Key.FN_Q))
+        # Still armed (didn't crash, didn't duplicate)
+        assert g.is_armed() is True
+        g.cancel(source="teardown")
+        await asyncio.sleep(0)
+
+    asyncio.run(_run())
