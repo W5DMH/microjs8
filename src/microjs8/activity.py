@@ -156,6 +156,93 @@ class DirectedActivityLog:
             self._buf.append(entry)
         return entry
 
+    def record_in_supersede(
+        self,
+        *,
+        from_call: str,
+        verb: str,
+        body: str = "",
+        snr_db: Optional[int] = None,
+        freq_hz: Optional[float] = None,
+        at_unix: Optional[float] = None,
+        recency_s: float = 60.0,
+        for_group: Optional[str] = None,
+    ) -> DirectedActivityEntry:
+        """Record an inbound entry, REPLACING a prior matching entry
+        when the new body extends it.
+
+        Use this from the assembler's multi-frame emit path when the
+        same wire message produced an earlier single-frame
+        dispatch — instead of appending a duplicate-with-extension
+        row, we replace the original entry in place so the operator
+        sees ONE row that gets richer as continuations arrive.
+
+        Match rule (must all hold for replacement):
+          - prior entry is INBOUND from the same ``from_call``
+          - prior entry's ``verb`` matches the new ``verb``
+          - prior entry's ``at_unix`` is within ``recency_s`` seconds
+            of the new entry (default 60 s — comfortably longer than
+            the non-buffered reassembly timeout of 40 s)
+          - the NEW ``body`` STARTS WITH (or equals) the prior body
+            — i.e., the new body extends the old without contradicting
+
+        Metadata preservation:
+          - SNR and freq_hz from the new call override only when
+            non-None. The reassembled emit doesn't carry SNR (frame-
+            level metadata is lost during assembly), so it passes
+            ``snr_db=None``; this clause keeps the SNR from the
+            original single-frame dispatch.
+
+        If no matching prior entry is found, behaves like
+        ``record_in`` and returns the appended new entry.
+        """
+        now = at_unix if at_unix is not None else time.time()
+        new_call = from_call.upper() if from_call else ""
+        new_verb = verb.upper() if verb else ""
+        new_group = for_group.upper() if for_group else None
+        with self._lock:
+            # Scan backwards through the ring buffer. Stop early when
+            # entries fall outside the recency window — older entries
+            # can't be a candidate match.
+            for i in range(len(self._buf) - 1, -1, -1):
+                e = self._buf[i]
+                if now - e.at_unix > recency_s:
+                    break
+                if e.direction is not Direction.IN:
+                    continue
+                if e.other_call != new_call:
+                    continue
+                if e.verb != new_verb:
+                    continue
+                if not body.startswith(e.body):
+                    continue
+                replacement = DirectedActivityEntry(
+                    at_unix=now,
+                    direction=Direction.IN,
+                    other_call=new_call,
+                    verb=new_verb,
+                    body=body,
+                    snr_db=snr_db if snr_db is not None else e.snr_db,
+                    freq_hz=freq_hz if freq_hz is not None else e.freq_hz,
+                    for_group=new_group if new_group is not None else e.for_group,
+                )
+                self._buf[i] = replacement
+                return replacement
+
+            # No match — fall back to append-as-new.
+            entry = DirectedActivityEntry(
+                at_unix=now,
+                direction=Direction.IN,
+                other_call=new_call,
+                verb=new_verb,
+                body=body,
+                snr_db=snr_db,
+                freq_hz=freq_hz,
+                for_group=new_group,
+            )
+            self._buf.append(entry)
+            return entry
+
     def record_out(
         self,
         *,

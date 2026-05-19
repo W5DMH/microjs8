@@ -1224,15 +1224,38 @@ class MicroJS8App:
             # multi-frame ("YES MSG ID 57") and the operator wants
             # the complete body in the activity log. Those get
             # logged from _dispatch_assembled when emitted.
+            # Directed HEARTBEAT special case (May 2026 UX fix):
+            # don't immediately log directed HEARTBEATs to the
+            # DIRECTED chat view. JS8Call follows a HEARTBEAT with a
+            # multi-frame continuation carrying SNR/GRID info, and
+            # the operator wants to see ONE row with the full payload
+            # rather than two rows ("HEARTBEAT" then "HEARTBEAT FN42").
+            # The continuation arrives via _dispatch_assembled, which
+            # logs the full body via record_in_supersede (Phase 14a).
+            # Broadcast heartbeats (to=@HB) are excluded from buffering
+            # by reassembly.py so they don't reach this path; they
+            # populate the HEARD list directly.
+            is_directed_heartbeat = (
+                parsed.kind is FrameKind.HEARTBEAT
+                and parsed.to_call
+                and not parsed.to_call.startswith("@")
+            )
             try:
+                # Phase 14a bug fix: previously filtered to FrameKind.ACK
+                # only, which missed HEARTBEAT replies and other single-
+                # frame directed responses. Log ALL non-buffered single-
+                # frame frames addressed to us, EXCEPT directed HBs
+                # (deferred to the continuation; see above).
                 if (
                     parsed.is_for_us
-                    and parsed.kind is FrameKind.ACK
                     and not is_buffered_protocol_frame(parsed)
+                    and not is_directed_heartbeat
                 ):
                     self._log_directed_in(parsed)
             except Exception:
-                _log.exception("directed-activity log (inbound ACK) failed")
+                _log.exception(
+                    "directed-activity log (inbound directed) failed"
+                )
 
             # Phase 11: auto-respond to group SNR?/GRID? queries.
             # Fires only when the frame was addressed to a group we
@@ -2469,14 +2492,62 @@ class MicroJS8App:
         ):
             body = body[len(verb_upper):].lstrip()
 
+        # Phase 14a: assembled frames carry to_call too — when it
+        # starts with '@' and isn't an implicit broadcast, tag the
+        # entry with the group name so the DIRECTED renderer shows
+        # the group affiliation (K1ABC@@ARESGA-style label).
+        asm_to = (assembled.to_call or "")
+        if (
+            asm_to.startswith("@")
+            and asm_to.upper() not in ("@ALLCALL", "@HB")
+        ):
+            asm_for_group = asm_to
+        else:
+            asm_for_group = None
+
         try:
-            self._directed_activity.record_in(
-                from_call=assembled.from_call or "",
-                verb=verb,
-                body=body,
-                snr_db=None,
-                freq_hz=float(assembled.offset_hz),
-            )
+            # Phase 14a: NON-BUFFERED messages (YES/NO/INFO/GRID/
+            # STATUS/HEARING/free text — anything whose verb isn't
+            # in _BUFFERED_VERBS): the single-frame path in
+            # _on_decoded_frame ALREADY logged an entry when frame 1
+            # arrived. The reassembler's emit arrives later (after
+            # the non-buffered timeout for multi-frame) carrying
+            # the same or extended content. Using record_in here
+            # would duplicate the entry — operator would see
+            # "K1ABC SNR?" twice in the chat log, or "K1ABC YES"
+            # plus a separate "K1ABC YES MSG ID 66". Always use
+            # supersede so the assembled emit REPLACES the single-
+            # frame entry: same content → effectively no-op (the
+            # W5DMH bench May 2026 SNR? duplication-bug fix);
+            # extended content → the entry now shows the full body.
+            # record_in_supersede falls back to record_in if it
+            # can't find a matching recent entry, so messages that
+            # bypassed the single-frame path (rare) still get logged.
+            #
+            # BUFFERED commands (QUERY MSGS, QUERY MSG <id>, CMD,
+            # MSG, MSG TO:, ">" relay): the single-frame path
+            # explicitly skips logging these (via the
+            # ``is_buffered_protocol_frame`` guard), so the
+            # assembled path is the FIRST and ONLY logger.
+            # record_in is correct here.
+            if not assembled.was_buffered_command:
+                self._directed_activity.record_in_supersede(
+                    from_call=assembled.from_call or "",
+                    verb=verb,
+                    body=body,
+                    snr_db=None,
+                    freq_hz=float(assembled.offset_hz),
+                    for_group=asm_for_group,
+                )
+            else:
+                self._directed_activity.record_in(
+                    from_call=assembled.from_call or "",
+                    verb=verb,
+                    body=body,
+                    snr_db=None,
+                    freq_hz=float(assembled.offset_hz),
+                    for_group=asm_for_group,
+                )
         except Exception:
             _log.exception("activity.record_in (assembled) raised")
             return

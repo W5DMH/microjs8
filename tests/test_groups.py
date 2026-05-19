@@ -387,13 +387,41 @@ def test_record_in_uppercases_for_group():
     assert entry.for_group == "@ARESGA"
 
 
-# Note: record_in_supersede() tests are deferred to Phase 14. They
-# require DirectedActivityLog.record_in_supersede(), which is called
-# from app.py's multi-frame reassembly handler — both pieces land
-# in Phase 14 (compose enhancements + directed log view). The
-# supersede helper IS in protocol/reassembly.py (ported in Phase 9),
-# but the activity-log side gets wired up with the rest of the
-# directed-log work.
+# ── record_in_supersede behavior (Phase 14a) ─────────────────────────
+
+
+def test_record_in_supersede_preserves_for_group_when_new_is_none():
+    """Multi-frame reassembly path: original entry had for_group set,
+    continuation has None → keep the group label."""
+    log = DirectedActivityLog(max_entries=10)
+    log.record_in(
+        from_call="K1ABC", verb="MSG", body="HELLO", at_unix=1000.0,
+        snr_db=-9, for_group="@EMCOMM",
+    )
+    log.record_in_supersede(
+        from_call="K1ABC", verb="MSG", body="HELLO WORLD", at_unix=1005.0,
+        snr_db=None, for_group=None,  # reassembled emit
+    )
+    snap = log.snapshot()
+    assert len(snap) == 1
+    assert snap[0].body == "HELLO WORLD"
+    assert snap[0].for_group == "@EMCOMM"  # preserved
+    assert snap[0].snr_db == -9
+
+
+def test_record_in_supersede_new_for_group_overrides():
+    """If the new call provides for_group, that wins."""
+    log = DirectedActivityLog(max_entries=10)
+    log.record_in(
+        from_call="K1ABC", verb="MSG", body="HI", at_unix=1000.0,
+        for_group=None,
+    )
+    log.record_in_supersede(
+        from_call="K1ABC", verb="MSG", body="HI THERE", at_unix=1005.0,
+        for_group="@EMCOMM",
+    )
+    snap = log.snapshot()
+    assert snap[0].for_group == "@EMCOMM"
 
 
 # ── DIRECTED renderer: K1ABC@@ARESGA label ───────────────────────────
