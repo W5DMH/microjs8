@@ -62,18 +62,48 @@ def test_check_display_warns_when_no_proc_fb(tmp_path: Path):
 
 
 def test_check_display_warns_when_no_st7789v_entry(tmp_path: Path):
-    """/proc/fb exists but has no fb_st7789v line — typical on dev hosts."""
+    """/proc/fb exists but has no fb_st7789v line, AND no /dev/spidev
+    available — typical on dev hosts. Should produce a WARN."""
     proc_fb = tmp_path / "fb"
     proc_fb.write_text("0 fb_drm_hdmi\n")
     sysfs = tmp_path / "sysfs"
     sysfs.mkdir()
-    checks = check_display(proc_fb=proc_fb, sysfs_root=sysfs)
+    # Phase 18: inject a non-existent SPI path so the SPI-fallback
+    # branch doesn't fire on hosts where /dev/spidev0.0 happens to
+    # exist (e.g. a CardputerZero that has SPI enabled).
+    nonexistent_spi = tmp_path / "no_spidev"
+    checks = check_display(
+        proc_fb=proc_fb, sysfs_root=sysfs,
+        spi_device_path=nonexistent_spi,
+    )
     assert len(checks) == 1
     assert checks[0].status == STATUS_WARN
     assert "fb_st7789v" in checks[0].title
     # The detail should include what /proc/fb actually contains so
     # the operator can see the mismatch.
     assert "fb_drm_hdmi" in (checks[0].detail or "")
+
+
+def test_check_display_ok_when_spi_present_but_no_fbdev(tmp_path: Path):
+    """Phase 18: when there's no fb_st7789v but /dev/spidev0.0 exists,
+    the daemon will use the userspace SPI driver. This is a
+    supported config, not a problem — should report STATUS_OK."""
+    proc_fb = tmp_path / "fb"
+    proc_fb.write_text("0 fb_drm_hdmi\n")
+    sysfs = tmp_path / "sysfs"
+    sysfs.mkdir()
+    # Create a fake spidev node — a regular file is fine since we
+    # only check exists(), not the device-file type.
+    fake_spi = tmp_path / "spidev0.0"
+    fake_spi.write_text("")
+
+    checks = check_display(
+        proc_fb=proc_fb, sysfs_root=sysfs,
+        spi_device_path=fake_spi,
+    )
+    assert len(checks) == 1
+    assert checks[0].status == STATUS_OK
+    assert "SPI backend will be used" in checks[0].title
 
 
 def test_check_display_fails_on_unexpected_dimensions(tmp_path: Path):

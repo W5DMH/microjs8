@@ -94,6 +94,7 @@ def check_display(
     proc_fb: Optional[Path] = None,
     sysfs_root: Optional[Path] = None,
     name: str = "fb_st7789v",
+    spi_device_path: Optional[Path] = None,
 ) -> list[Check]:
     """Probe the framebuffer the Phase 5 ``DisplayDevice`` will use.
 
@@ -101,6 +102,12 @@ def check_display(
     /sys/class/graphics" — these resolve to the same constants that
     ``ui.display.DisplayDevice.open`` uses, so any divergence between
     the daemon and the doctor would itself surface as an FAIL here.
+
+    Phase 18: ``spi_device_path`` lets tests inject a non-existent
+    path so the SPI fallback branch doesn't fire when the host
+    happens to have /dev/spidev0.0 (e.g. a CardputerZero that
+    already had SPI enabled via raspi-config). Production calls
+    leave this as None and the default /dev/spidev0.0 is used.
     """
     # Lazy imports keep the doctor module importable on hosts where
     # numpy / Pillow / etc. aren't present (the apt deps haven't
@@ -115,6 +122,7 @@ def check_display(
 
     proc_fb_path = proc_fb if proc_fb is not None else DEFAULT_PROC_FB
     sysfs_path = sysfs_root if sysfs_root is not None else DEFAULT_SYSFS_ROOT
+    spidev_path = spi_device_path if spi_device_path is not None else Path("/dev/spidev0.0")
     if name == "fb_st7789v":
         name = DEFAULT_FB_NAME      # match daemon's actual default
 
@@ -145,7 +153,6 @@ def check_display(
         # userspace driver path is viable. If /dev/spidev0.0 exists,
         # the daemon will use SpiDisplayDevice instead — that's a
         # supported configuration, not a problem.
-        spidev_path = Path("/dev/spidev0.0")
         if spidev_path.exists():
             checks.append(Check(
                 subsystem="display",
