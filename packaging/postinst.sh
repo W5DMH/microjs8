@@ -139,6 +139,94 @@ WRAPEOF
             chmod 0755 /usr/local/bin/microjs8-doctor
         fi
 
+        # ── 7.5. gpsd configuration (Phase 18.3) ────────────────────
+        # If gpsd is installed (it's in Recommends, so usually is),
+        # ensure it's NOT configured to auto-grab USB serial devices.
+        # The default Debian config has USBAUTO=true, which causes
+        # gpsd to open every CP210x device looking for NMEA — and
+        # on CP210x chips, opening the port asserts RTS, keying the
+        # radio's PTT. We saw this failure mode on PI-2W-TEST during
+        # bring-up (May 20, 2026).
+        #
+        # We only edit if:
+        #   - the file exists (gpsd is installed)
+        #   - the value differs from what we want (so we don't
+        #     gratuitously rewrite the file on every install)
+        #
+        # We back up to .pre-microjs8-X.Y.Z so the operator can
+        # revert if they had a custom GPS setup we just stomped.
+        if [ -r /etc/default/gpsd ]; then
+            need_change=0
+            if grep -q '^USBAUTO="true"' /etc/default/gpsd; then
+                need_change=1
+            fi
+            # Also catch the empty-DEVICES case which combined with
+            # USBAUTO=true means "grab anything".
+            if grep -q '^DEVICES=""' /etc/default/gpsd; then
+                need_change=1
+            fi
+            if [ "$need_change" = "1" ]; then
+                ts="$(date +%Y%m%d-%H%M%S)"
+                cp /etc/default/gpsd "/etc/default/gpsd.pre-microjs8-${ts}"
+                sed -i 's|^USBAUTO=.*|USBAUTO="false"|' /etc/default/gpsd
+                # Constrain DEVICES to the u-blox-style CDC-ACM path
+                # if it's currently empty. Operators with non-default
+                # GPS hardware should re-edit after install.
+                if grep -q '^DEVICES=""' /etc/default/gpsd; then
+                    sed -i 's|^DEVICES=.*|DEVICES="/dev/ttyACM0"|' /etc/default/gpsd
+                fi
+                echo "microjs8: edited /etc/default/gpsd to set USBAUTO=false (backup: /etc/default/gpsd.pre-microjs8-${ts})"
+                # Restart gpsd so the new config takes effect — but only
+                # if it's currently running; don't start it just to
+                # restart it.
+                if [ -d /run/systemd/system ] && systemctl is-active gpsd.socket >/dev/null 2>&1; then
+                    systemctl restart gpsd.socket gpsd.service || true
+                fi
+            fi
+        fi
+
+        # ── 7.6. udev rules (Phase 18.3) ────────────────────────────
+        # Reload udev rules so 99-microjs8-digirig.rules takes
+        # effect immediately — operators shouldn't need to reboot
+        # to get /dev/digirig and the ID_GPSD_IGNORE flag.
+        if command -v udevadm >/dev/null 2>&1; then
+            udevadm control --reload-rules || true
+            udevadm trigger || true
+        fi
+
+        # ── 7.7. Reset any latched CP210x devices (Phase 18.3) ──────
+        # If the Digirig was previously opened by gpsd or another
+        # process and left in RTS-high state, the chip stays latched
+        # until USB device reset. Cycle the authorized flag on every
+        # CP210x device to clear any stale state from the previous
+        # install state. This is best-effort: if no Digirig is
+        # plugged in, the loop is a no-op.
+        for cp210x in /sys/bus/usb/devices/*/idVendor; do
+            if [ ! -r "$cp210x" ]; then
+                continue
+            fi
+            if [ "$(cat "$cp210x" 2>/dev/null)" = "10c4" ]; then
+                dev_dir="$(dirname "$cp210x")"
+                if [ "$(cat "$dev_dir/idProduct" 2>/dev/null)" = "ea60" ]; then
+                    if [ -w "$dev_dir/authorized" ]; then
+                        echo 0 > "$dev_dir/authorized" 2>/dev/null || true
+                        sleep 0.2
+                        echo 1 > "$dev_dir/authorized" 2>/dev/null || true
+                    fi
+                fi
+            fi
+        done
+
+        # ── 7.8. rigctld.service (Phase 18.3) ───────────────────────
+        # Enable rigctld.service so CAT-mode radios (QDX, G90+DigiRig)
+        # get PTT support. The launcher script (installed at
+        # /usr/local/bin/microjs8-rigctld-launcher) decides per-radio
+        # whether to actually exec rigctld; for digirig-rts-only it
+        # exits 0 without starting rigctld.
+        if [ -d /run/systemd/system ] && [ -f /lib/systemd/system/rigctld.service ]; then
+            systemctl enable rigctld.service >/dev/null 2>&1 || true
+        fi
+
         # ── 8. systemd ──────────────────────────────────────────────
         # Only act on systemd if we're actually running under
         # systemd (not in a chroot, container without an init, etc).

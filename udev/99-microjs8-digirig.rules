@@ -36,5 +36,21 @@
 # Match: USB serial adapter, Silicon Labs CP2102, on a tty interface.
 # The CP2102 enumerates as a single CDC-ACM-like interface; no
 # ID_USB_INTERFACE_NUM filter needed (vs the QDX which has two).
+#
+# ENV{ID_GPSD_IGNORE}="1" tells gpsd's hotplug script to leave this
+# device alone — gpsd's default udev rule (60-gpsd.rules in the
+# gpsd package) would otherwise grab any USB serial device looking
+# for NMEA. On a CP210x this is catastrophic: gpsd opens with RTS
+# asserted high, the optoisolator keys the radio's PTT, and the
+# CP210x chip latches RTS high until a USB device reset. We don't
+# want gpsd touching the Digirig under any circumstances — gpsd
+# should only ever talk to actual GPS receivers (the u-blox CDC
+# ACM on /dev/ttyACM0).
+#
+# ENV{ID_MM_DEVICE_IGNORE}="1" does the same for ModemManager,
+# which also probes USB serial devices for AT command responses.
+# Same failure mode as gpsd: probing involves opening the port
+# which asserts RTS on CP210x.
 SUBSYSTEM=="tty", ATTRS{idVendor}=="10c4", ATTRS{idProduct}=="ea60", \
-    SYMLINK+="digirig", GROUP="dialout", MODE="0660"
+    SYMLINK+="digirig", GROUP="dialout", MODE="0660", \
+    ENV{ID_GPSD_IGNORE}="1", ENV{ID_MM_DEVICE_IGNORE}="1"

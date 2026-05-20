@@ -108,6 +108,10 @@ class MicroJS8App:
         self._stop = asyncio.Event()
         self._ui_state: Optional[UIState] = None
         self._render_thread: Optional[RenderThread] = None
+        # Reference to the asyncio event loop, captured at run() start
+        # so background threads can bounce work back via
+        # call_soon_threadsafe / call_later. None until run() executes.
+        self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._shutdown_gesture: Optional[ShutdownGesture] = None
         self._backlight: Optional[Backlight] = None
         self._battery_reader: Optional[BatteryReader] = None
@@ -182,6 +186,13 @@ class MicroJS8App:
 
     async def run(self) -> None:
         loop = asyncio.get_running_loop()
+        # Store the loop on self so background threads (HB single-shot
+        # completion, auto-respond scheduling, etc.) can use
+        # call_soon_threadsafe / call_later to bounce work back onto
+        # the asyncio thread. Without this assignment,
+        # `_hb_single_complete` raises AttributeError when HB mode is
+        # set to SINGLE and the beacon completes.
+        self._loop = loop
 
         for sig in (signal.SIGTERM, signal.SIGINT):
             loop.add_signal_handler(sig, self.request_stop)
@@ -2162,9 +2173,22 @@ class MicroJS8App:
     def _hb_single_complete(self) -> None:
         """SINGLE-mode beacon completion callback. Runs on the beacon
         thread. Bounce into the asyncio loop to flip hb_mode back to
-        OFF cleanly."""
+        OFF cleanly.
+
+        If the asyncio loop isn't running yet (e.g. beacon completed
+        during a teardown race), skip the bounce — the daemon is on
+        its way out and the UI state will be cleaned up by the
+        shutdown path anyway.
+        """
+        loop = self._loop
+        if loop is None:
+            _log.debug(
+                "hb single-shot complete but asyncio loop not available; "
+                "skipping hb_mode revert (likely during shutdown)"
+            )
+            return
         try:
-            self._loop.call_soon_threadsafe(self._hb_revert_to_off)
+            loop.call_soon_threadsafe(self._hb_revert_to_off)
         except Exception:
             _log.exception("hb single-shot completion bounce failed")
 

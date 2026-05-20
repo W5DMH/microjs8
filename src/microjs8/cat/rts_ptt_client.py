@@ -82,14 +82,26 @@ class RtsPttClient:
     # ── Lifecycle ───────────────────────────────────────────────────
 
     def open(self) -> None:
-        """Open the serial port, RTS de-asserted (PTT released).
+        """Open the serial port, all modem control lines de-asserted.
 
         Raises ``RtsPttError`` on failure. Idempotent: calling twice
         is a no-op (does NOT re-open).
+
+        Phase 18.3 hardening: pyserial's ``self._serial.rts = False``
+        after open() does not reliably propagate to the CP210x kernel
+        driver — observed on RPi OS Bookworm 6.12.x with Silicon Labs
+        CP2102N (the Digirig's USB-UART chip). Symptom: the chip
+        latches RTS high from the open() syscall and ``.rts = False``
+        is a no-op. Result: radio stuck in TX until USB device reset.
+
+        Mitigation: call ``ioctl(TIOCMSET, 0)`` directly on the file
+        descriptor — this is the lowest-level modem-control primitive
+        the kernel exposes and bypasses all of pyserial's state
+        machine. Confirmed to work on this hardware by direct test.
         """
         if self._opened:
             return
-        # Lazy import — host-side tests don't need pyserial installed.
+        # Lazy imports — host-side tests don't need pyserial installed.
         try:
             import serial  # type: ignore[import-not-found]
         except ImportError as exc:
@@ -107,18 +119,20 @@ class RtsPttClient:
                 # control and we can't drive PTT via RTS toggling.
                 rtscts=False,
                 # Default these to False so the line state is
-                # predictable from the moment the port opens. Linux
-                # briefly asserts RTS high during open() before our
-                # first write — this is a known DigiRig-community
-                # behavior we can't avoid (the optoisolator briefly
-                # keys PTT for a few ms during startup).
+                # predictable. We still need the ioctl-based clear
+                # below because pyserial's properties don't always
+                # propagate on CP210x.
                 dsrdtr=False,
             )
-            # Belt-and-suspenders: assert PTT-released state right
-            # after open. Some kernels leave the line state from the
-            # previous user.
+            # Belt + suspenders #1: pyserial-level clear.
             self._serial.rts = False
             self._serial.dtr = False
+
+            # Belt + suspenders #2: bypass pyserial entirely and use
+            # the kernel's TIOCMSET ioctl to force ALL modem control
+            # lines low. This is the primitive that actually works
+            # on the CP210x driver — pyserial's properties don't.
+            self._force_clear_modem_lines()
         except Exception as exc:
             self._serial = None
             raise RtsPttError(
@@ -127,25 +141,75 @@ class RtsPttClient:
 
         self._opened = True
         _log.info(
-            "RTS-PTT serial port opened: %s (baudrate=%d, rtscts=False)",
+            "RTS-PTT serial port opened: %s (baudrate=%d, rtscts=False, "
+            "modem lines force-cleared via ioctl)",
             self._port, self._baudrate,
         )
+
+    def _force_clear_modem_lines(self) -> None:
+        """Drive every modem control line (RTS, DTR, etc.) low via ioctl.
+
+        This bypasses pyserial entirely and writes the kernel's
+        ``TIOCMSET`` register directly. Used in open() and close() to
+        defeat the CP210x's known habit of latching RTS high across
+        pyserial property writes.
+
+        Failure is non-fatal because we're called from close() paths
+        where the caller wants cleanup to continue even if individual
+        steps fail (USB unplug, fd already closed, etc.).
+        """
+        if self._serial is None:
+            return
+        try:
+            import fcntl
+            import struct
+            import termios
+        except ImportError as exc:
+            # On non-Linux hosts (CI dev laptop) these may not exist
+            # in the form we expect. Log and continue — the test path
+            # injects fakes so it never reaches here in practice.
+            _log.debug(
+                "ioctl-based modem-line clear unavailable: %s", exc,
+            )
+            return
+        try:
+            # TIOCMSET with all-zero bitmask = drive every line low.
+            zero = struct.pack("I", 0)
+            fcntl.ioctl(self._serial.fileno(), termios.TIOCMSET, zero)
+        except Exception as exc:
+            # Don't propagate — close() callers must complete the
+            # cleanup regardless. The pyserial-level .rts = False
+            # ran already so we're at worst no-worse-off than before
+            # this defense was added.
+            _log.debug(
+                "TIOCMSET ioctl failed (non-fatal): %s", exc,
+            )
 
     def close(self) -> None:
         """Close the port, releasing PTT first as a safety measure.
 
         Idempotent. Safe to call from shutdown paths even if open()
         raised.
+
+        Phase 18.3 hardening: clear modem control lines via ioctl
+        BEFORE pyserial's close() runs. The kernel close path doesn't
+        reliably drop RTS on CP210x even with HUPCL set, leaving the
+        chip latched high. ioctl(TIOCMSET, 0) writes the line state
+        register directly, which the chip honors.
         """
         if not self._opened:
             return
         # Make absolutely sure PTT is released before we close — the
         # kernel may leave RTS asserted in some edge cases otherwise.
         if self._serial is not None:
+            # First: pyserial-level (in case the ioctl path fails).
             try:
                 self._serial.rts = False
+                self._serial.dtr = False
             except Exception:
-                _log.exception("failed to release RTS during close")
+                _log.exception("failed to release RTS/DTR via pyserial during close")
+            # Then: ioctl-level (the one that actually works on CP210x).
+            self._force_clear_modem_lines()
             try:
                 self._serial.close()
             except Exception:
@@ -183,15 +247,23 @@ class RtsPttClient:
         Raises ``RtsPttError`` on failure. Always-safe in the sense
         that calling when already-off is fine — the kernel writes
         the line state regardless of current state.
+
+        Phase 18.3: uses ioctl-based clearing because pyserial's
+        ``.rts = False`` does not reliably propagate to the CP210x
+        driver. See ``_force_clear_modem_lines`` for context.
         """
         if not self._opened or self._serial is None:
             raise RtsPttError(
                 f"RTS-PTT port {self._port} is not open"
             )
         try:
+            # pyserial-level (no-op on chips where it works, harmless on chips
+            # where it doesn't).
             self._serial.rts = False
         except Exception as exc:
-            raise RtsPttError(f"RTS release failed: {exc}") from exc
+            raise RtsPttError(f"RTS release (pyserial) failed: {exc}") from exc
+        # ioctl-level — the one that actually drives the CP210x register.
+        self._force_clear_modem_lines()
 
     # ── Stub CAT operations (RTS-only radios have no CAT) ───────────
     # These exist for API symmetry with RigctlClient. The factory

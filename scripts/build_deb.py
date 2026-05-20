@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 import re
 import shutil
 import subprocess
@@ -60,10 +61,27 @@ APP_PATH = f"{INSTALL_PREFIX}/applications"
 SERVICE_PATH = "lib/systemd/system"
 ETC_PATH = "etc/microjs8"
 
+# Phase 18.3 — additional install paths for udev rules, rigctld helpers,
+# and the gfsk8 binary extension.
+UDEV_RULES_PATH = "lib/udev/rules.d"
+LOCAL_BIN_PATH = "usr/local/bin"
+# Where the system python looks for native extensions on Bookworm.
+# Matches the path used by Debian's python3-* packages.
+PYTHON_DIST_PACKAGES = "usr/lib/python3/dist-packages"
+
+# Default locations to look for the gfsk8 .so. The build host (hf256)
+# typically has it from build.sh at /opt/microjs8/venv/...; the dev
+# host might have it elsewhere. Operators can override via
+# --gfsk8-so or by setting MICROJS8_GFSK8_SO in the environment.
+DEFAULT_GFSK8_SEARCH_PATHS = (
+    "/opt/microjs8/venv/lib/python3.11/site-packages/gfsk8.cpython-311-aarch64-linux-gnu.so",
+    "/opt/microjs8/venv/lib/python3.11/site-packages/gfsk8.cpython-311-arm-linux-gnueabihf.so",
+)
+
 PACKAGE_NAME = "microjs8"
 APP_NAME = "MicroJS8"
 BIN_NAME = "microjs8"
-ARCHITECTURE = "all"   # pure Python, no compiled artifacts
+ARCHITECTURE = "all"   # pure Python — gfsk8 .so is bundled as data
 
 
 # ── Utility ──────────────────────────────────────────────────────────
@@ -120,6 +138,50 @@ def write_with_mode(path: Path, content: str, mode: int) -> None:
     path.chmod(mode)
 
 
+def _find_gfsk8_so(explicit: Optional[Path]) -> Optional[Path]:
+    """Resolve the gfsk8 .so to bundle into the .deb.
+
+    Resolution order (first existing match wins):
+      1. ``explicit`` argument (typically from ``--gfsk8-so`` CLI)
+      2. ``$MICROJS8_GFSK8_SO`` environment variable
+      3. ``DEFAULT_GFSK8_SEARCH_PATHS`` (the build host's typical
+         venv location from build.sh)
+
+    Returns ``None`` if no candidate exists. The caller logs a
+    loud warning in that case; we don't fail the build because
+    host-side .deb builds (dev laptops without microjs8 deployed)
+    still need to produce an installable package.
+    """
+    # Caller-supplied path wins.
+    if explicit is not None:
+        explicit = explicit.expanduser().resolve()
+        if explicit.exists():
+            return explicit
+        _log.warning(
+            "--gfsk8-so %s does not exist; falling through to other paths",
+            explicit,
+        )
+
+    # Env var override.
+    env_path = os.environ.get("MICROJS8_GFSK8_SO")
+    if env_path:
+        env_path_p = Path(env_path).expanduser().resolve()
+        if env_path_p.exists():
+            return env_path_p
+        _log.warning(
+            "MICROJS8_GFSK8_SO=%s does not exist; falling through",
+            env_path,
+        )
+
+    # Default search paths (build.sh's typical install location).
+    for candidate in DEFAULT_GFSK8_SEARCH_PATHS:
+        c = Path(candidate)
+        if c.exists():
+            return c
+
+    return None
+
+
 # ── Packager ─────────────────────────────────────────────────────────
 
 
@@ -129,6 +191,7 @@ def build_deb(
     output_dir: Path,
     revision: str = "1",
     keep_staging: bool = False,
+    gfsk8_so_path: Optional[Path] = None,
 ) -> Path:
     """Build microjs8_<version>-<revision>_all.deb.
 
@@ -141,6 +204,11 @@ def build_deb(
       revision      — Debian package revision, defaults to "1".
       keep_staging  — Leave the build's staging tree on disk for
                       inspection. Useful for CI debugging.
+      gfsk8_so_path — Phase 18.3: optional explicit path to the
+                      gfsk8 .so binary extension. If None, default
+                      search paths and the MICROJS8_GFSK8_SO env
+                      var are consulted. If still not found, the
+                      .deb is built without it (warning logged).
     """
     root = repo_root()
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -238,6 +306,82 @@ def build_deb(
         _log.info("installed icon: %s", icon_dst)
     else:
         _log.warning("no icon at %s — APPLaunch tile will be blank", icon_src)
+
+    # ── 6.5. udev rule for Digirig (Phase 18.3) ─────────────────────
+    # Creates /dev/digirig symlink and tags the device so gpsd and
+    # ModemManager leave it alone. Without this:
+    #   - gpsd would auto-grab any CP210x and assert RTS at open
+    #     time, keying the radio's PTT permanently (chip-latches)
+    #   - ModemManager would probe with AT commands, briefly opening
+    #     the port and asserting RTS
+    # Both failure modes were observed during PI-2W-TEST bring-up
+    # (May 20, 2026); the rule shipped here prevents either from
+    # happening on a fresh install.
+    udev_src = root / "udev" / "99-microjs8-digirig.rules"
+    if udev_src.exists():
+        udev_dst = staging / UDEV_RULES_PATH / "99-microjs8-digirig.rules"
+        write_with_mode(udev_dst, udev_src.read_text(), 0o644)
+        _log.info("installed udev rule: %s", udev_dst)
+    else:
+        _log.warning(
+            "no udev rule at %s — install will not auto-create "
+            "/dev/digirig (operators must install it manually)",
+            udev_src,
+        )
+
+    # ── 6.6. rigctld.service + launcher (Phase 18.3) ────────────────
+    # The microjs8 daemon's CatService connects to rigctld at
+    # 127.0.0.1:4532 for CAT-mode radios (QDX, G90+DigiRig). Without
+    # this unit installed, CAT-mode radios can't be keyed; the
+    # daemon logs "CAT disconnected; cannot key PTT" and the
+    # scheduler abandons TX after 3 retries.
+    rigctld_unit_src = root / "systemd" / "rigctld.service"
+    if rigctld_unit_src.exists():
+        rigctld_unit_dst = staging / SERVICE_PATH / "rigctld.service"
+        write_with_mode(rigctld_unit_dst, rigctld_unit_src.read_text(), 0o644)
+        _log.info("installed rigctld unit: %s", rigctld_unit_dst)
+    else:
+        _log.warning(
+            "no rigctld.service at %s — CAT-mode radios won't have a "
+            "PTT service",
+            rigctld_unit_src,
+        )
+
+    launcher_src = root / "systemd" / "microjs8-rigctld-launcher"
+    if launcher_src.exists():
+        launcher_dst = staging / LOCAL_BIN_PATH / "microjs8-rigctld-launcher"
+        write_with_mode(launcher_dst, launcher_src.read_text(), 0o755)
+        _log.info("installed rigctld launcher: %s", launcher_dst)
+    else:
+        _log.warning(
+            "no rigctld launcher at %s — rigctld.service won't be "
+            "able to start",
+            launcher_src,
+        )
+
+    # ── 6.7. gfsk8 .so (Phase 18.3 — bundle native extension) ───────
+    # The JS8 modem is a C++ extension compiled separately by
+    # build.sh into a venv at /opt/microjs8/venv/.../gfsk8*.so.
+    # We copy it into the .deb so a vanilla `apt install` produces
+    # a fully-functional install — no manual scp dance required.
+    # If the .so isn't found at any expected path, we log loudly
+    # but don't fail the build — host-side .deb builds (e.g. on a
+    # dev laptop that doesn't run microjs8) should still produce
+    # an installable package, just one where TX/RX won't work.
+    gfsk8_src = _find_gfsk8_so(gfsk8_so_path)
+    if gfsk8_src is not None:
+        gfsk8_dst = staging / PYTHON_DIST_PACKAGES / gfsk8_src.name
+        gfsk8_dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(gfsk8_src, gfsk8_dst)
+        gfsk8_dst.chmod(0o644)
+        _log.info("installed gfsk8 extension: %s (from %s)", gfsk8_dst, gfsk8_src)
+    else:
+        _log.warning(
+            "no gfsk8 .so found at %s (or any default search path); "
+            "the resulting .deb will install but TX/RX will fail "
+            "with ModuleNotFoundError until gfsk8 is provided",
+            gfsk8_so_path or "<none specified>",
+        )
 
     # ── 7. Default config ───────────────────────────────────────────
     # Shipped read-only; postinst copies to the live config on first
@@ -338,6 +482,15 @@ def main(argv: Optional[list[str]] = None) -> int:
         "--quiet", "-q", action="store_true",
         help="Suppress info-level log output",
     )
+    parser.add_argument(
+        "--gfsk8-so", type=Path, default=None,
+        help=(
+            "Path to the gfsk8 .so binary extension to bundle into the .deb. "
+            "If omitted, looks at default search paths and the MICROJS8_GFSK8_SO "
+            "env var. If still not found, builds the .deb without it (TX/RX "
+            "will fail with ModuleNotFoundError until gfsk8 is provided)."
+        ),
+    )
     args = parser.parse_args(argv)
 
     logging.basicConfig(
@@ -351,6 +504,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         output_dir=args.output_dir,
         revision=args.revision,
         keep_staging=args.keep_staging,
+        gfsk8_so_path=args.gfsk8_so,
     )
     print(f"built: {deb_path}")
     return 0
