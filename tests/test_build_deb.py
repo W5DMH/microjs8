@@ -165,6 +165,43 @@ def test_python3_pip_is_in_depends(tmp_path: Path):
     assert "python3-pip" in info
 
 
+def test_python3_spidev_is_in_depends(tmp_path: Path):
+    """Phase 18: SpiDisplayDevice needs the spidev Python module.
+    Available as python3-spidev in Bookworm main."""
+    deb = _run_packager(tmp_path, version="0.0.1")
+    info = _dpkg_deb("-I", str(deb))
+    assert "python3-spidev" in info
+
+
+def test_python3_gpiozero_is_in_depends(tmp_path: Path):
+    """Phase 18: SpiDisplayDevice uses gpiozero for DC/RST/BL GPIO
+    control. Available as python3-gpiozero in Bookworm main."""
+    deb = _run_packager(tmp_path, version="0.0.1")
+    info = _dpkg_deb("-I", str(deb))
+    assert "python3-gpiozero" in info
+
+
+def test_postinst_adds_spi_and_gpio_groups(tmp_path: Path):
+    """Phase 18: the microjs8 user must be in 'spi' and 'gpio' groups
+    to access /dev/spidev0.0 and the GPIO pins for the SPI display.
+    Without these, the daemon fails to open the SPI bus."""
+    deb = _run_packager(tmp_path, version="0.0.1")
+    extract_dir = tmp_path / "extract"
+    extract_dir.mkdir()
+    subprocess.run(
+        ["dpkg-deb", "-e", str(deb), str(extract_dir)],
+        check=True, capture_output=True,
+    )
+    postinst = (extract_dir / "postinst").read_text()
+    # The supplementary group loop must include spi and gpio.
+    assert " spi " in postinst or " spi\n" in postinst or " spi;" in postinst or "spi " in postinst, (
+        "postinst doesn't add microjs8 to the 'spi' group"
+    )
+    assert "gpio" in postinst, (
+        "postinst doesn't add microjs8 to the 'gpio' group"
+    )
+
+
 def test_chrony_is_in_depends_not_recommends(tmp_path: Path):
     """Phase 17: JS8 is a time-synchronous protocol with ~250 ms slot
     boundaries. systemd-timesyncd's accuracy is borderline; chrony's

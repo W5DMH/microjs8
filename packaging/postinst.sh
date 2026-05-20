@@ -59,7 +59,12 @@ case "$1" in
         # already in is a silent no-op. Tolerate the case where a
         # group doesn't exist (e.g. on a stripped image without
         # ALSA): we don't want the install to fail.
-        for g in audio dialout video i2c input; do
+        #
+        # Phase 18: added 'spi' and 'gpio' so the daemon can drive
+        # the userspace SPI display on bare Pi installs. Both groups
+        # are created by Raspberry Pi OS; they don't exist on
+        # generic Debian, hence the existence check.
+        for g in audio dialout video i2c input spi gpio; do
             if getent group "$g" >/dev/null 2>&1; then
                 adduser microjs8 "$g" >/dev/null 2>&1 || true
             fi

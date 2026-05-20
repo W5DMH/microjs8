@@ -421,6 +421,71 @@ class DisplayDevice:
         return self._info
 
 
+# ── open_display() factory ───────────────────────────────────────────
+
+
+def open_display(
+    *,
+    fb_name: str = DEFAULT_FB_NAME,
+    proc_fb: Path = DEFAULT_PROC_FB,
+    sysfs_root: Path = DEFAULT_SYSFS_ROOT,
+    spi_device_path: Path = Path("/dev/spidev0.0"),
+):
+    """Discover and open the best available display backend.
+
+    Phase 18: tries the kernel framebuffer first (CardputerZero
+    behaviour — preserves the existing path) and falls back to the
+    userspace SPI driver if the framebuffer isn't present.
+
+    Discovery order:
+      1. fbdev named ``fb_st7789v`` in /proc/fb  →  ``DisplayDevice``
+      2. spidev node at /dev/spidev0.0           →  ``SpiDisplayDevice``
+      3. nothing usable                          →  raise RuntimeError
+
+    Either returned object exposes the ``show(image) → None`` and
+    ``close() → None`` interface that ``RenderThread`` uses, so the
+    caller can be backend-agnostic.
+
+    The reason we ALWAYS try fbdev first — even on a bare Pi where we
+    "know" it'll fail — is that the operator may have wired up an
+    alternative kernel framebuffer driver (newer panel-mipi-dbi-spi,
+    or a custom .dtbo), and we don't want to silently bypass it.
+    A failing fbdev probe is cheap (~1 ms reading /proc/fb).
+    """
+    # Try fbdev first. RuntimeError if name not in /proc/fb; OSError
+    # if open(2) or mmap(2) fails. Either way, log at INFO and try
+    # the SPI fallback — neither is fatal at this point.
+    try:
+        device = DisplayDevice.open(
+            name=fb_name, proc_fb=proc_fb, sysfs_root=sysfs_root,
+        )
+        _log.info(
+            "open_display: using kernel framebuffer fb%d (%s)",
+            device.info.index, device.info.name,
+        )
+        return device
+    except (RuntimeError, OSError) as exc:
+        _log.info(
+            "open_display: kernel framebuffer not available (%s); "
+            "trying SPI backend", exc,
+        )
+
+    # Fallback: SPI userspace driver. Import lazily to avoid pulling
+    # the module's runtime deps into the test fast path.
+    if not spi_device_path.exists():
+        raise RuntimeError(
+            f"open_display: no kernel framebuffer named {fb_name!r} AND "
+            f"no SPI device at {spi_device_path}. Either:\n"
+            f"  - install the fbtft kernel driver and add an overlay (CardputerZero), OR\n"
+            f"  - enable SPI via `sudo microjs8-enable-display` and wire the panel."
+        )
+
+    from microjs8.ui.display_spi import SpiDisplayDevice
+    device = SpiDisplayDevice.open()
+    _log.info("open_display: using userspace SPI driver (ST7789V)")
+    return device
+
+
 # ── Render thread ────────────────────────────────────────────────────
 
 
