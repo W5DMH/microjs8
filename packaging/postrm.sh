@@ -27,9 +27,27 @@ case "$1" in
         if getent group microjs8 >/dev/null 2>&1; then
             delgroup --system microjs8 >/dev/null 2>&1 || true
         fi
+
+        # Phase 17: remove the convenience symlink. We do it under
+        # 'purge' (not 'remove') because it's part of the package's
+        # state — a 'remove' should preserve operator-facing aspects
+        # in case of reinstall, but purge means "uninstall and clean
+        # up everything".
+        rm -f /usr/local/bin/microjs8-doctor
         ;;
 
-    remove|upgrade|failed-upgrade|abort-install|abort-upgrade|disappear)
+    remove)
+        # Phase 17: clean up the doctor symlink on remove. The
+        # /usr/local/bin/microjs8-doctor wrapper is created by the
+        # postinst and isn't tracked by dpkg, so it survives a plain
+        # 'remove' unless we delete it explicitly. Removing it on
+        # 'remove' (vs 'purge') matches the operator's expectation:
+        # if the package isn't installed, the command shouldn't
+        # work — a dangling symlink would error confusingly.
+        rm -f /usr/local/bin/microjs8-doctor
+        ;;
+
+    upgrade|failed-upgrade|abort-install|abort-upgrade|disappear)
         ;;
 
     *)

@@ -119,6 +119,269 @@ def test_control_fields_are_correct(tmp_path: Path):
     assert int(m.group(1)) > 100, "Installed-Size should be at least ~100 KiB"
 
 
+# ── Phase 17: dependency-list corrections ───────────────────────────
+
+
+def test_python3_sounddevice_not_in_depends(tmp_path: Path):
+    """Phase 17: python3-sounddevice is not packaged for Bookworm
+    (verified May 2026). Declaring it as a Depends causes apt to
+    refuse the install on any clean Bookworm host. We moved
+    sounddevice to a postinst pip-install instead.
+
+    Note: the Description field references python3-sounddevice to
+    explain WHY we don't depend on it — so this test only checks
+    the Depends field specifically, not the whole control output.
+    """
+    deb = _run_packager(tmp_path, version="0.0.1")
+    info = _dpkg_deb("-I", str(deb))
+    # Extract just the Depends block (multi-line continuation form)
+    import re
+    depends_block = re.search(
+        r"(?m)^\s*Depends:\s*(.+?)(?=^\s*[A-Z][a-z]+:|\Z)",
+        info, re.DOTALL,
+    )
+    assert depends_block, f"could not find Depends in:\n{info}"
+    depends_text = depends_block.group(1)
+    assert "python3-sounddevice" not in depends_text, (
+        "python3-sounddevice should not be a Depends in Phase 17+ — "
+        "it's not in Bookworm apt and breaks bare-Pi installs"
+    )
+
+
+def test_libportaudio2_is_in_depends(tmp_path: Path):
+    """Phase 17: libportaudio2 (the C library that sounddevice wraps)
+    IS in Bookworm apt and must be installed for the pip-installed
+    sounddevice to work at runtime."""
+    deb = _run_packager(tmp_path, version="0.0.1")
+    info = _dpkg_deb("-I", str(deb))
+    assert "libportaudio2" in info
+
+
+def test_python3_pip_is_in_depends(tmp_path: Path):
+    """Phase 17: the postinst calls pip to install sounddevice from
+    PyPI. python3-pip must be installed before postinst runs."""
+    deb = _run_packager(tmp_path, version="0.0.1")
+    info = _dpkg_deb("-I", str(deb))
+    assert "python3-pip" in info
+
+
+def test_chrony_is_in_depends_not_recommends(tmp_path: Path):
+    """Phase 17: JS8 is a time-synchronous protocol with ~250 ms slot
+    boundaries. systemd-timesyncd's accuracy is borderline; chrony's
+    sub-millisecond sync is the right choice. Promoting chrony from
+    Recommends to Depends guarantees it gets installed and
+    automatically replaces systemd-timesyncd via the time-daemon
+    conflict — so `apt install ./microjs8.deb` produces a working
+    time-sync setup with no manual steps."""
+    deb = _run_packager(tmp_path, version="0.0.1")
+    info = _dpkg_deb("-I", str(deb))
+    # Parse the Depends line(s). dpkg-deb -I outputs control with
+    # each field's continuation lines indented by space.
+    import re
+    depends_block = re.search(
+        r"(?m)^\s*Depends:\s*(.+?)(?=^\s*[A-Z][a-z]+:|\Z)",
+        info, re.DOTALL,
+    )
+    assert depends_block, f"could not find Depends in:\n{info}"
+    depends_text = depends_block.group(1)
+    assert "chrony" in depends_text, (
+        "chrony must be in Depends (Phase 17) — Recommends doesn't "
+        "guarantee install in all apt configurations"
+    )
+
+
+def test_hamlib_utils_renamed_to_libhamlib_utils(tmp_path: Path):
+    """Phase 17: hamlib-utils was renamed to libhamlib-utils in
+    Bookworm. The old name is not a valid package and triggers
+    'Recommends: hamlib-utils but it is not installable' on every
+    install."""
+    deb = _run_packager(tmp_path, version="0.0.1")
+    info = _dpkg_deb("-I", str(deb))
+    # The OLD name should not appear at all
+    import re
+    assert not re.search(r"\bhamlib-utils\b", info.replace("libhamlib-utils", "")), (
+        "hamlib-utils (old name) should not appear — use libhamlib-utils"
+    )
+    # The NEW name should appear in Recommends
+    assert "libhamlib-utils" in info
+
+
+def test_gpsd_clients_in_recommends(tmp_path: Path):
+    """Phase 17: gpsd-clients ships cgps and other tools operators
+    use to verify a GPS receiver. Cheap to add and useful."""
+    deb = _run_packager(tmp_path, version="0.0.1")
+    info = _dpkg_deb("-I", str(deb))
+    assert "gpsd-clients" in info
+
+
+# ── Phase 17: postinst behavior + helper script ─────────────────────
+
+
+def test_postinst_creates_dirs_before_adduser(tmp_path: Path):
+    """Phase 17: postinst must create /var/lib/microjs8 BEFORE the
+    adduser call. Otherwise adduser logs a cosmetic but alarming
+    'Warning: The home dir X you specified can't be accessed' even
+    though the install succeeds. Ordering matters for clean output."""
+    deb = _run_packager(tmp_path, version="0.0.1")
+    # Extract postinst from the .deb and check the ordering.
+    extract_dir = tmp_path / "extract"
+    extract_dir.mkdir()
+    subprocess.run(
+        ["dpkg-deb", "-e", str(deb), str(extract_dir)],
+        check=True, capture_output=True,
+    )
+    postinst = (extract_dir / "postinst").read_text()
+    # Find the byte position of dir-creation and adduser
+    dir_pos = postinst.find("install -d -m 0750 /var/lib/microjs8")
+    adduser_pos = postinst.find("adduser --system")
+    assert dir_pos > -1, "postinst doesn't create /var/lib/microjs8"
+    assert adduser_pos > -1, "postinst doesn't run adduser"
+    assert dir_pos < adduser_pos, (
+        "postinst creates /var/lib/microjs8 AFTER adduser — must be BEFORE "
+        "to avoid the 'home dir can't be accessed' warning"
+    )
+
+
+def test_postinst_creates_log_subdirectory(tmp_path: Path):
+    """Phase 17: /var/lib/microjs8/log/ must exist before the daemon
+    starts, or it fails to open its log file. The previous postinst
+    didn't create the log subdir — operators saw 'Permission denied'
+    when running microjs8-doctor as a non-microjs8 user, and the
+    daemon itself logged the same error to journald at startup."""
+    deb = _run_packager(tmp_path, version="0.0.1")
+    extract_dir = tmp_path / "extract"
+    extract_dir.mkdir()
+    subprocess.run(
+        ["dpkg-deb", "-e", str(deb), str(extract_dir)],
+        check=True, capture_output=True,
+    )
+    postinst = (extract_dir / "postinst").read_text()
+    assert "/var/lib/microjs8/log" in postinst, (
+        "postinst doesn't create /var/lib/microjs8/log/"
+    )
+
+
+def test_postinst_pip_installs_sounddevice(tmp_path: Path):
+    """Phase 17: sounddevice isn't in Bookworm apt, so postinst
+    pip-installs it. The pip command must use --break-system-packages
+    (PEP 668) and --quiet (so install logs aren't noisy). The
+    install must be idempotent — re-installing the .deb shouldn't
+    re-trigger the pip install if sounddevice is already importable."""
+    deb = _run_packager(tmp_path, version="0.0.1")
+    extract_dir = tmp_path / "extract"
+    extract_dir.mkdir()
+    subprocess.run(
+        ["dpkg-deb", "-e", str(deb), str(extract_dir)],
+        check=True, capture_output=True,
+    )
+    postinst = (extract_dir / "postinst").read_text()
+    assert "pip install" in postinst, "postinst doesn't pip-install anything"
+    assert "sounddevice" in postinst, "postinst doesn't reference sounddevice"
+    assert "--break-system-packages" in postinst, (
+        "pip install must use --break-system-packages on Bookworm (PEP 668)"
+    )
+    # Idempotency check: the install should be guarded by an
+    # 'import sounddevice' check so re-runs don't redo the work.
+    assert 'import sounddevice' in postinst, (
+        "postinst should guard the pip install with 'import sounddevice' "
+        "for idempotency on upgrades"
+    )
+
+
+def test_postinst_creates_doctor_symlink_wrapper(tmp_path: Path):
+    """Phase 17: operators (including the conversational context in
+    development) consistently invoke 'microjs8-doctor' as if it were
+    a real binary. The launcher accepts --doctor as a flag, so the
+    postinst creates a small wrapper at /usr/local/bin/microjs8-doctor
+    that invokes the launcher with the flag. This is operator UX,
+    not protocol — but it eliminates an entire class of
+    'command not found' errors during bring-up."""
+    deb = _run_packager(tmp_path, version="0.0.1")
+    extract_dir = tmp_path / "extract"
+    extract_dir.mkdir()
+    subprocess.run(
+        ["dpkg-deb", "-e", str(deb), str(extract_dir)],
+        check=True, capture_output=True,
+    )
+    postinst = (extract_dir / "postinst").read_text()
+    assert "/usr/local/bin/microjs8-doctor" in postinst
+    assert "--doctor" in postinst
+
+
+def test_postrm_removes_doctor_symlink_on_remove(tmp_path: Path):
+    """Phase 17: the doctor symlink wrapper is created by postinst
+    (not shipped by dpkg) so it must be removed by postrm on 'remove'
+    — otherwise it dangles and prints a confusing error when invoked
+    after the package is uninstalled."""
+    deb = _run_packager(tmp_path, version="0.0.1")
+    extract_dir = tmp_path / "extract"
+    extract_dir.mkdir()
+    subprocess.run(
+        ["dpkg-deb", "-e", str(deb), str(extract_dir)],
+        check=True, capture_output=True,
+    )
+    postrm = (extract_dir / "postrm").read_text()
+    assert "/usr/local/bin/microjs8-doctor" in postrm, (
+        "postrm doesn't remove the doctor symlink"
+    )
+    # And it's removed in the 'remove' case (not just purge).
+    assert "remove)" in postrm, "postrm doesn't handle the 'remove' case"
+
+
+def test_helper_microjs8_enable_display_is_shipped(tmp_path: Path):
+    """Phase 17: ship a helper at /usr/local/sbin/microjs8-enable-display
+    for bare-Pi operators who need to enable the SPI display overlay.
+    Putting it in /usr/local/sbin (vs /usr/share/APPLaunch/bin)
+    means it's in PATH and reachable via sudo without extra fuss."""
+    deb = _run_packager(tmp_path, version="0.0.1")
+    listing = _dpkg_deb("-c", str(deb))
+    paths = [line.split()[-1].lstrip(".") for line in listing.splitlines() if line.strip()]
+    assert "/usr/local/sbin/microjs8-enable-display" in paths, (
+        f"microjs8-enable-display not in .deb file list:\n{paths}"
+    )
+
+
+def test_helper_microjs8_enable_display_is_executable(tmp_path: Path):
+    """The helper must be marked +x — installed-mode 0755 — so apt
+    install doesn't end up with a non-executable script in PATH."""
+    deb = _run_packager(tmp_path, version="0.0.1")
+    listing = _dpkg_deb("-c", str(deb))
+    for line in listing.splitlines():
+        if line.endswith("/usr/local/sbin/microjs8-enable-display"):
+            # dpkg-deb -c output: -rwxr-xr-x root/root ...
+            mode_str = line.split()[0]
+            assert mode_str.startswith("-rwx"), (
+                f"microjs8-enable-display not executable: {line}"
+            )
+            return
+    raise AssertionError("microjs8-enable-display not found in .deb listing")
+
+
+def test_helper_microjs8_enable_display_supports_revert(tmp_path: Path):
+    """The helper must support --revert so operators can undo a
+    bad overlay configuration. Without revert, a wrong overlay
+    that prevents boot is harder to recover from (need a separate
+    machine to mount the SD card and hand-edit config.txt)."""
+    deb = _run_packager(tmp_path, version="0.0.1")
+    # Extract and read the helper from the data part.
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    subprocess.run(
+        ["dpkg-deb", "-x", str(deb), str(data_dir)],
+        check=True, capture_output=True,
+    )
+    helper = (data_dir / "usr" / "local" / "sbin" / "microjs8-enable-display").read_text()
+    assert "--revert" in helper, "helper must support --revert"
+    # Should also be idempotent on re-run
+    assert "already present" in helper, (
+        "helper should detect when the block is already present"
+    )
+    # Should back up config.txt before editing
+    assert "backup" in helper.lower() or "bak" in helper.lower(), (
+        "helper must back up config.txt before editing"
+    )
+
+
 # ── File layout ─────────────────────────────────────────────────────
 
 

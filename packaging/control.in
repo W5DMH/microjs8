@@ -9,24 +9,35 @@ Depends: python3 (>= 3.11),
  python3-pil,
  python3-numpy,
  python3-evdev,
- python3-sounddevice,
  python3-serial,
+ python3-pip,
+ libportaudio2,
+ chrony,
  fonts-dejavu-core,
  adduser,
  systemd-sysv
-Recommends: hamlib-utils,
- chrony,
- gpsd
-Description: MicroJS8 — JS8 transceiver for M5Stack CardputerZero
- A self-contained JS8 transceiver daemon targeting the M5Stack
- CardputerZero handheld. Provides receive-decode-display, directed
- messaging, mailbox, emergency beacon, and TX scheduling on the
- built-in 320x170 panel and matrix keyboard.
+Recommends: libhamlib-utils,
+ gpsd,
+ gpsd-clients
+Description: MicroJS8 — JS8 transceiver for Raspberry Pi
+ A self-contained JS8 transceiver daemon targeting the Raspberry Pi
+ platform. Supports two host configurations:
+   - M5Stack CardputerZero (on-board TCA8418 keyboard, ST7789 display)
+   - Bare Raspberry Pi Zero 2 W with 1.9" ST7789V/V2 display
+     (Waveshare or compatible) + USB keyboard
+ Provides receive-decode-display, directed messaging, mailbox,
+ emergency beacon, group calls, heartbeat broadcasts, and TX
+ scheduling on the 320x170 panel.
  .
  Drives the radio via hamlib's rigctld (TS-480 emulation for QDX,
  G90 driver for Xiegu, RTS-PTT for DigiRig). Audio capture and
- playback go through ALSA / PortAudio.
+ playback go through PortAudio (libportaudio2) via the sounddevice
+ Python module, which the postinst pip-installs since Debian does
+ not currently package python3-sounddevice for Bookworm.
  .
  Installs to /usr/share/APPLaunch/ and registers as an APPLaunch
- application; the M5Stack launcher menu shows it as a tile.
- The systemd service auto-starts on boot.
+ application; the M5Stack launcher menu shows it as a tile on the
+ CardputerZero, while bare Pi installs invoke it via the systemd
+ service or directly via the microjs8 launcher script. A symlink
+ at /usr/local/bin/microjs8-doctor exposes the diagnostic flag for
+ convenient invocation.

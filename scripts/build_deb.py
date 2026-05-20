@@ -192,6 +192,23 @@ def build_deb(
     )
     _log.info("installed launcher: %s", launcher_dst)
 
+    # ── 3b. microjs8-enable-display helper (Phase 17) ───────────────
+    # A standalone shell script that safely adds the ST7789V SPI
+    # overlay to /boot/firmware/config.txt for bare Pi installs.
+    # Installed under /usr/local/sbin so it's in operator PATH (vs
+    # the launcher under /usr/share/APPLaunch/bin, which is not).
+    # Only useful on bare Pi — on the CardputerZero the kernel
+    # ships /dev/fb1 already; running this script there is a no-op
+    # since the dtparam/dtoverlay lines would already be ignored.
+    helper_src = root / "packaging" / "microjs8-enable-display.sh"
+    helper_dst = staging / "usr/local/sbin" / "microjs8-enable-display"
+    write_with_mode(
+        helper_dst,
+        helper_src.read_text(),
+        0o755,
+    )
+    _log.info("installed display-enable helper: %s", helper_dst)
+
     # ── 4. systemd unit ─────────────────────────────────────────────
     service_src = root / "packaging" / "microjs8.service.in"
     service_dst = staging / SERVICE_PATH / f"{PACKAGE_NAME}.service"
