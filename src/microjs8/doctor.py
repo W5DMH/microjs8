@@ -94,6 +94,7 @@ def check_display(
     proc_fb: Optional[Path] = None,
     sysfs_root: Optional[Path] = None,
     name: str = "fb_st7789v",
+    spi_device_path: Optional[Path] = None,
 ) -> list[Check]:
     """Probe the framebuffer the Phase 5 ``DisplayDevice`` will use.
 
@@ -101,6 +102,12 @@ def check_display(
     /sys/class/graphics" — these resolve to the same constants that
     ``ui.display.DisplayDevice.open`` uses, so any divergence between
     the daemon and the doctor would itself surface as an FAIL here.
+
+    Phase 18: ``spi_device_path`` lets tests inject a non-existent
+    path so the SPI fallback branch doesn't fire when the host
+    happens to have /dev/spidev0.0 (e.g. a CardputerZero that
+    already had SPI enabled via raspi-config). Production calls
+    leave this as None and the default /dev/spidev0.0 is used.
     """
     # Lazy imports keep the doctor module importable on hosts where
     # numpy / Pillow / etc. aren't present (the apt deps haven't
@@ -115,6 +122,7 @@ def check_display(
 
     proc_fb_path = proc_fb if proc_fb is not None else DEFAULT_PROC_FB
     sysfs_path = sysfs_root if sysfs_root is not None else DEFAULT_SYSFS_ROOT
+    spidev_path = spi_device_path if spi_device_path is not None else Path("/dev/spidev0.0")
     if name == "fb_st7789v":
         name = DEFAULT_FB_NAME      # match daemon's actual default
 
@@ -141,7 +149,24 @@ def check_display(
     # 2. Find the right index for our panel.
     idx = find_fbdev_index(name, proc_fb=proc_fb_path)
     if idx is None:
-        # Show what /proc/fb DID contain so the operator can see if
+        # Phase 18: before reporting a WARN, check whether the SPI
+        # userspace driver path is viable. If /dev/spidev0.0 exists,
+        # the daemon will use SpiDisplayDevice instead — that's a
+        # supported configuration, not a problem.
+        if spidev_path.exists():
+            checks.append(Check(
+                subsystem="display",
+                title="kernel framebuffer not present; SPI backend will be used",
+                status=STATUS_OK,
+                detail=(
+                    f"No '{name}' in {proc_fb_path}, but {spidev_path} "
+                    f"exists. The daemon's open_display() factory will "
+                    f"fall back to the Phase 18 userspace SPI driver "
+                    f"(SpiDisplayDevice)."
+                ),
+            ))
+            return checks
+
         # it's a name mismatch (e.g. the kernel calls it 'fb_panel').
         contents = proc_fb_path.read_text().strip() or "(empty)"
         checks.append(Check(
@@ -150,10 +175,11 @@ def check_display(
             status=STATUS_WARN,
             detail=f"/proc/fb contents:\n{contents}",
             fix_hint=(
-                f"Expected on the Build Pi. On a CardputerZero, override "
-                f"the expected name by passing name=... to "
-                f"DisplayDevice.open() if the kernel uses a different "
-                f"identifier."
+                f"Expected on a host where the display isn't wired yet. "
+                f"On bare Pi Zero 2 W: wire the ST7789V panel and run "
+                f"`sudo microjs8-enable-display` then reboot. "
+                f"On CardputerZero: this indicates a missing fb_st7789v "
+                f"device-tree overlay."
             ),
         ))
         return checks

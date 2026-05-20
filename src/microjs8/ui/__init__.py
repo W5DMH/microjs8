@@ -14,7 +14,13 @@ ST7789 to the kernel framebuffer the M5Stack DT overlay exposes
 on the CardputerZero. The render-thread architecture is unchanged.
 """
 
-from microjs8.ui.display import DisplayDevice, FakeDisplayDevice, RenderThread
+from microjs8.ui.display import (
+    DisplayDevice,
+    FakeDisplayDevice,
+    RenderThread,
+    open_display,
+)
+from microjs8.ui.display_spi import SpiDisplayDevice
 from microjs8.ui.fonts import Fonts, load_fonts
 from microjs8.ui.state import (
     DirectedRow,
@@ -38,7 +44,9 @@ __all__ = [
     "RING",
     "RenderThread",
     "Screen",
+    "SpiDisplayDevice",
     "UISnapshot",
     "UIState",
     "load_fonts",
+    "open_display",
 ]

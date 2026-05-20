@@ -91,6 +91,7 @@ from microjs8.ui import (
     Screen,
     UIState,
     load_fonts,
+    open_display,
 )
 
 _log = logging.getLogger(__name__)
@@ -303,13 +304,18 @@ class MicroJS8App:
             _log.info("running headless — display thread skipped")
             return
         try:
-            self._display = DisplayDevice.open()
+            # Phase 18: open_display() tries the kernel framebuffer
+            # first (CardputerZero) then falls back to the userspace
+            # SPI driver (bare Pi Zero 2 W). Same render-thread
+            # downstream — either backend exposes show()/close().
+            self._display = open_display()
         except Exception:
             _log.exception(
                 "could not initialise display — daemon continuing headless. "
-                "check that the framebuffer 'fb_st7789v' is enumerated in "
-                "/proc/fb and that the microjs8 user has read/write access "
-                "to /dev/fb<N> (typically via the video group)."
+                "check that EITHER the framebuffer 'fb_st7789v' is enumerated "
+                "in /proc/fb (CardputerZero path) OR /dev/spidev0.0 exists "
+                "and the panel is wired (bare Pi path). On bare Pi: run "
+                "`sudo microjs8-enable-display` to enable the SPI bus."
             )
             return
         try:
