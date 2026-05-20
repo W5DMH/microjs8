@@ -266,3 +266,139 @@ def test_open_without_pyserial_raises_clear_error(monkeypatch):
     c = RtsPttClient(port="/dev/digirig")
     with pytest.raises(RtsPttError, match="pyserial not installed"):
         c.open()
+
+
+# ── Phase 18.3 tests: ioctl-based modem-line clearing ────────────────
+
+
+def test_force_clear_modem_lines_calls_tiocmset_zero(monkeypatch):
+    """Phase 18.3: _force_clear_modem_lines must drive ALL modem
+    control lines low via ioctl(TIOCMSET, 0). Without this, the
+    CP210x latches RTS high across pyserial property writes and
+    the radio gets stuck in TX. This test verifies we call the
+    right ioctl with the right payload."""
+    import struct
+    import termios
+    from microjs8.cat.rts_ptt_client import RtsPttClient
+
+    # Capture ioctl calls
+    ioctl_calls: list[tuple] = []
+
+    def fake_ioctl(fd, op, payload):
+        ioctl_calls.append((fd, op, payload))
+        return payload
+
+    monkeypatch.setattr("fcntl.ioctl", fake_ioctl)
+
+    # Hand-craft a client with a fake _serial that has fileno().
+    client = RtsPttClient(port="/dev/test", baudrate=9600)
+
+    class _FakeSerialWithFileno:
+        def __init__(self):
+            self._closed = False
+        def fileno(self):
+            return 99    # arbitrary
+
+    client._serial = _FakeSerialWithFileno()  # type: ignore[assignment]
+    client._opened = True
+
+    client._force_clear_modem_lines()
+
+    assert len(ioctl_calls) == 1, f"expected exactly 1 ioctl call, got {len(ioctl_calls)}"
+    fd, op, payload = ioctl_calls[0]
+    assert fd == 99
+    assert op == termios.TIOCMSET, "must call TIOCMSET to set modem lines"
+    assert payload == struct.pack("I", 0), (
+        f"payload must be all-zero (all lines low); got {payload!r}"
+    )
+
+
+def test_force_clear_modem_lines_swallows_ioctl_errors():
+    """Phase 18.3: if ioctl raises (USB unplug, closed fd, etc.) we
+    must NOT propagate — the caller wants close() / cleanup paths
+    to keep running. Without this, a single ioctl error during
+    close() could leak the SPI fd or skip resource releases."""
+    from microjs8.cat.rts_ptt_client import RtsPttClient
+
+    client = RtsPttClient(port="/dev/test")
+
+    class _FakeSerialThatBreaks:
+        def fileno(self):
+            raise OSError("simulated USB unplug")
+
+    client._serial = _FakeSerialThatBreaks()  # type: ignore[assignment]
+    client._opened = True
+
+    # Must not raise
+    client._force_clear_modem_lines()
+
+
+def test_force_clear_modem_lines_handles_missing_serial():
+    """Phase 18.3: if _serial is None (open never succeeded),
+    _force_clear_modem_lines must be a clean no-op, not crash."""
+    from microjs8.cat.rts_ptt_client import RtsPttClient
+    client = RtsPttClient(port="/dev/test")
+    # _serial is None by default
+    client._force_clear_modem_lines()    # must not raise
+
+
+def test_close_invokes_ioctl_clear_before_close(fake_serial, monkeypatch):
+    """Phase 18.3: close() must call _force_clear_modem_lines
+    BEFORE the serial port's close() is called. This ordering is
+    critical — once close() runs, the file descriptor is gone and
+    we can't ioctl on it anymore.
+
+    We patch _force_clear_modem_lines on the instance to record
+    when it's called relative to the serial close().
+    """
+    from microjs8.cat.rts_ptt_client import RtsPttClient
+
+    c = RtsPttClient(port="/dev/digirig")
+    c.open()
+
+    call_order: list[str] = []
+
+    original_force_clear = c._force_clear_modem_lines
+    def spy_force_clear():
+        call_order.append("force_clear")
+        original_force_clear()
+
+    # Wrap the FakeSerial's close to also record
+    original_serial_close = c._serial.close   # type: ignore[union-attr]
+    def spy_serial_close():
+        call_order.append("serial_close")
+        original_serial_close()
+
+    c._force_clear_modem_lines = spy_force_clear  # type: ignore[method-assign]
+    c._serial.close = spy_serial_close  # type: ignore[union-attr,method-assign]
+
+    c.close()
+
+    assert call_order == ["force_clear", "serial_close"], (
+        f"force_clear must come before serial_close; actual order: {call_order}"
+    )
+
+
+def test_ptt_off_uses_ioctl_clear(fake_serial, monkeypatch):
+    """Phase 18.3: ptt_off() must use ioctl-based clearing because
+    the pyserial .rts=False assignment doesn't reliably propagate
+    to the CP210x driver. Without this, ptt_off() looks like it
+    succeeded but the chip keeps RTS asserted."""
+    from microjs8.cat.rts_ptt_client import RtsPttClient
+
+    c = RtsPttClient(port="/dev/digirig")
+    c.open()
+
+    force_clear_called = [False]
+    original = c._force_clear_modem_lines
+    def spy():
+        force_clear_called[0] = True
+        original()
+
+    c._force_clear_modem_lines = spy  # type: ignore[method-assign]
+    c.ptt_off()
+
+    assert force_clear_called[0], (
+        "ptt_off must call _force_clear_modem_lines to defeat CP210x "
+        "RTS latching — pyserial's .rts=False alone is not enough"
+    )

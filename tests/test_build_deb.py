@@ -47,8 +47,18 @@ def _repo_root() -> Path:
     return here.parent.parent
 
 
-def _run_packager(output_dir: Path, *, version: Optional[str] = None) -> Path:
-    """Invoke scripts/build_deb.py and return the produced .deb path."""
+def _run_packager(
+    output_dir: Path,
+    *,
+    version: Optional[str] = None,
+    gfsk8_so: Optional[Path] = None,
+) -> Path:
+    """Invoke scripts/build_deb.py and return the produced .deb path.
+
+    ``gfsk8_so`` (Phase 18.3) optionally passes ``--gfsk8-so`` to the
+    packager so tests can verify the .so bundling path without
+    depending on a real native build artifact existing on disk.
+    """
     cmd = [
         "python3",
         str(_repo_root() / "scripts" / "build_deb.py"),
@@ -57,6 +67,8 @@ def _run_packager(output_dir: Path, *, version: Optional[str] = None) -> Path:
     ]
     if version is not None:
         cmd.extend(["--version", version])
+    if gfsk8_so is not None:
+        cmd.extend(["--gfsk8-so", str(gfsk8_so)])
     result = subprocess.run(cmd, check=False, capture_output=True, text=True)
     assert result.returncode == 0, (
         f"build_deb.py failed (rc={result.returncode}):\n"
@@ -682,3 +694,148 @@ def test_read_pyproject_version_raises_when_no_version(tmp_path: Path):
     py.write_text('[project]\nname = "microjs8"\n')   # no version key
     with pytest.raises(RuntimeError, match=r"no version"):
         read_pyproject_version(py)
+
+
+# ── Phase 18.3 tests: udev rule, rigctld, gfsk8 bundling ────────────
+
+
+def test_udev_rule_is_installed_to_lib_udev(tmp_path: Path):
+    """Phase 18.3: the .deb must ship the Digirig udev rule to
+    /lib/udev/rules.d/ so /dev/digirig appears and gpsd/MM leave
+    the device alone."""
+    deb = _run_packager(tmp_path)
+    contents = _dpkg_deb("-c", str(deb))
+    assert "./lib/udev/rules.d/99-microjs8-digirig.rules" in contents
+
+
+def test_udev_rule_has_gpsd_and_mm_ignore_flags(tmp_path: Path):
+    """Phase 18.3: the udev rule must include ID_GPSD_IGNORE and
+    ID_MM_DEVICE_IGNORE. Without these, gpsd or ModemManager will
+    grab the Digirig and assert RTS, keying the radio's PTT."""
+    deb = _run_packager(tmp_path)
+    extract_dir = tmp_path / "extract"
+    extract_dir.mkdir()
+    subprocess.run(
+        ["dpkg-deb", "-x", str(deb), str(extract_dir)],
+        check=True, capture_output=True,
+    )
+    rule_path = extract_dir / "lib" / "udev" / "rules.d" / "99-microjs8-digirig.rules"
+    rule_text = rule_path.read_text()
+    assert "ID_GPSD_IGNORE" in rule_text, (
+        "udev rule missing ID_GPSD_IGNORE — gpsd will grab the Digirig"
+    )
+    assert "ID_MM_DEVICE_IGNORE" in rule_text, (
+        "udev rule missing ID_MM_DEVICE_IGNORE — ModemManager will probe"
+    )
+    assert 'SYMLINK+="digirig"' in rule_text, (
+        "udev rule missing /dev/digirig symlink creation"
+    )
+
+
+def test_rigctld_service_is_installed(tmp_path: Path):
+    """Phase 18.3: rigctld.service must be in /lib/systemd/system/.
+    Without it, CAT-mode radios (QDX, G90+DigiRig) can't get PTT
+    because the daemon's CatService has nothing to connect to."""
+    deb = _run_packager(tmp_path)
+    contents = _dpkg_deb("-c", str(deb))
+    assert "./lib/systemd/system/rigctld.service" in contents
+
+
+def test_rigctld_launcher_is_installed_executable(tmp_path: Path):
+    """Phase 18.3: the per-radio launcher script must be installed
+    at /usr/local/bin/microjs8-rigctld-launcher with mode 0755.
+    The rigctld.service unit calls this script."""
+    deb = _run_packager(tmp_path)
+    contents = _dpkg_deb("-c", str(deb))
+    # Find the launcher line in the tar listing and check its mode.
+    for line in contents.splitlines():
+        if "microjs8-rigctld-launcher" in line:
+            # tar listing format: "-rwxr-xr-x root/root size date path"
+            assert line.startswith("-rwxr-xr-x"), (
+                f"launcher should be 0755 executable; got: {line!r}"
+            )
+            return
+    pytest.fail("rigctld launcher not found in .deb")
+
+
+def test_postinst_reloads_udev(tmp_path: Path):
+    """Phase 18.3: postinst must run udevadm control --reload-rules
+    and udevadm trigger so the new udev rule takes effect without
+    requiring a reboot."""
+    deb = _run_packager(tmp_path)
+    extract_dir = tmp_path / "extract-control"
+    extract_dir.mkdir()
+    subprocess.run(
+        ["dpkg-deb", "-e", str(deb), str(extract_dir)],
+        check=True, capture_output=True,
+    )
+    postinst = (extract_dir / "postinst").read_text()
+    assert "udevadm control --reload-rules" in postinst
+    assert "udevadm trigger" in postinst
+
+
+def test_postinst_constrains_gpsd_config(tmp_path: Path):
+    """Phase 18.3: postinst must edit /etc/default/gpsd to set
+    USBAUTO=false if it's currently true. Without this, gpsd
+    auto-grabs the CP210x and keys the radio."""
+    deb = _run_packager(tmp_path)
+    extract_dir = tmp_path / "extract-control2"
+    extract_dir.mkdir()
+    subprocess.run(
+        ["dpkg-deb", "-e", str(deb), str(extract_dir)],
+        check=True, capture_output=True,
+    )
+    postinst = (extract_dir / "postinst").read_text()
+    assert "USBAUTO" in postinst, (
+        "postinst doesn't touch USBAUTO — gpsd-grab-Digirig issue not fixed"
+    )
+    assert "/etc/default/gpsd" in postinst, (
+        "postinst doesn't reference gpsd config file"
+    )
+
+
+def test_postinst_resets_cp210x_devices(tmp_path: Path):
+    """Phase 18.3: postinst should USB-reset any latched CP210x
+    devices on install so any RTS-high state from prior gpsd
+    activity is cleared."""
+    deb = _run_packager(tmp_path)
+    extract_dir = tmp_path / "extract-control3"
+    extract_dir.mkdir()
+    subprocess.run(
+        ["dpkg-deb", "-e", str(deb), str(extract_dir)],
+        check=True, capture_output=True,
+    )
+    postinst = (extract_dir / "postinst").read_text()
+    assert "authorized" in postinst, (
+        "postinst doesn't power-cycle CP210x devices via "
+        "the USB authorized sysfs flag"
+    )
+    assert "10c4" in postinst, (
+        "postinst doesn't match the CP210x vendor ID"
+    )
+
+
+def test_gfsk8_so_bundled_when_provided(tmp_path: Path):
+    """Phase 18.3: --gfsk8-so argument should bundle the .so into
+    /usr/lib/python3/dist-packages/."""
+    # Fake a .so file (just needs to exist).
+    fake_so = tmp_path / "gfsk8.cpython-311-aarch64-linux-gnu.so"
+    fake_so.write_bytes(b"\x7fELF" + b"\x00" * 100)   # ELF magic + zeros
+
+    deb = _run_packager(tmp_path, gfsk8_so=fake_so)
+    contents = _dpkg_deb("-c", str(deb))
+    assert "./usr/lib/python3/dist-packages/gfsk8.cpython-311-aarch64-linux-gnu.so" in contents
+
+
+def test_gfsk8_so_absent_when_not_provided(tmp_path: Path):
+    """Phase 18.3: if no --gfsk8-so and no default path exists, the
+    .deb still builds (operators may build host-side before deploying
+    on a target with gfsk8). Just no gfsk8 file inside."""
+    # _run_packager doesn't pass --gfsk8-so by default. The default
+    # search paths under /opt/microjs8/venv don't exist on CI hosts.
+    deb = _run_packager(tmp_path)
+    contents = _dpkg_deb("-c", str(deb))
+    assert "gfsk8" not in contents, (
+        "expected no gfsk8 entry when .so unavailable, got: " +
+        "\n".join(l for l in contents.splitlines() if "gfsk8" in l)
+    )
