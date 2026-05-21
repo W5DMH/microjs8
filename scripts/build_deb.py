@@ -69,13 +69,34 @@ LOCAL_BIN_PATH = "usr/local/bin"
 # Matches the path used by Debian's python3-* packages.
 PYTHON_DIST_PACKAGES = "usr/lib/python3/dist-packages"
 
-# Default locations to look for the gfsk8 .so. The build host (hf256)
-# typically has it from build.sh at /opt/microjs8/venv/...; the dev
-# host might have it elsewhere. Operators can override via
-# --gfsk8-so or by setting MICROJS8_GFSK8_SO in the environment.
+# Default locations to look for the gfsk8 .so. Operators can override
+# via --gfsk8-so or by setting MICROJS8_GFSK8_SO in the environment.
+#
+# Order matters: first-existing wins. We try the source-repo build
+# dir first because that's where build_gfsk8.sh puts the .so — that
+# is, the developer who just built gfsk8 from source will have the
+# freshest binary there. Falls through to venv / system locations
+# for the rare case where someone wheel-installed it.
+#
+# The ~ expands relative to the user running build_deb.py (usually
+# the build host's daemon user, e.g. ``pi`` on hf256). Paths that
+# don't resolve to an existing file are silently skipped — the
+# warning lands only if NO path matches.
 DEFAULT_GFSK8_SEARCH_PATHS = (
+    # Source-repo build dir (build_gfsk8.sh output). Confirmed
+    # location on hf256 (May 21, 2026): if a developer follows
+    # the README's gfsk8 build instructions, this is where the .so
+    # ends up.
+    "~/build/gfsk8-modem-clean/build/python/gfsk8.cpython-311-aarch64-linux-gnu.so",
+    "~/build/gfsk8-modem-clean/build/python/gfsk8.cpython-311-arm-linux-gnueabihf.so",
+    # Venv install (if someone wheel-installed gfsk8 into a venv).
     "/opt/microjs8/venv/lib/python3.11/site-packages/gfsk8.cpython-311-aarch64-linux-gnu.so",
     "/opt/microjs8/venv/lib/python3.11/site-packages/gfsk8.cpython-311-arm-linux-gnueabihf.so",
+    # System dist-packages (after `apt install ./microjs8.deb` of
+    # a prior version that bundled gfsk8). Useful when rebuilding
+    # the .deb on a host that already has microjs8 installed.
+    "/usr/lib/python3/dist-packages/gfsk8.cpython-311-aarch64-linux-gnu.so",
+    "/usr/lib/python3/dist-packages/gfsk8.cpython-311-arm-linux-gnueabihf.so",
 )
 
 PACKAGE_NAME = "microjs8"
@@ -162,20 +183,30 @@ def _find_gfsk8_so(explicit: Optional[Path]) -> Optional[Path]:
             explicit,
         )
 
-    # Env var override.
+    # Env var override. Authoritative: if set (even to empty), it
+    # supersedes the default search paths. An empty value means
+    # "explicitly NO gfsk8 in this build" — used by the test suite
+    # to keep packaging tests fast on hosts where the default
+    # search paths happen to match (avoids dpkg-deb compressing a
+    # 24 MB binary into every test fixture).
     env_path = os.environ.get("MICROJS8_GFSK8_SO")
-    if env_path:
+    if env_path is not None:
+        if not env_path:
+            return None     # Explicit "no gfsk8"
         env_path_p = Path(env_path).expanduser().resolve()
         if env_path_p.exists():
             return env_path_p
         _log.warning(
-            "MICROJS8_GFSK8_SO=%s does not exist; falling through",
+            "MICROJS8_GFSK8_SO=%s does not exist; not falling back "
+            "to defaults (env-var override is authoritative)",
             env_path,
         )
+        return None
 
-    # Default search paths (build.sh's typical install location).
+    # Default search paths (build_gfsk8.sh / venv / dist-packages).
+    # ``~`` is expanded relative to the user running build_deb.py.
     for candidate in DEFAULT_GFSK8_SEARCH_PATHS:
-        c = Path(candidate)
+        c = Path(candidate).expanduser()
         if c.exists():
             return c
 

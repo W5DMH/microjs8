@@ -58,6 +58,19 @@ def _run_packager(
     ``gfsk8_so`` (Phase 18.3) optionally passes ``--gfsk8-so`` to the
     packager so tests can verify the .so bundling path without
     depending on a real native build artifact existing on disk.
+
+    Phase 19 follow-up (May 21, 2026): when ``gfsk8_so`` is None
+    (the default for nearly every packaging test — they don't care
+    about the .so, they care about postinst / udev / service files /
+    etc.), we force ``MICROJS8_GFSK8_SO=""`` in the subprocess
+    environment. This is the authoritative "no gfsk8 in this build"
+    signal — the packager will skip both the env path and the
+    default search paths and produce a small .deb fast.
+
+    Without this, build hosts whose default search paths happen to
+    match a real 24 MB gfsk8 .so (e.g. hf256 at ~/build/gfsk8-modem-
+    clean/build/python/...) would compress that 24 MB into every
+    test's .deb, turning a 50 s test suite into a 5+ min wait.
     """
     cmd = [
         "python3",
@@ -69,7 +82,18 @@ def _run_packager(
         cmd.extend(["--version", version])
     if gfsk8_so is not None:
         cmd.extend(["--gfsk8-so", str(gfsk8_so)])
-    result = subprocess.run(cmd, check=False, capture_output=True, text=True)
+
+    env = os.environ.copy()
+    if gfsk8_so is None:
+        # Authoritative override: skip defaults, skip env path, no
+        # gfsk8 bundled. Tests that DO want the .so bundled pass
+        # gfsk8_so explicitly (in which case we leave env alone so
+        # --gfsk8-so on the command line wins).
+        env["MICROJS8_GFSK8_SO"] = ""
+
+    result = subprocess.run(
+        cmd, check=False, capture_output=True, text=True, env=env,
+    )
     assert result.returncode == 0, (
         f"build_deb.py failed (rc={result.returncode}):\n"
         f"stdout: {result.stdout}\nstderr: {result.stderr}"
@@ -1020,3 +1044,136 @@ def test_rigctld_launcher_exits_zero_on_missing_hardware(tmp_path: Path):
         "Phase 19 v0.0.8: launcher must exit 0 (not 1) on missing "
         "hardware for BOTH qdx and xiegu-g90-digirig branches"
     )
+
+
+def test_gfsk8_default_search_paths_include_source_repo_build_dir():
+    """Phase 19 (v0.0.8.1 follow-up): the default search paths must
+    include ``~/build/gfsk8-modem-clean/build/python/`` so a fresh
+    `python3 scripts/build_deb.py --output-dir dist` (no flags) on
+    the build host auto-detects the .so where build_gfsk8.sh puts it.
+
+    Surfaced May 21, 2026 when hf256 produced a 235 KB .deb instead
+    of the expected ~3.3 MB — the search path list only included the
+    venv location, but the canonical build artifact lives in the
+    source repo's build dir.
+    """
+    import sys
+    sys.path.insert(0, str(_repo_root() / "scripts"))
+    try:
+        from build_deb import DEFAULT_GFSK8_SEARCH_PATHS
+    finally:
+        sys.path.pop(0)
+
+    # At least one entry must reference the source-repo build dir
+    matching = [
+        p for p in DEFAULT_GFSK8_SEARCH_PATHS
+        if "gfsk8-modem-clean" in p and "/build/python/" in p
+    ]
+    assert len(matching) >= 1, (
+        "DEFAULT_GFSK8_SEARCH_PATHS missing the source-repo build "
+        f"dir entry; got {DEFAULT_GFSK8_SEARCH_PATHS!r}"
+    )
+
+
+def test_gfsk8_default_search_paths_expand_tilde():
+    """Phase 19 (v0.0.8.1): _find_gfsk8_so must expand ``~`` so the
+    source-repo entries (under ``~/build/...``) actually resolve to
+    the operator's home directory."""
+    import sys
+    import tempfile
+    from pathlib import Path as _Path
+    sys.path.insert(0, str(_repo_root() / "scripts"))
+    try:
+        from build_deb import _find_gfsk8_so
+    finally:
+        sys.path.pop(0)
+
+    # Build a fake .so under a temp dir, then point HOME at it so
+    # the default search path under ``~/build/...`` resolves.
+    import os
+    with tempfile.TemporaryDirectory() as td:
+        fake_home = _Path(td)
+        fake_build_dir = fake_home / "build" / "gfsk8-modem-clean" / "build" / "python"
+        fake_build_dir.mkdir(parents=True)
+        fake_so = fake_build_dir / "gfsk8.cpython-311-aarch64-linux-gnu.so"
+        fake_so.write_bytes(b"\x7fELF" + b"\x00" * 100)
+
+        old_home = os.environ.get("HOME")
+        # v0.0.8.1 fast-path patch: MICROJS8_GFSK8_SO is now an
+        # authoritative override. We must clear it for this test so
+        # _find_gfsk8_so actually reaches the default-search-paths
+        # branch — otherwise the test passes for the wrong reason
+        # in environments where the env var is set.
+        old_env = os.environ.pop("MICROJS8_GFSK8_SO", None)
+        try:
+            os.environ["HOME"] = str(fake_home)
+            # No explicit flag, no env var override, no system paths
+            # exist → must fall back to ~ expansion and find the
+            # fake .so we just planted.
+            found = _find_gfsk8_so(None)
+        finally:
+            if old_home is None:
+                del os.environ["HOME"]
+            else:
+                os.environ["HOME"] = old_home
+            if old_env is not None:
+                os.environ["MICROJS8_GFSK8_SO"] = old_env
+
+        assert found is not None, (
+            "_find_gfsk8_so failed to expand ~ in default search paths"
+        )
+        assert found == fake_so, (
+            f"expected {fake_so}, got {found}"
+        )
+
+
+def test_gfsk8_env_var_empty_string_means_no_gfsk8():
+    """Phase 19 follow-up (May 21, 2026): MICROJS8_GFSK8_SO="" must
+    be authoritative — _find_gfsk8_so must NOT fall back to default
+    search paths when the env var is explicitly empty.
+
+    This is the speed-fix contract: the test suite's _run_packager
+    sets this env var to "" so packaging tests can run fast on
+    build hosts where default search paths happen to match real
+    24 MB gfsk8 binaries.
+    """
+    import sys
+    import tempfile
+    from pathlib import Path as _Path
+    sys.path.insert(0, str(_repo_root() / "scripts"))
+    try:
+        from build_deb import _find_gfsk8_so
+    finally:
+        sys.path.pop(0)
+
+    import os
+    with tempfile.TemporaryDirectory() as td:
+        fake_home = _Path(td)
+        # Plant a fake .so where the default search path would find
+        # it — so we can prove the env var override DID short-circuit
+        # the defaults (otherwise the fake .so would be returned).
+        fake_build_dir = fake_home / "build" / "gfsk8-modem-clean" / "build" / "python"
+        fake_build_dir.mkdir(parents=True)
+        fake_so = fake_build_dir / "gfsk8.cpython-311-aarch64-linux-gnu.so"
+        fake_so.write_bytes(b"\x7fELF" + b"\x00" * 100)
+
+        old_home = os.environ.get("HOME")
+        old_env = os.environ.get("MICROJS8_GFSK8_SO")
+        try:
+            os.environ["HOME"] = str(fake_home)
+            os.environ["MICROJS8_GFSK8_SO"] = ""    # authoritative no
+            found = _find_gfsk8_so(None)
+        finally:
+            if old_home is None:
+                del os.environ["HOME"]
+            else:
+                os.environ["HOME"] = old_home
+            if old_env is None:
+                os.environ.pop("MICROJS8_GFSK8_SO", None)
+            else:
+                os.environ["MICROJS8_GFSK8_SO"] = old_env
+
+        assert found is None, (
+            f"MICROJS8_GFSK8_SO='' must short-circuit default paths; "
+            f"got {found!r} (the fake .so under fake $HOME)"
+        )
