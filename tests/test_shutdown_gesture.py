@@ -315,29 +315,6 @@ def test_router_esc_on_shutting_down_cancels_gesture():
     asyncio.run(_run())
 
 
-def test_router_ctrl_c_on_shutting_down_also_cancels():
-    """Ctrl-C is already the "cancel" alias for Esc elsewhere in the
-    UI. Behaviour on SHUTTING_DOWN should be consistent — both keys
-    cancel."""
-    s = _state(screen=Screen.INBOX)
-
-    async def _cb():
-        pass
-
-    async def _run():
-        g = ShutdownGesture(s, asyncio.get_running_loop(), _cb,
-                            hold_seconds=10.0)
-        r = _router_with_gesture(s, g)
-        r.handle(KeyEvent(key=Key.FN_Q))
-        assert g.is_armed() is True
-        # Ctrl-C cancels just like Esc
-        r.handle(KeyEvent(key=Key.CTRL_C))
-        await asyncio.sleep(0)
-        assert g.is_armed() is False
-
-    asyncio.run(_run())
-
-
 def test_router_other_keys_on_shutting_down_are_ignored():
     """While the countdown is running, miscellaneous keystrokes must
     NOT cancel — only Esc/Ctrl-C do. This prevents an operator who

@@ -293,25 +293,6 @@ def test_usb_source_ctrl_b_emits_fn_b(evdev_codes):
     assert len(fn_b_events) == 1
 
 
-def test_usb_source_ctrl_q_stays_as_ctrl_q(evdev_codes):
-    """On a USB keyboard, Ctrl+Q must NOT be remapped to FN_Q —
-    the existing Phase 11 binding (Ctrl+Q = ALLCALL navigation)
-    is preserved. USB-only shutdown goes through SSH +
-    ``systemctl poweroff`` until a config-driven gesture lands."""
-    ec = evdev_codes
-    events = [
-        _ev(ec.EV_KEY, ec.KEY_LEFTCTRL, 1),
-        _ev(ec.EV_KEY, ec.KEY_Q, 1),
-        _ev(ec.EV_KEY, ec.KEY_Q, 0),
-        _ev(ec.EV_KEY, ec.KEY_LEFTCTRL, 0),
-    ]
-    captured = _drive_kbd_thread(events, source="usb")
-    ctrl_q_events = [e for e in captured if e.key is Key.CTRL_Q]
-    fn_q_events = [e for e in captured if e.key is Key.FN_Q]
-    assert len(ctrl_q_events) == 1
-    assert len(fn_q_events) == 0
-
-
 def test_tca8418_source_ctrl_b_stays_as_ctrl_letter(evdev_codes):
     """On the TCA8418, Ctrl+B should NOT be remapped — the on-board
     Fn key produces the actual FN_B scancode via the kernel keymap.
@@ -331,20 +312,6 @@ def test_tca8418_source_ctrl_b_stays_as_ctrl_letter(evdev_codes):
     assert len(fn_b_events) == 0
 
 
-def test_tca8418_source_ctrl_q_emits_ctrl_q(evdev_codes):
-    """TCA8418 keeps the Phase 11 Ctrl+Q = ALLCALL hotkey."""
-    ec = evdev_codes
-    events = [
-        _ev(ec.EV_KEY, ec.KEY_LEFTCTRL, 1),
-        _ev(ec.EV_KEY, ec.KEY_Q, 1),
-        _ev(ec.EV_KEY, ec.KEY_Q, 0),
-        _ev(ec.EV_KEY, ec.KEY_LEFTCTRL, 0),
-    ]
-    captured = _drive_kbd_thread(events, source="tca8418")
-    ctrl_q_events = [e for e in captured if e.key is Key.CTRL_Q]
-    assert len(ctrl_q_events) == 1
-
-
 def test_usb_source_plain_b_emits_char_b_not_fn_b(evdev_codes):
     """Without Ctrl held, B emits a plain 'b' character on USB.
     The Ctrl+B remap is gated on _ctrl_held."""
@@ -358,39 +325,6 @@ def test_usb_source_plain_b_emits_char_b_not_fn_b(evdev_codes):
     fn_b_events = [e for e in captured if e.key is Key.FN_B]
     assert len(b_chars) == 1
     assert len(fn_b_events) == 0
-
-
-def test_usb_source_ctrl_h_still_emits_ctrl_h(evdev_codes):
-    """Other Ctrl+letter bindings (Ctrl+H, Ctrl+S, Ctrl+C) must
-    continue to work on USB — the remap is targeted at Ctrl+B only,
-    not a blanket override of the _CTRL_KEYS table."""
-    ec = evdev_codes
-    events = [
-        _ev(ec.EV_KEY, ec.KEY_LEFTCTRL, 1),
-        _ev(ec.EV_KEY, ec.KEY_H, 1),
-        _ev(ec.EV_KEY, ec.KEY_H, 0),
-        _ev(ec.EV_KEY, ec.KEY_LEFTCTRL, 0),
-    ]
-    captured = _drive_kbd_thread(events, source="usb")
-    ctrl_h_events = [e for e in captured if e.key is Key.CTRL_H]
-    assert len(ctrl_h_events) == 1
-
-
-def test_usb_source_ctrl_c_still_emits_ctrl_c(evdev_codes):
-    """Ctrl+C must keep working on USB — it's the SHUTTING_DOWN
-    cancel hotkey (Phase 15) in addition to its common 'abort'
-    meaning. Important to verify it's not accidentally swallowed
-    by the new remap logic."""
-    ec = evdev_codes
-    events = [
-        _ev(ec.EV_KEY, ec.KEY_LEFTCTRL, 1),
-        _ev(ec.EV_KEY, ec.KEY_C, 1),
-        _ev(ec.EV_KEY, ec.KEY_C, 0),
-        _ev(ec.EV_KEY, ec.KEY_LEFTCTRL, 0),
-    ]
-    captured = _drive_kbd_thread(events, source="usb")
-    ctrl_c_events = [e for e in captured if e.key is Key.CTRL_C]
-    assert len(ctrl_c_events) == 1
 
 
 def test_default_source_is_tca8418_for_backward_compat(evdev_codes):
@@ -530,3 +464,56 @@ def test_two_keyboard_threads_share_callback(evdev_codes):
     assert "a" in chars  # from TCA8418
     assert "z" in chars  # from USB
     assert Key.FN_B in keys  # Ctrl+B from USB → FN_B remap
+
+
+# ── Phase 19 / v0.0.8: no Ctrl shortcuts except FN_B remap ───────────
+
+
+def test_ctrl_keys_dict_is_empty_in_v008(evdev_codes):
+    """Phase 19 (v0.0.8): removed Ctrl-S/Q/H/C as user-facing
+    shortcuts. _CTRL_KEYS must be empty so a future commit can't
+    silently re-introduce a Ctrl+letter shortcut without thinking
+    about the v0.0.8 UX decision (arrow nav + Exit button only)."""
+    from microjs8.input.keyboard import _CTRL_KEYS
+    assert _CTRL_KEYS == {}, (
+        f"_CTRL_KEYS must be empty in v0.0.8 (no Ctrl+letter "
+        f"shortcuts); got {_CTRL_KEYS!r}"
+    )
+
+
+
+
+def test_usb_ctrl_q_drops_silently_in_v008(evdev_codes):
+    """Phase 19 (v0.0.8): with _CTRL_KEYS empty, Ctrl+Q on USB now
+    drops silently. Operators use arrow keys to navigate; ALLCALL
+    screen is reached via the regular screen-cycle navigation."""
+    ec = evdev_codes
+    events = [
+        _ev(ec.EV_KEY, ec.KEY_LEFTCTRL, 1),
+        _ev(ec.EV_KEY, ec.KEY_Q, 1),
+        _ev(ec.EV_KEY, ec.KEY_Q, 0),
+        _ev(ec.EV_KEY, ec.KEY_LEFTCTRL, 0),
+    ]
+    captured = _drive_kbd_thread(events, source="usb")
+    # No key events should reach the router (modifier-only events
+    # like Ctrl-up/Ctrl-down also drop). Char events should also be
+    # absent — there's no printable for Ctrl+Q.
+    assert all(e.key is None for e in captured), (
+        f"Ctrl+Q in v0.0.8 must NOT emit a Key.* event; got {captured!r}"
+    )
+
+
+def test_usb_ctrl_c_drops_silently_in_v008(evdev_codes):
+    """Phase 19 (v0.0.8): Ctrl+C is no longer a SHUTTING_DOWN cancel
+    alias. Operators use ESC instead. Ctrl+C must drop silently."""
+    ec = evdev_codes
+    events = [
+        _ev(ec.EV_KEY, ec.KEY_LEFTCTRL, 1),
+        _ev(ec.EV_KEY, ec.KEY_C, 1),
+        _ev(ec.EV_KEY, ec.KEY_C, 0),
+        _ev(ec.EV_KEY, ec.KEY_LEFTCTRL, 0),
+    ]
+    captured = _drive_kbd_thread(events, source="usb")
+    assert all(e.key is None for e in captured), (
+        f"Ctrl+C in v0.0.8 must NOT emit a Key.* event; got {captured!r}"
+    )

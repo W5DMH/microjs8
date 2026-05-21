@@ -279,6 +279,11 @@ class MicroJS8App:
             emergency_arm_gesture=self._emergency_arm_gesture,
             allcall_query_msgs=self._allcall_query_msgs_sync,
             allcall_cq=self._allcall_cq_sync,
+            # Phase 19 (v0.0.8): Exit button on HOME calls request_exit
+            # which sets the stop event so run() returns cleanly.
+            # request_stop() is the same method our SIGTERM handler
+            # uses, so the exit path is identical to systemctl stop.
+            request_exit=self.request_stop,
         )
 
         # ── Display, shutdown gesture, backlight, keyboard, GPS ──────

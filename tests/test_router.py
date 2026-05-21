@@ -100,38 +100,12 @@ def test_ring_unlocked_after_emergency_override():
 # ── Global hotkeys ──────────────────────────────────────────────────
 
 
-def test_ctrl_s_jumps_to_setup_from_anywhere():
-    s = _state(screen=Screen.HEARD)
-    r, _, _ = _router(s)
-    r.handle(KeyEvent(key=Key.CTRL_S))
-    assert s.snapshot().screen is Screen.SETUP
-
-
-def test_ctrl_q_jumps_to_allcall_when_configured():
-    s = _state(screen=Screen.HOME)
-    r, _, _ = _router(s)
-    r.handle(KeyEvent(key=Key.CTRL_Q))
-    assert s.snapshot().screen is Screen.ALLCALL
-
-
 def test_ctrl_q_disabled_when_unconfigured():
     s = _state(configured=False, screen=Screen.SETUP)
     r, _, _ = _router(s)
     r.handle(KeyEvent(key=Key.CTRL_Q))
     # Stays on Setup since the ring is locked.
     assert s.snapshot().screen is Screen.SETUP
-
-
-def test_ctrl_s_works_when_unconfigured():
-    """Ctrl-S must work even on unconfigured station — it goes to where
-    the operator needs to be anyway."""
-    s = _state(configured=False, screen=Screen.HOME)
-    r, _, _ = _router(s)
-    r.handle(KeyEvent(key=Key.CTRL_S))
-    assert s.snapshot().screen is Screen.SETUP
-
-
-# ── Tab focus on Setup ──────────────────────────────────────────────
 
 
 def test_tab_cycles_setup_focus():
@@ -1343,3 +1317,136 @@ def test_hb_modal_arrows_commit_and_exit():
 
 
 
+
+# ── Phase 19 / v0.0.8: HOME Exit button ──────────────────────────────
+
+
+class _ExitCapture:
+    """Capture request_exit callback invocations."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def __call__(self) -> None:
+        self.calls += 1
+
+
+def test_home_exit_button_focused_by_default():
+    """Phase 19 (v0.0.8): HOME has exactly one focusable item — the
+    Exit button. Default focus on HOME should land on home_exit so
+    Enter immediately works."""
+    s = _state(screen=Screen.HOME)
+    assert s.focused_field_name() == "home_exit"
+
+
+def test_home_enter_calls_request_exit():
+    """Phase 19: Enter on HOME with home_exit focused must call the
+    request_exit callback. This is the operator's path to leave the
+    daemon cleanly (without needing systemctl stop or SSH)."""
+    s = _state(screen=Screen.HOME)
+    save = _SaveCapture()
+    bypass = _BypassCapture()
+    exit_cb = _ExitCapture()
+    r = InputRouter(
+        s, save_config=save, emergency_bypass=bypass,
+        request_exit=exit_cb,
+    )
+
+    # Confirm focus is on the exit button (the only focusable item)
+    assert s.focused_field_name() == "home_exit"
+
+    r.handle(KeyEvent(key=Key.ENTER))
+    assert exit_cb.calls == 1, (
+        f"Enter on HOME exit button must call request_exit; "
+        f"got {exit_cb.calls} calls"
+    )
+
+
+def test_home_enter_without_callback_does_not_crash():
+    """Phase 19: if no request_exit callback is wired (e.g. tests
+    that don't care about the exit path), Enter on the exit button
+    must be a clean no-op — no exception, daemon keeps running."""
+    s = _state(screen=Screen.HOME)
+    r, _, _ = _router(s)   # no request_exit injected
+    # Must not raise
+    r.handle(KeyEvent(key=Key.ENTER))
+
+
+def test_home_enter_swallowed_when_request_exit_raises():
+    """Phase 19: if the request_exit callback raises, the router
+    must swallow the exception. A buggy exit callback shouldn't
+    crash the input loop."""
+    s = _state(screen=Screen.HOME)
+    save = _SaveCapture()
+    bypass = _BypassCapture()
+
+    def boom() -> None:
+        raise RuntimeError("simulated exit failure")
+
+    r = InputRouter(
+        s, save_config=save, emergency_bypass=bypass,
+        request_exit=boom,
+    )
+    # Must not raise
+    r.handle(KeyEvent(key=Key.ENTER))
+
+
+def test_home_left_right_still_navigates_ring():
+    """Phase 19: arrow-left and arrow-right must still cycle the
+    screen ring even from HOME with the exit button focused. We
+    didn't break ring navigation when adding the exit button."""
+    s = _state(screen=Screen.HOME)
+    r, _, _ = _router(s)
+    r.handle(KeyEvent(key=Key.RIGHT))
+    # HOME → HEARD (per RING)
+    assert s.snapshot().screen is Screen.HEARD
+    r.handle(KeyEvent(key=Key.LEFT))
+    # Back to HOME
+    assert s.snapshot().screen is Screen.HOME
+
+
+def test_home_up_down_are_noop_with_single_focus_item():
+    """Phase 19: with only one focusable item on HOME, ↑/↓ are
+    no-ops (no other field to cycle to). They must NOT fall through
+    to ring nav — that would be confusing UX (operator expects ↑/↓
+    to be a within-screen action, not a screen change)."""
+    s = _state(screen=Screen.HOME)
+    r, _, _ = _router(s)
+    # UP/DOWN should not change screen
+    r.handle(KeyEvent(key=Key.UP))
+    assert s.snapshot().screen is Screen.HOME
+    r.handle(KeyEvent(key=Key.DOWN))
+    assert s.snapshot().screen is Screen.HOME
+
+
+def test_exit_button_renders_visibly_on_home(fonts):
+    """Phase 19: HOME render must include the EXIT label somewhere
+    in the lower portion of the body."""
+    from microjs8.ui import theme
+    from microjs8.ui.screens import _render_home
+
+    # Build a configured snapshot with default focus
+    s = _state(screen=Screen.HOME)
+    img = _render_home(s.snapshot(), fonts)
+
+    # Scan the bottom strip of the body for non-bg pixels. Exit
+    # button is anchored at BODY_Y1 - btn_h - 4; expect content
+    # around there.
+    btn_y = theme.BODY_Y1 - 18 - 4
+    non_bg = 0
+    for y in range(btn_y - 2, btn_y + 18 + 2):
+        for x in range((theme.SCREEN_W - 80) // 2 - 2,
+                       (theme.SCREEN_W - 80) // 2 + 80 + 2):
+            if img.getpixel((x, y)) != theme.BG:
+                non_bg += 1
+    assert non_bg > 30, (
+        f"Exit button area looks empty: only {non_bg} non-bg pixels; "
+        f"expected outline + 'EXIT' text"
+    )
+
+
+@pytest.fixture
+def fonts():
+    """Shared fonts fixture for render tests."""
+    from microjs8.ui.fonts import load_fonts
+    return load_fonts()

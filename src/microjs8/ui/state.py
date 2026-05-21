@@ -56,7 +56,12 @@ class Screen(enum.IntEnum):
     INBOX = 3             # mailbox: UNREAD/READ MSGs + held STORE
     COMPOSE = 4
     ALLCALL = 5
-    DIRECTED_MENU = 6
+    # Slot 6 was Screen.DIRECTED_MENU through v0.0.7. Phase 19 (v0.0.8)
+    # removed it — Compose handles directed sends natively (to-call
+    # field + verb dropdown). The numeric slot is left as a gap rather
+    # than renumbered so any persisted screen-index value from a prior
+    # version simply lands on EMERGENCY (a safe screen) instead of an
+    # arbitrary other screen.
     EMERGENCY = 7
     SETUP = 8
     # The shutdown screen is NOT part of the ring — it's only entered
@@ -284,6 +289,8 @@ def build_compose_wire(
 
 # Screens reachable through the main ← / → ring (excludes the
 # transient SHUTTING_DOWN screen and the modal INBOX_DETAIL).
+# Phase 19 (v0.0.8): DIRECTED_MENU removed — Compose handles
+# directed sends.
 RING: tuple[Screen, ...] = (
     Screen.HOME,
     Screen.HEARD,
@@ -291,7 +298,6 @@ RING: tuple[Screen, ...] = (
     Screen.INBOX,
     Screen.COMPOSE,
     Screen.ALLCALL,
-    Screen.DIRECTED_MENU,
     Screen.EMERGENCY,
     Screen.SETUP,
 )
@@ -301,13 +307,12 @@ RING: tuple[Screen, ...] = (
 # other screens get focusable items as their interactivity lands in
 # later steps.
 _FOCUSABLE_FIELDS: dict[Screen, tuple[str, ...]] = {
-    Screen.HOME: (),
+    Screen.HOME: ("home_exit",),  # Phase 19 v0.0.8: Exit button (only focusable)
     Screen.HEARD: (),
     Screen.DIRECTED: (),    # activity log: scrollable but no per-row Enter action
     Screen.INBOX: (),       # focus is row-index-based (see _inbox_focused_index)
     Screen.COMPOSE: ("compose_to", "compose_cmd", "compose_text", "compose_send"),
     Screen.ALLCALL: (),  # populated in Step 6
-    Screen.DIRECTED_MENU: (),  # populated in Step 6
     Screen.EMERGENCY: (),  # populated in Step 4/6
     Screen.SETUP: ("callsign", "grid", "groups", "units", "freq_hz", "radio", "emergency_bypass"),
     Screen.SHUTTING_DOWN: (),

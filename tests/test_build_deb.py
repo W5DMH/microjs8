@@ -58,6 +58,19 @@ def _run_packager(
     ``gfsk8_so`` (Phase 18.3) optionally passes ``--gfsk8-so`` to the
     packager so tests can verify the .so bundling path without
     depending on a real native build artifact existing on disk.
+
+    Phase 19 follow-up (May 21, 2026): when ``gfsk8_so`` is None
+    (the default for nearly every packaging test — they don't care
+    about the .so, they care about postinst / udev / service files /
+    etc.), we force ``MICROJS8_GFSK8_SO=""`` in the subprocess
+    environment. This is the authoritative "no gfsk8 in this build"
+    signal — the packager will skip both the env path and the
+    default search paths and produce a small .deb fast.
+
+    Without this, build hosts whose default search paths happen to
+    match a real 24 MB gfsk8 .so (e.g. hf256 at ~/build/gfsk8-modem-
+    clean/build/python/...) would compress that 24 MB into every
+    test's .deb, turning a 50 s test suite into a 5+ min wait.
     """
     cmd = [
         "python3",
@@ -69,7 +82,18 @@ def _run_packager(
         cmd.extend(["--version", version])
     if gfsk8_so is not None:
         cmd.extend(["--gfsk8-so", str(gfsk8_so)])
-    result = subprocess.run(cmd, check=False, capture_output=True, text=True)
+
+    env = os.environ.copy()
+    if gfsk8_so is None:
+        # Authoritative override: skip defaults, skip env path, no
+        # gfsk8 bundled. Tests that DO want the .so bundled pass
+        # gfsk8_so explicitly (in which case we leave env alone so
+        # --gfsk8-so on the command line wins).
+        env["MICROJS8_GFSK8_SO"] = ""
+
+    result = subprocess.run(
+        cmd, check=False, capture_output=True, text=True, env=env,
+    )
     assert result.returncode == 0, (
         f"build_deb.py failed (rc={result.returncode}):\n"
         f"stdout: {result.stdout}\nstderr: {result.stderr}"
@@ -839,3 +863,317 @@ def test_gfsk8_so_absent_when_not_provided(tmp_path: Path):
         "expected no gfsk8 entry when .so unavailable, got: " +
         "\n".join(l for l in contents.splitlines() if "gfsk8" in l)
     )
+
+
+# ── Phase 19 / v0.0.8: packaging hardening tests ────────────────────
+
+
+def test_postinst_does_NOT_auto_enable_microjs8(tmp_path: Path):
+    """Phase 19 (v0.0.8): postinst must NOT call `systemctl enable
+    microjs8.service` — both platforms launch on-demand via the
+    APPLaunch tile (CardputerZero) or `systemctl start` (bare Pi).
+    Auto-enabling would surprise operators after they tap Exit."""
+    deb = _run_packager(tmp_path)
+    extract_dir = tmp_path / "extract-noauto"
+    extract_dir.mkdir()
+    subprocess.run(
+        ["dpkg-deb", "-e", str(deb), str(extract_dir)],
+        check=True, capture_output=True,
+    )
+    postinst = (extract_dir / "postinst").read_text()
+    # Strip shell comments before grepping so the in-code rationale
+    # text can mention the old behavior without tripping the check.
+    active_lines = [
+        line for line in postinst.splitlines()
+        if not line.strip().startswith("#")
+    ]
+    active = "\n".join(active_lines)
+    assert "systemctl enable microjs8" not in active, (
+        "Phase 19 v0.0.8: postinst must NOT auto-enable microjs8.service "
+        "(operators launch on-demand via APPLaunch tile / systemctl start)"
+    )
+
+
+def test_postinst_does_NOT_auto_enable_rigctld(tmp_path: Path):
+    """Phase 19 (v0.0.8): same rule applies to rigctld.service —
+    it activates via microjs8.service's Wants=rigctld.service when
+    the daemon starts. Pre-enabling at boot caused the 366+ launcher
+    restart loop on PI-2W-TEST when no radio was attached yet."""
+    deb = _run_packager(tmp_path)
+    extract_dir = tmp_path / "extract-noauto-rig"
+    extract_dir.mkdir()
+    subprocess.run(
+        ["dpkg-deb", "-e", str(deb), str(extract_dir)],
+        check=True, capture_output=True,
+    )
+    postinst = (extract_dir / "postinst").read_text()
+    active_lines = [
+        line for line in postinst.splitlines()
+        if not line.strip().startswith("#")
+    ]
+    active = "\n".join(active_lines)
+    assert "systemctl enable rigctld" not in active, (
+        "Phase 19 v0.0.8: postinst must NOT auto-enable rigctld.service"
+    )
+
+
+def test_postinst_only_restarts_microjs8_if_active(tmp_path: Path):
+    """Phase 19 (v0.0.8): postinst should restart microjs8.service
+    only if it's already active (handles upgrades), NOT start it
+    unconditionally (would override the v0.0.8 'no auto-start' rule
+    on a fresh install)."""
+    deb = _run_packager(tmp_path)
+    extract_dir = tmp_path / "extract-restart"
+    extract_dir.mkdir()
+    subprocess.run(
+        ["dpkg-deb", "-e", str(deb), str(extract_dir)],
+        check=True, capture_output=True,
+    )
+    postinst = (extract_dir / "postinst").read_text()
+    # The 'if is-active' guard should be present
+    assert "is-active microjs8.service" in postinst, (
+        "Phase 19 v0.0.8: postinst must check is-active before "
+        "restart so fresh installs don't auto-start the daemon"
+    )
+
+
+def test_postinst_retries_sounddevice_install(tmp_path: Path):
+    """Phase 19 (v0.0.8): postinst must retry the sounddevice pip
+    install on failure — the May 21, 2026 PI-2W-TEST install showed
+    that a single TLS hiccup was enough to leave the daemon without
+    audio support. Retry + explicit import verification closes
+    that gap."""
+    deb = _run_packager(tmp_path)
+    extract_dir = tmp_path / "extract-sd-retry"
+    extract_dir.mkdir()
+    subprocess.run(
+        ["dpkg-deb", "-e", str(deb), str(extract_dir)],
+        check=True, capture_output=True,
+    )
+    postinst = (extract_dir / "postinst").read_text()
+    # The retry loop and verification import must both be present
+    assert "for attempt in 1 2 3" in postinst, (
+        "Phase 19: postinst must retry sounddevice install on failure"
+    )
+    # The post-install verification call
+    assert 'python3 -c "import sounddevice"' in postinst, (
+        "Phase 19: postinst must verify sounddevice imports after install"
+    )
+
+
+def test_postinst_enables_spi_overlay_on_pi(tmp_path: Path):
+    """Phase 19 (v0.0.8): postinst should auto-enable SPI in the Pi's
+    boot config so the userspace display driver finds /dev/spidev0.0
+    on first boot. Without this, fresh Bookworm Lite installs lose
+    the display until the operator manually runs raspi-config."""
+    deb = _run_packager(tmp_path)
+    extract_dir = tmp_path / "extract-spi"
+    extract_dir.mkdir()
+    subprocess.run(
+        ["dpkg-deb", "-e", str(deb), str(extract_dir)],
+        check=True, capture_output=True,
+    )
+    postinst = (extract_dir / "postinst").read_text()
+    assert "dtparam=spi=on" in postinst, (
+        "Phase 19: postinst must enable SPI overlay for the userspace "
+        "display driver"
+    )
+    # Backup must be created
+    assert "pre-microjs8" in postinst, (
+        "Phase 19: postinst SPI edit must back up the original config"
+    )
+    # And the operator must be told a reboot is required
+    assert "REBOOT REQUIRED" in postinst, (
+        "Phase 19: postinst must tell the operator to reboot after "
+        "enabling SPI (kernel rereads device-tree overlays at boot only)"
+    )
+
+
+def test_microjs8_service_restart_on_failure_not_always(tmp_path: Path):
+    """Phase 19 (v0.0.8): the systemd unit must use Restart=on-failure,
+    NOT Restart=always. The Exit button produces a clean 0 exit which
+    must NOT trigger an immediate systemd restart — otherwise the
+    Exit button is a no-op (daemon comes right back up)."""
+    deb = _run_packager(tmp_path)
+    extract_dir = tmp_path / "extract-svc"
+    extract_dir.mkdir()
+    subprocess.run(
+        ["dpkg-deb", "-x", str(deb), str(extract_dir)],
+        check=True, capture_output=True,
+    )
+    svc_path = extract_dir / "lib" / "systemd" / "system" / "microjs8.service"
+    svc = svc_path.read_text()
+    # Filter to non-comment lines so the in-file rationale text
+    # explaining the v0.0.8 change doesn't trip the check.
+    active_lines = [
+        line for line in svc.splitlines()
+        if not line.strip().startswith("#")
+    ]
+    active = "\n".join(active_lines)
+    assert "Restart=on-failure" in active, (
+        "Phase 19 v0.0.8: microjs8.service must use Restart=on-failure "
+        "so the HOME Exit button can actually exit the daemon"
+    )
+    assert "Restart=always" not in active, (
+        "Phase 19 v0.0.8: Restart=always defeats the Exit button"
+    )
+
+
+def test_rigctld_launcher_exits_zero_on_missing_hardware(tmp_path: Path):
+    """Phase 19 (v0.0.8): the rigctld launcher must exit 0 (not 1)
+    when the configured radio's device path isn't present. This
+    closes the 366-restart loop observed on PI-2W-TEST when QDX was
+    the default but no QDX was attached."""
+    deb = _run_packager(tmp_path)
+    extract_dir = tmp_path / "extract-launcher"
+    extract_dir.mkdir()
+    subprocess.run(
+        ["dpkg-deb", "-x", str(deb), str(extract_dir)],
+        check=True, capture_output=True,
+    )
+    launcher_path = extract_dir / "usr" / "local" / "bin" / "microjs8-rigctld-launcher"
+    launcher = launcher_path.read_text()
+    # Both QDX and DigiRig missing-hardware branches must exit 0
+    # Pattern: scan for the QDX/DigiRig sections and verify "exit 0"
+    # appears in each
+    assert "QDX not present" in launcher
+    assert "DigiRig not present" in launcher
+    # Each missing-hardware branch must say "exiting 0"
+    # (uses the v0.0.8 explanation text we added)
+    assert launcher.count("exiting 0 (no CAT until radio plugged in)") >= 2, (
+        "Phase 19 v0.0.8: launcher must exit 0 (not 1) on missing "
+        "hardware for BOTH qdx and xiegu-g90-digirig branches"
+    )
+
+
+def test_gfsk8_default_search_paths_include_source_repo_build_dir():
+    """Phase 19 (v0.0.8.1 follow-up): the default search paths must
+    include ``~/build/gfsk8-modem-clean/build/python/`` so a fresh
+    `python3 scripts/build_deb.py --output-dir dist` (no flags) on
+    the build host auto-detects the .so where build_gfsk8.sh puts it.
+
+    Surfaced May 21, 2026 when hf256 produced a 235 KB .deb instead
+    of the expected ~3.3 MB — the search path list only included the
+    venv location, but the canonical build artifact lives in the
+    source repo's build dir.
+    """
+    import sys
+    sys.path.insert(0, str(_repo_root() / "scripts"))
+    try:
+        from build_deb import DEFAULT_GFSK8_SEARCH_PATHS
+    finally:
+        sys.path.pop(0)
+
+    # At least one entry must reference the source-repo build dir
+    matching = [
+        p for p in DEFAULT_GFSK8_SEARCH_PATHS
+        if "gfsk8-modem-clean" in p and "/build/python/" in p
+    ]
+    assert len(matching) >= 1, (
+        "DEFAULT_GFSK8_SEARCH_PATHS missing the source-repo build "
+        f"dir entry; got {DEFAULT_GFSK8_SEARCH_PATHS!r}"
+    )
+
+
+def test_gfsk8_default_search_paths_expand_tilde():
+    """Phase 19 (v0.0.8.1): _find_gfsk8_so must expand ``~`` so the
+    source-repo entries (under ``~/build/...``) actually resolve to
+    the operator's home directory."""
+    import sys
+    import tempfile
+    from pathlib import Path as _Path
+    sys.path.insert(0, str(_repo_root() / "scripts"))
+    try:
+        from build_deb import _find_gfsk8_so
+    finally:
+        sys.path.pop(0)
+
+    # Build a fake .so under a temp dir, then point HOME at it so
+    # the default search path under ``~/build/...`` resolves.
+    import os
+    with tempfile.TemporaryDirectory() as td:
+        fake_home = _Path(td)
+        fake_build_dir = fake_home / "build" / "gfsk8-modem-clean" / "build" / "python"
+        fake_build_dir.mkdir(parents=True)
+        fake_so = fake_build_dir / "gfsk8.cpython-311-aarch64-linux-gnu.so"
+        fake_so.write_bytes(b"\x7fELF" + b"\x00" * 100)
+
+        old_home = os.environ.get("HOME")
+        # v0.0.8.1 fast-path patch: MICROJS8_GFSK8_SO is now an
+        # authoritative override. We must clear it for this test so
+        # _find_gfsk8_so actually reaches the default-search-paths
+        # branch — otherwise the test passes for the wrong reason
+        # in environments where the env var is set.
+        old_env = os.environ.pop("MICROJS8_GFSK8_SO", None)
+        try:
+            os.environ["HOME"] = str(fake_home)
+            # No explicit flag, no env var override, no system paths
+            # exist → must fall back to ~ expansion and find the
+            # fake .so we just planted.
+            found = _find_gfsk8_so(None)
+        finally:
+            if old_home is None:
+                del os.environ["HOME"]
+            else:
+                os.environ["HOME"] = old_home
+            if old_env is not None:
+                os.environ["MICROJS8_GFSK8_SO"] = old_env
+
+        assert found is not None, (
+            "_find_gfsk8_so failed to expand ~ in default search paths"
+        )
+        assert found == fake_so, (
+            f"expected {fake_so}, got {found}"
+        )
+
+
+def test_gfsk8_env_var_empty_string_means_no_gfsk8():
+    """Phase 19 follow-up (May 21, 2026): MICROJS8_GFSK8_SO="" must
+    be authoritative — _find_gfsk8_so must NOT fall back to default
+    search paths when the env var is explicitly empty.
+
+    This is the speed-fix contract: the test suite's _run_packager
+    sets this env var to "" so packaging tests can run fast on
+    build hosts where default search paths happen to match real
+    24 MB gfsk8 binaries.
+    """
+    import sys
+    import tempfile
+    from pathlib import Path as _Path
+    sys.path.insert(0, str(_repo_root() / "scripts"))
+    try:
+        from build_deb import _find_gfsk8_so
+    finally:
+        sys.path.pop(0)
+
+    import os
+    with tempfile.TemporaryDirectory() as td:
+        fake_home = _Path(td)
+        # Plant a fake .so where the default search path would find
+        # it — so we can prove the env var override DID short-circuit
+        # the defaults (otherwise the fake .so would be returned).
+        fake_build_dir = fake_home / "build" / "gfsk8-modem-clean" / "build" / "python"
+        fake_build_dir.mkdir(parents=True)
+        fake_so = fake_build_dir / "gfsk8.cpython-311-aarch64-linux-gnu.so"
+        fake_so.write_bytes(b"\x7fELF" + b"\x00" * 100)
+
+        old_home = os.environ.get("HOME")
+        old_env = os.environ.get("MICROJS8_GFSK8_SO")
+        try:
+            os.environ["HOME"] = str(fake_home)
+            os.environ["MICROJS8_GFSK8_SO"] = ""    # authoritative no
+            found = _find_gfsk8_so(None)
+        finally:
+            if old_home is None:
+                del os.environ["HOME"]
+            else:
+                os.environ["HOME"] = old_home
+            if old_env is None:
+                os.environ.pop("MICROJS8_GFSK8_SO", None)
+            else:
+                os.environ["MICROJS8_GFSK8_SO"] = old_env
+
+        assert found is None, (
+            f"MICROJS8_GFSK8_SO='' must short-circuit default paths; "
+            f"got {found!r} (the fake .so under fake $HOME)"
+        )

@@ -43,11 +43,17 @@ WorkingDirectory=/var/lib/microjs8
 # `python3 -m microjs8` finds the package shipped by this .deb.
 ExecStart=/usr/share/APPLaunch/bin/microjs8
 
-# Restart on ANY exit. The daemon runs forever in normal operation
-# (asyncio loop driven until SIGTERM), so this only fires for two
-# reasons: a real crash, and an INTENTIONAL clean exit triggered by
-# the operator changing the radio profile in Setup.
-Restart=always
+# Restart only on FAILURE (non-zero exit, signal kill, watchdog).
+# A clean exit (status 0) — what the v0.0.8 HOME Exit button produces
+# — must NOT restart. Operators tap Exit to leave the daemon; systemd
+# restarting would defeat that intent.
+#
+# Phase 19 (v0.0.8) changed this from Restart=always. Pre-v0.0.8, the
+# daemon's only intentional exit was a radio-profile change in Setup,
+# which legitimately wanted a restart (re-open hardware with the new
+# config). v0.0.8 routes that through SIGHUP / reread instead, and
+# the Exit button needs a clean shutdown path.
+Restart=on-failure
 RestartSec=5
 
 # Graceful stop: deliver SIGTERM, give the process up to TimeoutStopSec

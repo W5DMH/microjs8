@@ -514,7 +514,12 @@ def test_sos_badge_appears_in_header_when_armed(fonts):
     """Per Q3 spec: an armed-anywhere indicator must show in every
     screen header so the operator knows the beacon is TXing even
     when they've navigated to INBOX or HEARD. Verify by scanning
-    for red pixels in the HEADER region of a non-EMERGENCY screen."""
+    for red pixels in the HEADER region of a non-EMERGENCY screen.
+
+    Phase 19 (v0.0.8): the SOS badge moved from the right zone to
+    the center zone — the right is now reserved for the battery
+    indicator on every page. Scan the center band accordingly.
+    """
     from microjs8.ui import theme
     from microjs8.ui.screens import _render_home
 
@@ -524,10 +529,15 @@ def test_sos_badge_appears_in_header_when_armed(fonts):
     s.arm_emergency_beacon()
 
     img = _render_home(s.snapshot(), fonts)
-    # Scan the header band for red pixels (FG_BAD = ~220, 60, 60)
+    # Scan the CENTER band of the header for red pixels (FG_BAD).
+    # v0.0.8: SOS badge is centered; the right zone now hosts the
+    # battery indicator (which can also be red when no fuel gauge
+    # is present — see _battery_color — so we deliberately skip it).
+    center_left = theme.SCREEN_W // 2 - 50
+    center_right = theme.SCREEN_W // 2 + 50
     found_red = False
     for y in range(0, theme.HEADER_H):
-        for x in range(theme.SCREEN_W // 2, theme.SCREEN_W):
+        for x in range(center_left, center_right):
             r, g, b = img.getpixel((x, y))
             if r > 180 and g < 100 and b < 100:
                 found_red = True
@@ -535,14 +545,20 @@ def test_sos_badge_appears_in_header_when_armed(fonts):
         if found_red:
             break
     assert found_red, (
-        "SOS badge (red rectangle in header) should be visible "
+        "SOS badge (red rectangle in header center) should be visible "
         "when emergency_beacon_armed=True, even on non-EMERGENCY screens"
     )
 
 
 def test_sos_badge_absent_when_not_armed(fonts):
     """Regression: idle station's HOME screen header should NOT have
-    a red SOS badge."""
+    a red SOS badge in the CENTER (clock) zone.
+
+    Phase 19 (v0.0.8): the right zone can legitimately be red (the
+    battery indicator turns red when no fuel gauge is present, e.g.
+    on bare Pi). So we scan ONLY the center band where the SOS
+    badge would appear if armed.
+    """
     from microjs8.ui import theme
     from microjs8.ui.screens import _render_home
 
@@ -552,11 +568,11 @@ def test_sos_badge_absent_when_not_armed(fonts):
     # NOT armed
 
     img = _render_home(s.snapshot(), fonts)
-    # Header should have no big red rectangle. The clock area is the
-    # right half of the header; check it specifically.
+    center_left = theme.SCREEN_W // 2 - 50
+    center_right = theme.SCREEN_W // 2 + 50
     found_red = False
     for y in range(2, theme.HEADER_H - 2):
-        for x in range(theme.SCREEN_W // 2 + 30, theme.SCREEN_W - 4):
+        for x in range(center_left, center_right):
             r, g, b = img.getpixel((x, y))
             if r > 180 and g < 100 and b < 100:
                 found_red = True
@@ -564,7 +580,8 @@ def test_sos_badge_absent_when_not_armed(fonts):
         if found_red:
             break
     assert not found_red, (
-        "SOS badge should NOT render when beacon is idle"
+        "SOS badge should NOT render in the header center when "
+        "beacon is idle"
     )
 
 

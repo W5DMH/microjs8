@@ -107,18 +107,55 @@ case "$1" in
         #       systemd unit
         #   (c) the install is idempotent ("already satisfied" is
         #       a fast no-op on upgrades)
+        #
+        # v0.0.8 hardening (Phase 19): the May 21, 2026 PI-2W-TEST
+        # bring-up surfaced this failure mode — pip's underlying TLS
+        # negotiation can fail intermittently during apt-install
+        # (probably contention with apt's own network usage), and
+        # the resulting WARNING was easy to miss in the install
+        # log scroll. The daemon then ran without a working audio
+        # path and the cause wasn't obvious.
+        #
+        # We now:
+        #   1. Retry the pip install up to 3 times with backoff
+        #      before giving up
+        #   2. Explicitly verify the import works after install
+        #   3. Emit a much louder warning if it didn't take, with
+        #      an exact recovery command
         if ! python3 -c "import sounddevice" >/dev/null 2>&1; then
             echo "microjs8: pip-installing sounddevice (not in Bookworm apt)..."
-            # Suppress pip's progress chatter but keep errors visible.
-            pip install --quiet --break-system-packages sounddevice || {
-                echo "microjs8: WARNING — sounddevice pip install failed" >&2
-                echo "microjs8: audio path will not work until you run:" >&2
-                echo "  sudo pip install --break-system-packages sounddevice" >&2
-                # Don't fail the install — the daemon's audio path
-                # will log a clear error at startup and the doctor
-                # will surface the missing module. Operator can
-                # retry the pip install manually.
-            }
+            installed=0
+            for attempt in 1 2 3; do
+                if pip install --quiet --break-system-packages sounddevice 2>/dev/null; then
+                    # Verify the import actually works post-install.
+                    if python3 -c "import sounddevice" >/dev/null 2>&1; then
+                        echo "microjs8: sounddevice installed and import verified"
+                        installed=1
+                        break
+                    fi
+                fi
+                if [ "$attempt" -lt 3 ]; then
+                    echo "microjs8: sounddevice install attempt ${attempt} failed; retrying in $((attempt * 2))s..."
+                    sleep $((attempt * 2))
+                fi
+            done
+            if [ "$installed" = "0" ]; then
+                echo "" >&2
+                echo "  ════════════════════════════════════════════════════════════════" >&2
+                echo "  microjs8: ERROR — sounddevice install FAILED after 3 retries"     >&2
+                echo "  ════════════════════════════════════════════════════════════════" >&2
+                echo "  The microjs8 daemon's audio path WILL NOT WORK until you run:"    >&2
+                echo "" >&2
+                echo "    sudo pip install --break-system-packages sounddevice"           >&2
+                echo "" >&2
+                echo "  Then restart the daemon:"                                          >&2
+                echo "    sudo systemctl restart microjs8.service"                         >&2
+                echo "  ════════════════════════════════════════════════════════════════" >&2
+                echo "" >&2
+                # Still don't fail the install — operator can finish
+                # the recovery manually. But the warning is now
+                # impossible to miss in the install transcript.
+            fi
         fi
 
         # ── 7. /usr/local/bin/microjs8-doctor symlink ───────────────
@@ -138,6 +175,57 @@ exec /usr/share/APPLaunch/bin/microjs8 --doctor "$@"
 WRAPEOF
             chmod 0755 /usr/local/bin/microjs8-doctor
         fi
+
+        # ── 7.4. SPI bus auto-enable (Phase 19 / v0.0.8) ────────────
+        # The Phase 18 userspace SPI display driver needs /dev/spidev0.0
+        # which only appears when ``dtparam=spi=on`` is set in the Pi's
+        # boot config. On a fresh Bookworm Lite install this defaults to
+        # OFF, so v0.0.7 .deb installs would log "no SPI device at
+        # /dev/spidev0.0" and continue headless until the operator
+        # discovered they needed to enable SPI manually.
+        #
+        # v0.0.8 detects this case at install time and adds the line to
+        # the appropriate config file. The change requires a reboot to
+        # take effect (kernel rereads device-tree overlays at boot
+        # only), and we log a clear notice telling the operator.
+        #
+        # We only touch the config when:
+        #   (a) we're on a Pi (the config files exist)
+        #   (b) SPI isn't already enabled (so we don't double-write)
+        #   (c) the operator hasn't EXPLICITLY commented it out
+        #       (``#dtparam=spi=on`` — they made a decision; we respect)
+        #
+        # Bookworm Pi config lives at /boot/firmware/config.txt; older
+        # PiOS lives at /boot/config.txt. Check both.
+        for cfg in /boot/firmware/config.txt /boot/config.txt; do
+            if [ ! -w "$cfg" ]; then
+                continue
+            fi
+            if grep -qE '^[[:space:]]*dtparam=spi=on' "$cfg"; then
+                # Already enabled — nothing to do.
+                continue
+            fi
+            if grep -qE '^[[:space:]]*#[[:space:]]*dtparam=spi=on' "$cfg"; then
+                # Operator explicitly disabled it via comment — leave alone.
+                echo "microjs8: SPI is commented out in $cfg; leaving as-is (operator preference)"
+                continue
+            fi
+            # Append the line — under the [all] section if present, else at EOF.
+            ts="$(date +%Y%m%d-%H%M%S)"
+            cp "$cfg" "${cfg}.pre-microjs8-${ts}"
+            if grep -q '^\[all\]' "$cfg"; then
+                # Insert just after [all]
+                awk '/^\[all\]/{print; print "dtparam=spi=on  # added by microjs8 (Phase 19 / v0.0.8)"; next}1' \
+                    "$cfg" > "${cfg}.tmp" && mv "${cfg}.tmp" "$cfg"
+            else
+                echo "" >> "$cfg"
+                echo "# Added by microjs8 (Phase 19 / v0.0.8) — required for the userspace SPI display driver." >> "$cfg"
+                echo "dtparam=spi=on" >> "$cfg"
+            fi
+            echo "microjs8: enabled SPI in $cfg (backup: ${cfg}.pre-microjs8-${ts}) — REBOOT REQUIRED for the display"
+            break
+        done
+
 
         # ── 7.5. gpsd configuration (Phase 18.3) ────────────────────
         # If gpsd is installed (it's in Recommends, so usually is),
@@ -217,25 +305,48 @@ WRAPEOF
             fi
         done
 
-        # ── 7.8. rigctld.service (Phase 18.3) ───────────────────────
-        # Enable rigctld.service so CAT-mode radios (QDX, G90+DigiRig)
-        # get PTT support. The launcher script (installed at
-        # /usr/local/bin/microjs8-rigctld-launcher) decides per-radio
-        # whether to actually exec rigctld; for digirig-rts-only it
-        # exits 0 without starting rigctld.
+        # ── 7.8. rigctld.service (Phase 18.3 / v0.0.8 update) ───────
+        # Reload systemd so the unit file is known; do NOT enable it
+        # to start at boot. rigctld pulls in via microjs8.service's
+        # ``Wants=rigctld.service`` whenever microjs8 itself starts.
+        # Auto-enabling at boot meant the launcher's "no matching
+        # radio attached" exit-code-1 loop kept restarting forever
+        # on systems where the operator hadn't yet completed Setup —
+        # observed during the May 21, 2026 PI-2W-TEST bring-up.
         if [ -d /run/systemd/system ] && [ -f /lib/systemd/system/rigctld.service ]; then
-            systemctl enable rigctld.service >/dev/null 2>&1 || true
+            systemctl daemon-reload >/dev/null 2>&1 || true
         fi
 
-        # ── 8. systemd ──────────────────────────────────────────────
-        # Only act on systemd if we're actually running under
-        # systemd (not in a chroot, container without an init, etc).
+        # ── 8. systemd (Phase 19 / v0.0.8 update) ───────────────────
+        # Only act on systemd if we're actually running under systemd
+        # (not in a chroot, container without an init, etc).
+        #
+        # v0.0.8 deliberately does NOT enable microjs8.service on
+        # install. Both supported platforms — bare Pi Zero 2 W and
+        # M5Stack CardputerZero — launch microjs8 on-demand via the
+        # APPLaunch tile (which does ``systemctl start microjs8.service``).
+        # This way:
+        #   - Operators choose when to run a JS8 station vs. when to
+        #     use the Pi for other tasks
+        #   - The HOME-screen Exit button (new in v0.0.8) maps to a
+        #     real "leave the app" action, not just "stop and restart
+        #     next reboot"
+        #   - Bare Pi installs that DO want unattended-radio behavior
+        #     can opt in explicitly: ``sudo systemctl enable microjs8.service``
+        #
+        # We still daemon-reload + restart-if-already-running to handle
+        # the upgrade case: an operator on v0.0.7 that had the service
+        # enabled will keep it enabled (systemctl enable is idempotent
+        # one way only — never disables what's already enabled), and a
+        # running daemon needs the new code.
         if [ -d /run/systemd/system ]; then
             systemctl daemon-reload || true
-            systemctl enable microjs8.service || true
-            # Restart (not start) — handles the upgrade case where
-            # the service was already running with old code.
-            systemctl restart microjs8.service || true
+            # Restart only if currently active. Don't start if it
+            # wasn't running — that would surprise a fresh install
+            # operator who hasn't tapped the APPLaunch tile yet.
+            if systemctl is-active microjs8.service >/dev/null 2>&1; then
+                systemctl restart microjs8.service || true
+            fi
         fi
         ;;
 
