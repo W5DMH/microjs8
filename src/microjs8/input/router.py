@@ -458,18 +458,40 @@ class InputRouter:
                 return
             # ←/→ continue to ring nav below.
 
-        # Phase 19 (v0.0.8): HOME screen — single focusable element,
-        # the Exit button. Enter fires the daemon-exit callback. ↑/↓
-        # currently no-op (only one focusable item, so cycling is a
-        # noop); kept reserved for future HOME-page widgets.
+        # Phase 19 v0.0.8: HOME screen — single focusable element, the
+        # Exit button. v0.0.9 change: Enter on the EXIT button no
+        # longer fires the daemon-exit callback directly. Instead it
+        # transitions to the EXIT_CONFIRM modal where the operator
+        # must explicitly cycle focus to YES and press Enter again.
+        # This prevents accidental exits from a stray Enter on the
+        # default-focused button (field-test feedback May 21, 2026).
+        # ↑/↓ are currently no-ops on HOME (only one focusable item).
         if snapshot.screen is Screen.HOME:
             if event.key is Key.ENTER:
                 if snapshot.focused_field == "home_exit":
+                    _log.info(
+                        "Exit button activated on HOME — entering "
+                        "EXIT_CONFIRM modal"
+                    )
+                    self._ui.set_screen(Screen.EXIT_CONFIRM)
+                return
+            # UP/DOWN currently no-op on HOME; ←/→ continue to ring nav.
+            if event.key in (Key.UP, Key.DOWN):
+                return
+
+        # Phase 19 v0.0.9: EXIT_CONFIRM modal — operator picks YES or
+        # NO. Default focus is NO (set by _FOCUSABLE_FIELDS ordering).
+        # ←/→ cycle focus within the modal (do NOT escape to ring nav).
+        # Enter on YES fires the real exit callback; Enter on NO or
+        # Esc returns to HOME with focus restored to home_exit.
+        if snapshot.screen is Screen.EXIT_CONFIRM:
+            if event.key is Key.ENTER:
+                if snapshot.focused_field == "exit_yes":
+                    _log.info(
+                        "EXIT_CONFIRM: YES selected — invoking "
+                        "request_exit callback"
+                    )
                     if self._request_exit is not None:
-                        _log.info(
-                            "Exit button activated on HOME — requesting "
-                            "daemon shutdown"
-                        )
                         try:
                             self._request_exit()
                         except Exception:
@@ -477,16 +499,38 @@ class InputRouter:
                                 "request_exit callback raised"
                             )
                     else:
-                        # No exit callback wired (e.g. tests) — log
-                        # but don't crash.
                         _log.debug(
-                            "Exit button pressed but no request_exit "
-                            "callback configured; ignoring"
+                            "EXIT_CONFIRM: YES selected but no "
+                            "request_exit callback configured; "
+                            "returning to HOME"
                         )
+                        self._ui.set_screen(Screen.HOME)
+                else:
+                    # exit_no (or unrecognized) → cancel, return to HOME
+                    _log.info("EXIT_CONFIRM: NO selected — returning to HOME")
+                    self._ui.set_screen(Screen.HOME)
                 return
-            # UP/DOWN currently no-op on HOME; ←/→ continue to ring nav.
+            if event.key is Key.ESC:
+                _log.info("EXIT_CONFIRM: Esc pressed — returning to HOME")
+                self._ui.set_screen(Screen.HOME)
+                return
+            if event.key in (Key.LEFT, Key.RIGHT, Key.TAB):
+                # Cycle focus within the modal. Ring nav is intentionally
+                # blocked while the confirmation is on screen — the
+                # operator chose to consider exiting; they need to
+                # finish that decision before navigating away.
+                # With only two fields (NO, YES), cycle_focus()
+                # behaves as a toggle, so LEFT and RIGHT produce the
+                # same direction-change effect — visually the focus
+                # just hops to the OTHER button regardless of which
+                # arrow was pressed.
+                self._ui.cycle_focus()
+                return
+            # UP/DOWN no-ops (only two fields, both side-by-side).
             if event.key in (Key.UP, Key.DOWN):
                 return
+            # Any other key: ignore (don't fall through to ring nav).
+            return
 
         # Directed activity log (Screen.DIRECTED): ↑/↓ reserved for
         # future scroll-up-into-history (the bottom of the list is

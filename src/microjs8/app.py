@@ -106,6 +106,12 @@ class MicroJS8App:
         self._config = config
         self._headless = headless
         self._stop = asyncio.Event()
+        # v0.0.9: differentiates "operator wants to leave" (clean exit
+        # 0; systemd won't restart) from "radio cycle wants the daemon
+        # back" (exit 75; systemd's RestartForceExitStatus=75 brings
+        # us back up). Set only via request_restart(); request_stop()
+        # leaves it False so the default exit code is 0.
+        self._restart_requested: bool = False
         self._ui_state: Optional[UIState] = None
         self._render_thread: Optional[RenderThread] = None
         # Reference to the asyncio event loop, captured at run() start
@@ -180,9 +186,49 @@ class MicroJS8App:
         self._hb_beacon: Optional[HeartbeatBeacon] = None
 
     def request_stop(self) -> None:
+        """Request a clean exit (return code 0).
+
+        Called by SIGTERM/SIGINT handlers and by the HOME Exit button.
+        systemd's ``Restart=on-failure`` won't restart on exit-0, so
+        the operator's intent ("leave the daemon") is honored.
+        """
         if not self._stop.is_set():
             _log.info("shutdown requested")
             self._stop.set()
+
+    def request_restart(self) -> None:
+        """Request a clean exit with code 75 (EX_TEMPFAIL).
+
+        Used by paths that want the daemon to come back up after a
+        clean shutdown — currently only the radio-profile cycle in
+        Setup. systemd's ``RestartForceExitStatus=75`` directive in
+        microjs8.service.in treats this code as "always restart"
+        even with ``Restart=on-failure``.
+
+        Why a separate exit code rather than calling request_stop():
+        v0.0.8 introduced the HOME Exit button which needs a clean
+        0-exit that does NOT restart. The radio-cycle path also exits
+        cleanly but needs the opposite restart behavior. The exit
+        code is the only signal systemd has to tell them apart.
+
+        EX_TEMPFAIL (75) chosen over a custom value because it's
+        defined in sysexits.h as "temporary failure, the user is
+        invited to retry" — semantically aligned with "the daemon
+        meant to keep running, please restart it".
+        """
+        if not self._stop.is_set():
+            _log.warning("restart requested — exit code will be 75")
+            self._restart_requested = True
+            self._stop.set()
+
+    @property
+    def exit_code(self) -> int:
+        """The exit code main() should use after ``run()`` returns.
+
+        Returns 75 if ``request_restart()`` was called (systemd will
+        restart per ``RestartForceExitStatus=75``), 0 otherwise.
+        """
+        return 75 if self._restart_requested else 0
 
     async def run(self) -> None:
         loop = asyncio.get_running_loop()
@@ -1141,43 +1187,29 @@ class MicroJS8App:
         self._config = new_cfg
         self._ui_state.set_radio_id(new_cfg.radio_id)
         _log.warning(
-            "cycle_radio: %s → %s — exiting cleanly so systemd "
-            "restarts us with the new radio path",
+            "cycle_radio: %s → %s — requesting restart (exit 75) so "
+            "systemd brings us back up with the new radio path",
             snap.radio_id, new_cfg.radio_id,
         )
-        # Schedule the exit on the asyncio loop so we don't kill the
+        # Schedule the restart on the asyncio loop so we don't kill the
         # daemon mid-handler (the router would observe a half-cleaned
-        # state on its way out). _request_exit walks through the
-        # normal cleanup path (stop scheduler / encode worker / CAT
-        # / playback / etc.) before calling sys.exit.
-        self._request_clean_exit_for_radio_change()
+        # state on its way out). request_restart() sets the stop event
+        # + flags exit code 75. The main run loop awaits the event,
+        # falls through to the normal cleanup path, run() returns,
+        # and __main__ exits 75 — which systemd treats as "restart me"
+        # per RestartForceExitStatus=75.
+        self.request_restart()
         return True
 
     def _request_clean_exit_for_radio_change(self) -> None:
-        """Schedule a clean shutdown that exits with code 0.
+        """Deprecated wrapper kept for any external callers.
 
-        Called by ``_cycle_radio_sync`` after the new radio is saved
-        to config. systemd's ``Restart=always`` directive on the
-        microjs8.service unit brings us back up with the new radio
-        path active.
-
-        Why this is its own helper rather than inlined: keeps the
-        systemd-coupling explicit in one place. If the restart policy
-        ever changes (or we add a different reason to want a clean
-        exit), this is the spot to update.
-
-        Implementation: sets the same asyncio.Event used by SIGTERM /
-        SIGINT (``self._stop``). The main run loop awaits this event,
-        falls through to the cleanup path, and ``run()`` returns
-        cleanly. ``__main__.py`` translates a clean return to exit
-        code 0.
-
-        Thread safety: the cycle handler runs on the asyncio thread
-        (router callbacks are scheduled there), so a direct call to
-        ``request_stop()`` is safe. We don't need
-        ``call_soon_threadsafe`` here.
+        v0.0.9: replaced by direct calls to ``request_restart()``. The
+        helper-with-its-own-name pattern made sense when there was
+        one exit semantic; now that we have two (stop vs restart),
+        calling the explicit method is clearer than a wrapper.
         """
-        self.request_stop()
+        self.request_restart()
 
     def _trigger_emergency_bypass(self) -> None:
         """Activate the unconfigured-emergency override.

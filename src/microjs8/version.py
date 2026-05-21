@@ -11,4 +11,4 @@ fails to import the package during build on some setuptools versions
 runtime.
 """
 
-__version__ = "0.0.8"
+__version__ = "0.0.9"

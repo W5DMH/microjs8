@@ -75,6 +75,15 @@ class Screen(enum.IntEnum):
     # HEARTBEAT row of the ALLCALL screen, exited via Enter (commit)
     # or Esc (cancel) back to ALLCALL. Not part of the main screen ring.
     HB_MODE_SELECT = 11
+    # Phase 19 v0.0.9: Exit-confirmation modal — entered via Enter on
+    # the EXIT button on HOME, exited via:
+    #   - Enter on YES → daemon exits (request_exit callback fires)
+    #   - Enter on NO or Esc → back to HOME (no exit)
+    # Default focus is on NO (safer; one stray Enter cancels the
+    # confirmation rather than exits). Not part of the main screen
+    # ring — operators reach it only via the HOME Exit button, never
+    # via ←/→ cycle.
+    EXIT_CONFIRM = 12
 
 
 class HbMode(enum.Enum):
@@ -319,6 +328,12 @@ _FOCUSABLE_FIELDS: dict[Screen, tuple[str, ...]] = {
     # INBOX_DETAIL has no named focusable fields — focus is the
     # implicit "the message being viewed". Up/Down scroll the body.
     Screen.INBOX_DETAIL: (),
+    # Phase 19 v0.0.9: EXIT_CONFIRM modal. NO comes first so default
+    # focus lands on the safer choice; YES requires the operator to
+    # explicitly cycle to it before pressing Enter. This is the
+    # intentional friction-against-accidental-exit per operator
+    # request from the May 21, 2026 field test.
+    Screen.EXIT_CONFIRM: ("exit_no", "exit_yes"),
 }
 
 
@@ -757,6 +772,15 @@ class UIState:
                     latest_call = station.callsign
                     break
             self.compose_prepopulate_from_heard(latest_call)
+
+        # Phase 19 v0.0.9: when entering EXIT_CONFIRM, always reset
+        # focus to NO (index 0). Without this, a previous visit that
+        # ended with focus on YES (e.g. operator considered exiting,
+        # cycled to YES, then changed mind and pressed Esc) would
+        # leave the focus index at YES the NEXT time the modal opens
+        # — defeating the "safer default" intent.
+        if self._screen is Screen.EXIT_CONFIRM:
+            self._focus_index[Screen.EXIT_CONFIRM] = 0
 
     # ── Focus cycling ────────────────────────────────────────────────
 

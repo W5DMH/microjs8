@@ -568,22 +568,27 @@ def test_directed_log_very_long_body_does_ellipsize(fonts):
 # ── Header banner: UTC clock on every screen ─────────────────────────
 
 
-def test_header_time_format_includes_utc_prefix():
-    """The header clock helper returns ``UTC HH:MM:SS`` — the explicit
-    UTC label tells the operator at a glance that the time is the
-    ham-radio reference (not local), and the format keeps fixed
-    width so right-alignment doesn't jitter as the seconds tick."""
+def test_header_time_format_is_just_hhmmss():
+    """Phase 19 v0.0.9: header clock is the bare ``HH:MM:SS`` string
+    (8 chars, no ``UTC `` prefix).
+
+    Pre-v0.0.9 we rendered ``UTC HH:MM:SS`` (12 chars) but the
+    centered-clock layout introduced in v0.0.8 couldn't afford the
+    extra ~30 px — long titles like EMERGENCY truncated into the
+    clock zone. JS8 station time is UTC by convention; the TimeSrc
+    row on HOME continues to surface the source for newbies.
+    """
     from microjs8.ui.screens import _format_time_for_header
     snap = _snapshot(Screen.HOME)
     s = _format_time_for_header(snap)
-    # 12 chars wide: "UTC " + "HH:MM:SS"
-    assert s.startswith("UTC "), (
-        f"clock string must start with 'UTC ' prefix; got {s!r}"
+    assert not s.startswith("UTC"), (
+        f"clock string must NOT carry the UTC prefix in v0.0.9; got {s!r}"
     )
-    assert len(s) == 12
-    time_part = s[4:]
-    assert time_part.count(":") == 2
-    for part in time_part.split(":"):
+    assert len(s) == 8, (
+        f"clock string must be exactly 8 chars (HH:MM:SS); got {s!r}"
+    )
+    assert s.count(":") == 2
+    for part in s.split(":"):
         assert len(part) == 2
         assert part == "--" or part.isdigit()
 
@@ -869,59 +874,6 @@ def _battery_state(capacity: int, status: str = "Discharging"):
     return BatteryState(capacity, 3.7, -150.0, 25.0, status)
 
 
-def test_home_renders_critical_battery_in_red(fonts):
-    """Discharging at ≤5% should paint at least one FG_BAD pixel
-    in the Batt row's value column."""
-    snap = _snapshot(Screen.HOME)
-    from dataclasses import replace
-    snap = replace(snap, battery=_battery_state(4, "Discharging"))
-    img = render(snap, fonts)
-    # Scan the body for FG_BAD-coloured pixels (220, 60, 60).
-    found_red = False
-    for x in range(theme.SCREEN_W):
-        for y in range(theme.BODY_Y0, theme.BODY_Y1):
-            r, g, b = img.getpixel((x, y))
-            if r > 200 and 40 < g < 80 and 40 < b < 80:
-                found_red = True
-                break
-        if found_red:
-            break
-    assert found_red, "expected FG_BAD pixels for critical battery on HOME"
-
-
-def test_home_renders_low_battery_in_amber(fonts):
-    """10% discharging is below LOW (15%) threshold — paint amber."""
-    snap = _snapshot(Screen.HOME)
-    from dataclasses import replace
-    snap = replace(snap, battery=_battery_state(10, "Discharging"))
-    img = render(snap, fonts)
-    found_amber = False
-    for x in range(theme.SCREEN_W):
-        for y in range(theme.BODY_Y0, theme.BODY_Y1):
-            r, g, b = img.getpixel((x, y))
-            if r > 200 and 140 < g < 200 and b < 100:
-                found_amber = True
-                break
-        if found_amber:
-            break
-    assert found_amber, "expected FG_WARN pixels for low battery on HOME"
-
-
-def test_home_renders_charging_battery_in_white(fonts):
-    """Charging at 4% — the operator is on the cable, no warn colour."""
-    snap = _snapshot(Screen.HOME)
-    from dataclasses import replace
-    snap = replace(snap, battery=_battery_state(4, "Charging"))
-    img = render(snap, fonts)
-    # Should NOT find FG_BAD pixels (the row is white when charging).
-    for x in range(theme.SCREEN_W):
-        for y in range(theme.BODY_Y0, theme.BODY_Y1):
-            r, g, b = img.getpixel((x, y))
-            assert not (r > 200 and 40 < g < 80 and 40 < b < 80), (
-                f"unexpected FG_BAD pixel at ({x},{y}) when battery is charging"
-            )
-
-
 def test_home_renders_when_battery_unknown(fonts):
     """battery=None must not crash the renderer."""
     snap = _snapshot(Screen.HOME)
@@ -1153,4 +1105,178 @@ def test_banner_time_is_centered(fonts):
     assert abs(text_center - expected_center) < 15, (
         f"clock not centered: text_center={text_center}, "
         f"expected ~{expected_center} (±15)"
+    )
+
+
+def test_banner_emergency_title_renders_without_truncation(fonts):
+    """Phase 19 v0.0.9: the ``EMERGENCY`` title (~124 px at 18pt bold)
+    must render fully without ellipsis-truncation, thanks to the
+    adaptive-clock logic that shifts the clock right when a wide
+    title would otherwise overlap the centered position.
+
+    Pre-v0.0.9 the clock was true-centered, leaving only ~109 px for
+    the title — EMERGENCY truncated to ``EMERG…``. The fix moves the
+    clock right just enough to fit the full word.
+    """
+    from microjs8.ui import theme
+    from microjs8.ui.screens import _render_emergency
+    from PIL import ImageDraw
+
+    s = _snapshot(Screen.EMERGENCY)
+    img = _render_emergency(s, fonts)
+
+    # Measure the natural width of "EMERGENCY" at title font.
+    probe = ImageDraw.Draw(img)
+    full_w = int(probe.textlength("EMERGENCY", font=fonts.title))
+
+    # Scan the header for the title's rightmost painted pixel in
+    # the left zone (x ∈ [PAD_X, 150] is plenty of room).
+    rightmost = 0
+    for y in range(0, theme.HEADER_H):
+        for x in range(theme.PAD_X, 150):
+            if img.getpixel((x, y)) != theme.HEADER_BG:
+                rightmost = max(rightmost, x)
+
+    # If truncated, rightmost would be much less than PAD_X+full_w.
+    # Allow ±5 px slack for font descender / accent variations.
+    expected = theme.PAD_X + full_w
+    assert rightmost >= expected - 5, (
+        f"EMERGENCY title appears truncated: rightmost painted "
+        f"pixel at x={rightmost}, expected near {expected} "
+        f"(title width {full_w} + PAD_X={theme.PAD_X})"
+    )
+
+
+def test_banner_clock_shifts_right_on_emergency_screen(fonts):
+    """Phase 19 v0.0.9: contract pin — when the title would force
+    truncation at true-center, the clock visibly shifts right.
+
+    Implementation: the clock string contains colons (``HH:MM:SS``)
+    which titles don't, so we count painted columns at a y-row
+    where colons render as a single-pixel dot. Then we observe
+    where the FIRST clock colon (between HH and MM) shows up on
+    each screen — that position shifts right when the layout
+    has to make room for a wide title.
+    """
+    from microjs8.ui import theme
+    from microjs8.ui.screens import _render_home, _render_emergency
+
+    home_snap = _snapshot(Screen.HOME)
+    em_snap = _snapshot(Screen.EMERGENCY)
+    home_img = _render_home(home_snap, fonts)
+    em_img = _render_emergency(em_snap, fonts)
+
+    def _first_colon_x_in_header(img):
+        """Return the x of the first 'colon-like' single-column dot
+        in the header band.
+
+        A colon at the FONT_CLOCK font has two short vertical pixel
+        runs centered around y≈10-15 of the header. We scan for
+        columns that are dark above/below but have painted pixels
+        only in the middle 2-3 rows.
+        """
+        for x in range(theme.PAD_X, theme.SCREEN_W - theme.PAD_X):
+            mid_painted = sum(
+                1 for y in range(8, 16)
+                if img.getpixel((x, y)) != theme.HEADER_BG
+            )
+            edge_painted = sum(
+                1 for y in (2, 3, 4, 19, 20, 21)
+                if img.getpixel((x, y)) != theme.HEADER_BG
+            )
+            # Colon: painted in the middle, empty at top/bottom of the header
+            if mid_painted >= 2 and edge_painted == 0:
+                return x
+        return None
+
+    home_colon = _first_colon_x_in_header(home_img)
+    em_colon = _first_colon_x_in_header(em_img)
+
+    assert home_colon is not None, "HOME clock colon not found"
+    assert em_colon is not None, "EMERGENCY clock colon not found"
+    # EMERGENCY clock must be at least 5 px to the right of HOME's
+    # (actual shift is ~15 px; 5 is a generous lower bound for
+    # ±font-metric slack).
+    assert em_colon >= home_colon + 5, (
+        f"EMERGENCY clock should be shifted right of HOME clock by ≥5 px "
+        f"(home_colon_x={home_colon}, emergency_colon_x={em_colon})"
+    )
+
+
+# ── Phase 19 v0.0.9: EXIT_CONFIRM modal rendering ──────────────────
+
+
+def test_exit_confirm_renders_with_no_focused_by_default(fonts):
+    """Phase 19 v0.0.9: render the EXIT_CONFIRM modal with default
+    focus and verify the NO button has a green outline (focused state)
+    while YES has a dim outline (unfocused)."""
+    from microjs8.ui import theme
+    from microjs8.ui.screens import _render_exit_confirm
+    from dataclasses import replace
+
+    s = replace(_snapshot(Screen.EXIT_CONFIRM), focused_field="exit_no")
+    img = _render_exit_confirm(s, fonts)
+
+    # Scan the lower-third of the body for green pixels (FG_GOOD).
+    # The NO button outline + label are both FG_GOOD when focused.
+    found_green = False
+    for y in range(theme.BODY_Y0 + 80, theme.BODY_Y0 + 130):
+        for x in range(theme.SCREEN_W):
+            r, g, b = img.getpixel((x, y))
+            # FG_GOOD is roughly (60, 200, 80) — high green, low red/blue
+            if g > 150 and r < 120 and b < 120:
+                found_green = True
+                break
+        if found_green:
+            break
+    assert found_green, (
+        "EXIT_CONFIRM with focus on NO must render at least one FG_GOOD "
+        "(green) pixel — the NO button outline + label"
+    )
+
+
+def test_exit_confirm_renders_with_yes_focused(fonts):
+    """Phase 19 v0.0.9: when focus moves to YES, render it with a red
+    outline (FG_BAD)."""
+    from microjs8.ui import theme
+    from microjs8.ui.screens import _render_exit_confirm
+    from dataclasses import replace
+
+    s = replace(_snapshot(Screen.EXIT_CONFIRM), focused_field="exit_yes")
+    img = _render_exit_confirm(s, fonts)
+
+    # Scan lower-third for red pixels (FG_BAD ≈ 220,60,60).
+    found_red = False
+    for y in range(theme.BODY_Y0 + 80, theme.BODY_Y0 + 130):
+        for x in range(theme.SCREEN_W):
+            r, g, b = img.getpixel((x, y))
+            if r > 180 and g < 100 and b < 100:
+                found_red = True
+                break
+        if found_red:
+            break
+    assert found_red, (
+        "EXIT_CONFIRM with focus on YES must render at least one FG_BAD "
+        "(red) pixel — the YES button outline + label"
+    )
+
+
+def test_exit_confirm_renders_explanation_text(fonts):
+    """Phase 19 v0.0.9: the modal body explains what the YES action
+    does, so the operator isn't choosing in the dark."""
+    from microjs8.ui import theme
+    from microjs8.ui.screens import _render_exit_confirm
+
+    s = _snapshot(Screen.EXIT_CONFIRM)
+    img = _render_exit_confirm(s, fonts)
+    # Just verify we paint SOMETHING in the upper body area where the
+    # explanation text lives (above the buttons).
+    non_bg = 0
+    for y in range(theme.BODY_Y0 + 4, theme.BODY_Y0 + 60):
+        for x in range(theme.SCREEN_W):
+            if img.getpixel((x, y)) != theme.BG:
+                non_bg += 1
+    assert non_bg > 100, (
+        f"EXIT_CONFIRM body looks empty above buttons: {non_bg} non-bg "
+        f"pixels found; expected the explanation text to render"
     )

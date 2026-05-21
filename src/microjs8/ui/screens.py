@@ -128,7 +128,25 @@ def _draw_header(
         except Exception:
             time_w = 8 * len(time_str)
             time_h = theme.FONT_CLOCK
-        time_x = (theme.SCREEN_W - time_w) // 2
+
+        # v0.0.9 adaptive positioning: prefer true-center, but shift
+        # the clock right just enough to fit the full title if the
+        # title would otherwise truncate. Battery zone caps the shift
+        # so the clock can never collide with the battery indicator.
+        # Visible effect: clock moves ~15 px right on EMERGENCY
+        # (the only screen wide enough to trigger this), back to
+        # true-center on every other screen. Better than reducing
+        # FONT_TITLE globally just to satisfy one screen.
+        try:
+            title_w_full = int(draw.textlength(title, font=fonts.title))
+        except Exception:
+            title_w_full = 10 * len(title)
+        true_center_x = (theme.SCREEN_W - time_w) // 2
+        title_needs_x = theme.PAD_X + title_w_full + 6
+        max_legal_x = battery_x - time_w - 6
+        time_x = max(true_center_x, title_needs_x)
+        time_x = min(time_x, max_legal_x)
+        time_x = max(time_x, true_center_x)  # never drift left of center
         time_y = (theme.HEADER_H - time_h) // 2 - 1
         center_left_edge = time_x
         draw.text(
@@ -258,7 +276,7 @@ def _draw_sos_badge_center(
 
 
 def _format_time_for_header(state: UISnapshot) -> str:
-    """Return the ``UTC HH:MM:SS`` clock string for the header.
+    """Return the ``HH:MM:SS`` clock string for the header.
 
     Source priority for the displayed time:
 
@@ -268,24 +286,31 @@ def _format_time_for_header(state: UISnapshot) -> str:
          time source — that's a separate diagnostic surfaced via
          HOME's TimeSrc row, not via the clock display.
 
-    The "UTC " prefix is part of the string returned (not a separate
-    label) so the renderer measures + right-aligns it as a single
-    unit. On format failure (rare), we render ``UTC --:--:--`` as a
-    placeholder.
+    Phase 19 v0.0.9: the ``UTC `` prefix was dropped from the rendered
+    string. JS8 stations are UTC by convention (the time-on-air slot
+    boundaries align to UTC seconds) and the prefix took ~30 px of
+    horizontal real estate that the centered-clock layout couldn't
+    afford — long titles like ``EMERGENCY`` were truncating into the
+    clock zone. The TimeSrc row on HOME still labels the source
+    explicitly for newbies.
+
+    Returned format is always ``HH:MM:SS`` (8 chars) so the layout
+    code can reserve a stable amount of horizontal space. On format
+    failure (rare), we render ``--:--:--`` as a placeholder.
     """
     from datetime import datetime, timezone
 
     if state.gps.fix_time is not None:
         try:
             ts = datetime.fromtimestamp(state.gps.fix_time, tz=timezone.utc)
-            return "UTC " + ts.strftime("%H:%M:%S")
+            return ts.strftime("%H:%M:%S")
         except (ValueError, OSError, OverflowError):
-            return "UTC --:--:--"
+            return "--:--:--"
     try:
         ts = datetime.fromtimestamp(time.time(), tz=timezone.utc)
-        return "UTC " + ts.strftime("%H:%M:%S")
+        return ts.strftime("%H:%M:%S")
     except (ValueError, OSError, OverflowError):
-        return "UTC --:--:--"
+        return "--:--:--"
 
 
 def _draw_footer(
@@ -369,27 +394,18 @@ def _render_home(state: UISnapshot, fonts: Fonts) -> Image.Image:
     cat_label = "CONNECTED" if state.cat_connected else "--"
     cat_color = theme.FG_GOOD if state.cat_connected else theme.FG_DIM
     _kv_row(draw, fonts, y, "CAT", cat_label, value_color=cat_color)
-    y += 18
-    # Phase 6 §6.11: battery row. Shows "NN% [↑/↓/=]" where the glyph
-    # encodes status. Color follows the §6.11 thresholds:
-    #   - FG_BAD (red)   : discharging at ≤ 5% — TX is gated
-    #   - FG_WARN (amber): discharging at ≤ 15% — operator should charge
-    #   - FG (white)     : everywhere else (charging, healthy, full)
-    # When the battery snapshot is None (no fuel gauge or sustained
-    # read failure), we render '--' rather than hiding the row.
-    if state.battery is None:
-        batt_label = "--"
-        batt_color = theme.FG_DIM
-    else:
-        b = state.battery
-        batt_label = f"{b.capacity}% {b.status_glyph}"
-        if b.is_critical:
-            batt_color = theme.FG_BAD
-        elif b.is_low:
-            batt_color = theme.FG_WARN
-        else:
-            batt_color = theme.FG
-    _kv_row(draw, fonts, y, "Batt", batt_label, value_color=batt_color)
+    # v0.0.9: Batt row removed from HOME body. The three-zone banner
+    # introduced in v0.0.8 already shows battery state on every screen,
+    # so the dedicated HOME row was redundant duplication. Power-state
+    # diagnostics (charging/discharging glyph, exact voltage) can live
+    # in a future "diagnostics" subscreen if operators need them. The
+    # at-a-glance percent + color in the banner covers the daily case.
+    #
+    # The y += 18 increment that used to follow the CAT row (to make
+    # room for Batt) was deliberate — the Inbox block conditionally
+    # adds its own y += 18 only when it actually renders, so the
+    # space below CAT is now used by Inbox (when there's mail) or
+    # left empty (when there isn't).
 
     # Inbox indicator — only rendered when there's something to
     # show, so the operator's eye is drawn to it. Format:
@@ -1992,6 +2008,116 @@ def _render_shutting_down(state: UISnapshot, fonts: Fonts) -> Image.Image:
     return img
 
 
+def _render_exit_confirm(state: UISnapshot, fonts: Fonts) -> Image.Image:
+    """EXIT_CONFIRM modal — "Exit MicroJS8?" with NO / YES buttons.
+
+    Phase 19 v0.0.9: a thin layer of friction between the HOME EXIT
+    button and the actual daemon exit. From the May 21, 2026 field
+    test: the HOME Exit button (the only focusable item on HOME) was
+    too easy to trigger by a stray Enter, dropping the operator out
+    of the running daemon by accident.
+
+    Layout (320 × 170):
+      ┌──────────────────────────────────────────┐
+      │ EXIT MICROJS8?           HH:MM:SS    87% │   header
+      ├──────────────────────────────────────────┤
+      │                                          │
+      │       Exit the daemon? Unsaved          │
+      │       traffic in the outbound            │
+      │       queue will be retried              │
+      │       at the next start.                 │
+      │                                          │
+      │       ┌─────────┐    ┌─────────┐         │
+      │       │   NO    │    │   YES   │         │
+      │       └─────────┘    └─────────┘         │
+      │                                          │
+      ├──────────────────────────────────────────┤
+      │  ← → pick  ·  Enter commit  ·  Esc       │   footer
+      └──────────────────────────────────────────┘
+
+    Default focus is on NO (green outline). Operator must explicitly
+    move focus to YES (red outline) before pressing Enter to actually
+    exit. ←/→ cycles focus; Enter on YES fires the request_exit
+    callback; Enter on NO or Esc returns to HOME with the EXIT
+    button re-focused.
+    """
+    img, draw = _new_canvas()
+    _draw_header(draw, fonts, "EXIT MICROJS8?", state)
+
+    # Explanatory body — three short lines of context so the operator
+    # knows what the YES action actually does.
+    body_lines = (
+        "Exit the daemon?",
+        "Unsaved outbound traffic",
+        "will retry at next start.",
+    )
+    y = theme.BODY_Y0 + 10
+    line_h = 18
+    for line in body_lines:
+        try:
+            w = int(draw.textlength(line, font=fonts.body))
+        except Exception:
+            w = 8 * len(line)
+        x = (theme.SCREEN_W - w) // 2
+        draw.text((x, y), line, font=fonts.body, fill=theme.FG)
+        y += line_h
+
+    # ── NO / YES buttons ────────────────────────────────────────────
+    y_btn = y + 6
+    btn_w = 90
+    btn_h = 22
+    gap = 30
+    total_w = btn_w * 2 + gap
+    x_start = (theme.SCREEN_W - total_w) // 2
+
+    focused = state.focused_field
+
+    # NO button (left, green when focused) — the SAFE choice
+    no_x0 = x_start
+    no_box = (no_x0, y_btn, no_x0 + btn_w, y_btn + btn_h)
+    no_focus = (focused == "exit_no")
+    if no_focus:
+        # Filled inverted style with green outline — pre-selected on
+        # entry, signals "this is the default safe choice".
+        draw.rectangle(no_box, fill=theme.HEADER_BG, outline=theme.FG_GOOD)
+        no_color = theme.FG_GOOD
+    else:
+        draw.rectangle(no_box, outline=theme.FG_DIM)
+        no_color = theme.FG_DIM
+    no_label = "NO"
+    try:
+        no_w = int(draw.textlength(no_label, font=fonts.body))
+    except Exception:
+        no_w = 24
+    draw.text(
+        (no_x0 + (btn_w - no_w) // 2, y_btn + (btn_h - 14) // 2 - 1),
+        no_label, font=fonts.body, fill=no_color,
+    )
+
+    # YES button (right, red when focused) — the DESTRUCTIVE choice
+    yes_x0 = no_x0 + btn_w + gap
+    yes_box = (yes_x0, y_btn, yes_x0 + btn_w, y_btn + btn_h)
+    yes_focus = (focused == "exit_yes")
+    if yes_focus:
+        draw.rectangle(yes_box, fill=theme.HEADER_BG, outline=theme.FG_BAD)
+        yes_color = theme.FG_BAD
+    else:
+        draw.rectangle(yes_box, outline=theme.FG_DIM)
+        yes_color = theme.FG_DIM
+    yes_label = "YES"
+    try:
+        yes_w = int(draw.textlength(yes_label, font=fonts.body))
+    except Exception:
+        yes_w = 32
+    draw.text(
+        (yes_x0 + (btn_w - yes_w) // 2, y_btn + (btn_h - 14) // 2 - 1),
+        yes_label, font=fonts.body, fill=yes_color,
+    )
+
+    _draw_footer(draw, fonts, "← → pick  ·  Enter confirm  ·  Esc cancel")
+    return img
+
+
 # ── Dispatch ─────────────────────────────────────────────────────────
 
 
@@ -2009,6 +2135,8 @@ _RENDERERS: dict[Screen, Callable[[UISnapshot, Fonts], Image.Image]] = {
     Screen.SHUTTING_DOWN:  _render_shutting_down,
     Screen.INBOX_DETAIL:   _render_inbox_detail,
     Screen.HB_MODE_SELECT: _render_hb_mode_select,
+    # Phase 19 v0.0.9: modal entered via HOME Exit button.
+    Screen.EXIT_CONFIRM:   _render_exit_confirm,
 }
 
 
