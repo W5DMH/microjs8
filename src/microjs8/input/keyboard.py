@@ -153,13 +153,17 @@ def _build_modifier_codes() -> None:
     _KEY_CAPSLOCK = ecodes.KEY_CAPSLOCK
 
 
-# Ctrl-letter combinations the router cares about
-_CTRL_KEYS: dict[str, Key] = {
-    "h": Key.CTRL_H,
-    "q": Key.CTRL_Q,
-    "s": Key.CTRL_S,
-    "c": Key.CTRL_C,
-}
+# Ctrl-letter combinations the router cares about.
+#
+# Phase 19 (v0.0.8): removed Ctrl-S/Ctrl-Q/Ctrl-H/Ctrl-C as user-
+# facing shortcuts. Operators now navigate exclusively via arrow
+# keys + the on-screen Exit button (HOME), per the v0.0.8 UX
+# simplification. Ctrl-B for the backlight gesture is NOT in this
+# dict — it's handled via the FN_B remap one block below (the USB
+# keyboard path) and via dedicated TCA8418 scancodes on Cardputer-
+# Zero. Keeping this dict empty makes the gap explicit: no Ctrl+
+# letter shortcuts reach the router from the keyboard layer.
+_CTRL_KEYS: dict[str, Key] = {}
 
 
 # ── CardputerZero Fn-modified keycodes ──────────────────────────────

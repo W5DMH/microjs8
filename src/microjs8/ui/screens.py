@@ -57,28 +57,33 @@ def _draw_header(
     title: str,
     state: UISnapshot,
 ) -> None:
-    """Header banner: title left, ``UTC HH:MM:SS`` right.
+    """Header banner: page name left, time center, battery right.
 
-    Layout (28-px tall header):
+    Phase 19 (v0.0.8) layout:
 
-      ┌────────────────────────────────────────┐
-      │ TITLE                  UTC HH:MM:SS    │
-      └────────────────────────────────────────┘
-        ^left                  ^right-aligned
-        18 pt bold             14 pt bold
+      ┌──────────────────────────────────────────┐
+      │ PAGE     UTC HH:MM:SS              87%   │
+      └──────────────────────────────────────────┘
+        ^left      ^center                ^right
+        18pt bold  14pt bold              14pt bold
 
-    The ring-position indicator (N/M) was removed in this iteration —
-    it took space without telling the operator anything they couldn't
-    work out from "which screen am I currently on" + the footer hint.
-    Right-aligning the clock prevents collision with long titles like
-    "EMERGENCY" or "DIRECTED MENU"; centering looked elegant but
-    overlapped on titles wider than ~100 px.
+    All three zones render on every screen (was title-only-left + time-
+    only-right + battery-only-on-HOME before v0.0.8). Operators get a
+    consistent at-a-glance status surface no matter which screen they're
+    on, taking advantage of the wider 320px Waveshare panel.
+
+    Emergency override: when ``state.emergency_beacon_armed`` is True,
+    the center clock is replaced by a red ``SOS`` badge. Title left and
+    battery right continue to render so the operator can still see which
+    screen they're on and how much power they have while sending help.
 
     Clock is rendered in HEADER_FG (white) regardless of time-source
     state. The diagnostic ("is timing trusted?") lives on HOME's
-    TimeSrc row, which spells it out in plain language. Always-white
-    here means the operator never has to wonder why the header
-    looked dim.
+    TimeSrc row.
+
+    Battery zone shows ``--%`` when no fuel gauge is present (bare Pi
+    without a bq27 chip — see ``power.battery``). Charging state is
+    indicated by a leading ``+`` (e.g. ``+87%``).
     """
     draw.rectangle(
         [(0, 0), (theme.SCREEN_W - 1, theme.HEADER_H - 1)],
@@ -89,26 +94,53 @@ def _draw_header(
         fill=theme.SEPARATOR,
     )
 
-    # Right column — measure the clock first so we know how much
-    # horizontal space the title has. "UTC HH:MM:SS" at 14 pt bold
-    # is ~118 px; the longest title ("DIRECTED MENU") is ~166 px so
-    # without truncation they'd overlap on a 240-px screen.
-    time_str = _format_time_for_header(state)
+    # Right zone (battery) — measure first so the center zone knows
+    # how much real estate is reserved.
+    battery_str = _format_battery_for_header(state)
     try:
-        time_w = int(draw.textlength(time_str, font=fonts.clock))
+        battery_w = int(draw.textlength(battery_str, font=fonts.clock))
         bbox = fonts.clock.getbbox("0")
-        time_h = bbox[3] - bbox[1]
+        battery_h = bbox[3] - bbox[1]
     except Exception:
-        time_w = 8 * len(time_str)
-        time_h = theme.FONT_CLOCK
-    time_x = theme.SCREEN_W - time_w - theme.PAD_X
-    time_y = (theme.HEADER_H - time_h) // 2 - 1  # -1 looks more anchored
+        battery_w = 6 * len(battery_str)
+        battery_h = theme.FONT_CLOCK
+    battery_x = theme.SCREEN_W - battery_w - theme.PAD_X
+    battery_y = (theme.HEADER_H - battery_h) // 2 - 1
 
-    # Title goes left, but must fit alongside the clock with at least
-    # a 6-px breathing gap. If the operator navigates to a screen
-    # whose title is too long, truncate with "…" — losing a few
-    # characters is better than overlap on hardware.
-    avail_title_w = time_x - theme.PAD_X - 6
+    # Right zone draw (always — gives a stable anchor)
+    draw.text(
+        (battery_x, battery_y),
+        battery_str,
+        font=fonts.clock,
+        fill=_battery_color(state),
+    )
+
+    # Center zone — clock OR SOS badge if emergency armed.
+    if state.emergency_beacon_armed:
+        _draw_sos_badge_center(draw, fonts)
+        center_left_edge = (theme.SCREEN_W // 2) - 30  # SOS badge ~60 wide
+    else:
+        time_str = _format_time_for_header(state)
+        try:
+            time_w = int(draw.textlength(time_str, font=fonts.clock))
+            bbox = fonts.clock.getbbox("0")
+            time_h = bbox[3] - bbox[1]
+        except Exception:
+            time_w = 8 * len(time_str)
+            time_h = theme.FONT_CLOCK
+        time_x = (theme.SCREEN_W - time_w) // 2
+        time_y = (theme.HEADER_H - time_h) // 2 - 1
+        center_left_edge = time_x
+        draw.text(
+            (time_x, time_y),
+            time_str,
+            font=fonts.clock,
+            fill=theme.HEADER_FG,
+        )
+
+    # Left zone — title. Must fit BEFORE the center zone, with a 6 px
+    # breathing gap. Truncate with ellipsis if too long.
+    avail_title_w = center_left_edge - theme.PAD_X - 6
     truncated_title = title
     try:
         title_w = int(draw.textlength(truncated_title, font=fonts.title))
@@ -129,8 +161,6 @@ def _draw_header(
                 truncated_title = ellipsis
     except Exception:
         # textlength unavailable — fall back to character-count guard.
-        # Worst case we render the full title and PIL clips at the
-        # canvas boundary; not pretty but not crash.
         pass
 
     draw.text(
@@ -140,52 +170,91 @@ def _draw_header(
         fill=theme.HEADER_FG,
     )
 
-    # Phase 12: armed-anywhere indicator. While the emergency beacon
-    # is armed, the clock area is replaced with a red "SOS" badge so
-    # the operator sees the active TX state no matter what screen
-    # they're in; UTC time is useful but not as immediately critical,
-    # and the operator can always come back to the EMERGENCY screen
-    # to see exact countdown timing. Per spec §6.4 (May 2026):
-    # "armed-anywhere indicator on every screen header".
-    if state.emergency_beacon_armed:
-        sos_text = "SOS"
-        try:
-            sos_w = int(draw.textlength(sos_text, font=fonts.clock))
-            bbox = fonts.clock.getbbox("S")
-            sos_h = bbox[3] - bbox[1]
-        except Exception:
-            sos_w = 32
-            sos_h = theme.FONT_CLOCK
-        # Right-align where the clock was. Add a 2-px border around
-        # the text for badge-like visual weight on the dark header.
-        badge_pad_x = 4
-        badge_pad_y = 2
-        sos_x = theme.SCREEN_W - sos_w - theme.PAD_X - badge_pad_x
-        sos_y = (theme.HEADER_H - sos_h) // 2 - 1
-        # Filled red rectangle behind the text for badge feel.
-        draw.rectangle(
-            [
-                (sos_x - badge_pad_x, sos_y - badge_pad_y),
-                (sos_x + sos_w + badge_pad_x - 1,
-                 sos_y + sos_h + badge_pad_y - 1),
-            ],
-            fill=theme.FG_BAD,
-        )
-        # White text inside the red badge.
-        draw.text(
-            (sos_x, sos_y),
-            sos_text,
-            font=fonts.clock,
-            fill=theme.HEADER_FG,
-        )
-    else:
-        # Normal-state clock — right-aligned, vertically centered.
-        draw.text(
-            (time_x, time_y),
-            time_str,
-            font=fonts.clock,
-            fill=theme.HEADER_FG,
-        )
+
+def _format_battery_for_header(state: UISnapshot) -> str:
+    """Return the battery zone string for the header.
+
+    Formats:
+      ``--%``    — no battery snapshot (bare Pi, no bq27 fuel gauge)
+      ``87%``    — discharging at 87%
+      ``+87%``   — charging at 87% (the ``+`` is the visual cue)
+
+    Capacity values out of [0, 100] are clamped so a buggy gauge can't
+    explode the layout. The string is intentionally short (≤4 chars) so
+    the right-zone reservation stays predictable across screen widths.
+    """
+    bat = state.battery
+    if bat is None:
+        return "--%"
+    pct = max(0, min(100, int(bat.capacity)))
+    prefix = "+" if bat.is_charging else ""
+    return f"{prefix}{pct}%"
+
+
+def _battery_color(state: UISnapshot) -> tuple[int, int, int]:
+    """Pick the battery zone foreground based on charge level.
+
+    Hierarchy:
+      - charging                        → HEADER_FG (white, neutral; ``+`` is the indicator)
+      - capacity >= 20                  → HEADER_FG (white)
+      - 10 <= capacity < 20             → FG_WARN (yellow — operator should plug in soon)
+      - capacity < 10 (or absent gauge) → FG_BAD (red — urgent / unknown power state)
+
+    The ``--%`` no-gauge case lands in FG_BAD as a deliberate choice:
+    if the daemon doesn't know the power state, treating it as red
+    signals to the operator that the readout is unreliable (vs. a
+    silent white ``--%`` that's easy to ignore).
+    """
+    bat = state.battery
+    if bat is None:
+        return theme.FG_BAD
+    if bat.is_charging:
+        return theme.HEADER_FG
+    pct = max(0, min(100, int(bat.capacity)))
+    if pct < 10:
+        return theme.FG_BAD
+    if pct < 20:
+        return theme.FG_WARN
+    return theme.HEADER_FG
+
+
+def _draw_sos_badge_center(
+    draw: ImageDraw.ImageDraw,
+    fonts: Fonts,
+) -> None:
+    """Center the red SOS badge in the header (emergency-armed state).
+
+    Extracted as a helper because v0.0.8 split the header into three
+    explicit zones — the center zone alternates between clock and SOS
+    badge — and the helper makes the alternation a single line in
+    ``_draw_header``.
+    """
+    sos_text = "SOS"
+    try:
+        sos_w = int(draw.textlength(sos_text, font=fonts.clock))
+        bbox = fonts.clock.getbbox("S")
+        sos_h = bbox[3] - bbox[1]
+    except Exception:
+        sos_w = 32
+        sos_h = theme.FONT_CLOCK
+    badge_pad_x = 4
+    badge_pad_y = 2
+    sos_x = (theme.SCREEN_W - sos_w) // 2
+    sos_y = (theme.HEADER_H - sos_h) // 2 - 1
+    draw.rectangle(
+        [
+            (sos_x - badge_pad_x, sos_y - badge_pad_y),
+            (sos_x + sos_w + badge_pad_x - 1,
+             sos_y + sos_h + badge_pad_y - 1),
+        ],
+        fill=theme.FG_BAD,
+    )
+    draw.text(
+        (sos_x, sos_y),
+        sos_text,
+        font=fonts.clock,
+        fill=theme.HEADER_FG,
+    )
 
 
 def _format_time_for_header(state: UISnapshot) -> str:
@@ -348,6 +417,37 @@ def _render_home(state: UISnapshot, fonts: Fonts) -> Image.Image:
         # Dim when only holding for others (no action required).
         color = theme.FG_WARN if has_unread else theme.FG_DIM
         _kv_row(draw, fonts, y, "Inbox", label, value_color=color)
+
+    # ── Phase 19 (v0.0.8): EXIT button ──────────────────────────────
+    # Last item in HOME's focusable chain. Pressing Enter on it fires
+    # the request_exit callback wired in app.py (sets self._stop so
+    # run() returns cleanly). Operators on CardputerZero/APPLaunch use
+    # this to leave microjs8 and return to APPLaunch; operators on
+    # bare Pi use it to stop the daemon without dropping to SSH.
+    is_exit_focus = (state.focused_field == "home_exit")
+    btn_w = 80
+    btn_h = 18
+    # Anchor near the bottom of the body area, just above the footer.
+    btn_y = theme.BODY_Y1 - btn_h - 4
+    btn_x0 = (theme.SCREEN_W - btn_w) // 2
+    btn = (btn_x0, btn_y, btn_x0 + btn_w, btn_y + btn_h)
+    if is_exit_focus:
+        # Filled inverted button — looks pressable. Red to convey
+        # "this exits the app" (matches the FG_BAD semantics used
+        # elsewhere for actions that leave the running state).
+        draw.rectangle(btn, fill=theme.HEADER_BG, outline=theme.FG_BAD)
+        exit_color = theme.FG_BAD
+    else:
+        draw.rectangle(btn, outline=theme.FG_DIM)
+        exit_color = theme.FG_DIM
+    exit_label = "EXIT"
+    try:
+        exit_w = int(draw.textlength(exit_label, font=fonts.body))
+    except Exception:
+        exit_w = 32
+    exit_x = btn_x0 + (btn_w - exit_w) // 2
+    exit_y = btn_y + (btn_h - 14) // 2 - 1
+    draw.text((exit_x, exit_y), exit_label, font=fonts.body, fill=exit_color)
 
     if state.emergency_override:
         if state.gps.has_position:
@@ -1524,32 +1624,6 @@ def _render_hb_mode_select(state: UISnapshot, fonts: Fonts) -> Image.Image:
     return img
 
 
-def _render_directed_menu(state: UISnapshot, fonts: Fonts) -> Image.Image:
-    img, draw = _new_canvas()
-    _draw_header(draw, fonts, "DIRECTED MENU", state)
-    y = theme.BODY_Y0 + 4
-    # Selected callsign at the top
-    draw.text(
-        (theme.PAD_X, y),
-        "Target: (none selected)",
-        font=fonts.body,
-        fill=theme.FG_DIM,
-    )
-    y += 22
-    draw.line(
-        [(0, y), (theme.SCREEN_W - 1, y)], fill=theme.SEPARATOR
-    )
-    y += 4
-    actions = ("MSG", "STORE", "AGN?", "SNR?", "GRID", "QUERY", "MYLOC")
-    for act in actions:
-        draw.text(
-            (theme.PAD_X + 4, y), act, font=fonts.body, fill=theme.FG
-        )
-        y += 18
-    _draw_footer(draw, fonts, "Pick from Heard List first (Step 3)")
-    return img
-
-
 def _render_emergency(state: UISnapshot, fonts: Fonts) -> Image.Image:
     img, draw = _new_canvas()
     _draw_header(draw, fonts, "EMERGENCY", state)
@@ -1928,7 +2002,8 @@ _RENDERERS: dict[Screen, Callable[[UISnapshot, Fonts], Image.Image]] = {
     Screen.INBOX:          _render_inbox,       # mailbox / MSG content view
     Screen.COMPOSE:        _render_compose,
     Screen.ALLCALL:        _render_allcall,
-    Screen.DIRECTED_MENU:  _render_directed_menu,
+    # Slot 6 (was Screen.DIRECTED_MENU) removed in v0.0.8 — Compose
+    # handles all directed sends. See state.py for the gap rationale.
     Screen.EMERGENCY:      _render_emergency,
     Screen.SETUP:          _render_setup,
     Screen.SHUTTING_DOWN:  _render_shutting_down,

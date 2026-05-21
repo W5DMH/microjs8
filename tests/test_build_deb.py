@@ -839,3 +839,184 @@ def test_gfsk8_so_absent_when_not_provided(tmp_path: Path):
         "expected no gfsk8 entry when .so unavailable, got: " +
         "\n".join(l for l in contents.splitlines() if "gfsk8" in l)
     )
+
+
+# ── Phase 19 / v0.0.8: packaging hardening tests ────────────────────
+
+
+def test_postinst_does_NOT_auto_enable_microjs8(tmp_path: Path):
+    """Phase 19 (v0.0.8): postinst must NOT call `systemctl enable
+    microjs8.service` — both platforms launch on-demand via the
+    APPLaunch tile (CardputerZero) or `systemctl start` (bare Pi).
+    Auto-enabling would surprise operators after they tap Exit."""
+    deb = _run_packager(tmp_path)
+    extract_dir = tmp_path / "extract-noauto"
+    extract_dir.mkdir()
+    subprocess.run(
+        ["dpkg-deb", "-e", str(deb), str(extract_dir)],
+        check=True, capture_output=True,
+    )
+    postinst = (extract_dir / "postinst").read_text()
+    # Strip shell comments before grepping so the in-code rationale
+    # text can mention the old behavior without tripping the check.
+    active_lines = [
+        line for line in postinst.splitlines()
+        if not line.strip().startswith("#")
+    ]
+    active = "\n".join(active_lines)
+    assert "systemctl enable microjs8" not in active, (
+        "Phase 19 v0.0.8: postinst must NOT auto-enable microjs8.service "
+        "(operators launch on-demand via APPLaunch tile / systemctl start)"
+    )
+
+
+def test_postinst_does_NOT_auto_enable_rigctld(tmp_path: Path):
+    """Phase 19 (v0.0.8): same rule applies to rigctld.service —
+    it activates via microjs8.service's Wants=rigctld.service when
+    the daemon starts. Pre-enabling at boot caused the 366+ launcher
+    restart loop on PI-2W-TEST when no radio was attached yet."""
+    deb = _run_packager(tmp_path)
+    extract_dir = tmp_path / "extract-noauto-rig"
+    extract_dir.mkdir()
+    subprocess.run(
+        ["dpkg-deb", "-e", str(deb), str(extract_dir)],
+        check=True, capture_output=True,
+    )
+    postinst = (extract_dir / "postinst").read_text()
+    active_lines = [
+        line for line in postinst.splitlines()
+        if not line.strip().startswith("#")
+    ]
+    active = "\n".join(active_lines)
+    assert "systemctl enable rigctld" not in active, (
+        "Phase 19 v0.0.8: postinst must NOT auto-enable rigctld.service"
+    )
+
+
+def test_postinst_only_restarts_microjs8_if_active(tmp_path: Path):
+    """Phase 19 (v0.0.8): postinst should restart microjs8.service
+    only if it's already active (handles upgrades), NOT start it
+    unconditionally (would override the v0.0.8 'no auto-start' rule
+    on a fresh install)."""
+    deb = _run_packager(tmp_path)
+    extract_dir = tmp_path / "extract-restart"
+    extract_dir.mkdir()
+    subprocess.run(
+        ["dpkg-deb", "-e", str(deb), str(extract_dir)],
+        check=True, capture_output=True,
+    )
+    postinst = (extract_dir / "postinst").read_text()
+    # The 'if is-active' guard should be present
+    assert "is-active microjs8.service" in postinst, (
+        "Phase 19 v0.0.8: postinst must check is-active before "
+        "restart so fresh installs don't auto-start the daemon"
+    )
+
+
+def test_postinst_retries_sounddevice_install(tmp_path: Path):
+    """Phase 19 (v0.0.8): postinst must retry the sounddevice pip
+    install on failure — the May 21, 2026 PI-2W-TEST install showed
+    that a single TLS hiccup was enough to leave the daemon without
+    audio support. Retry + explicit import verification closes
+    that gap."""
+    deb = _run_packager(tmp_path)
+    extract_dir = tmp_path / "extract-sd-retry"
+    extract_dir.mkdir()
+    subprocess.run(
+        ["dpkg-deb", "-e", str(deb), str(extract_dir)],
+        check=True, capture_output=True,
+    )
+    postinst = (extract_dir / "postinst").read_text()
+    # The retry loop and verification import must both be present
+    assert "for attempt in 1 2 3" in postinst, (
+        "Phase 19: postinst must retry sounddevice install on failure"
+    )
+    # The post-install verification call
+    assert 'python3 -c "import sounddevice"' in postinst, (
+        "Phase 19: postinst must verify sounddevice imports after install"
+    )
+
+
+def test_postinst_enables_spi_overlay_on_pi(tmp_path: Path):
+    """Phase 19 (v0.0.8): postinst should auto-enable SPI in the Pi's
+    boot config so the userspace display driver finds /dev/spidev0.0
+    on first boot. Without this, fresh Bookworm Lite installs lose
+    the display until the operator manually runs raspi-config."""
+    deb = _run_packager(tmp_path)
+    extract_dir = tmp_path / "extract-spi"
+    extract_dir.mkdir()
+    subprocess.run(
+        ["dpkg-deb", "-e", str(deb), str(extract_dir)],
+        check=True, capture_output=True,
+    )
+    postinst = (extract_dir / "postinst").read_text()
+    assert "dtparam=spi=on" in postinst, (
+        "Phase 19: postinst must enable SPI overlay for the userspace "
+        "display driver"
+    )
+    # Backup must be created
+    assert "pre-microjs8" in postinst, (
+        "Phase 19: postinst SPI edit must back up the original config"
+    )
+    # And the operator must be told a reboot is required
+    assert "REBOOT REQUIRED" in postinst, (
+        "Phase 19: postinst must tell the operator to reboot after "
+        "enabling SPI (kernel rereads device-tree overlays at boot only)"
+    )
+
+
+def test_microjs8_service_restart_on_failure_not_always(tmp_path: Path):
+    """Phase 19 (v0.0.8): the systemd unit must use Restart=on-failure,
+    NOT Restart=always. The Exit button produces a clean 0 exit which
+    must NOT trigger an immediate systemd restart — otherwise the
+    Exit button is a no-op (daemon comes right back up)."""
+    deb = _run_packager(tmp_path)
+    extract_dir = tmp_path / "extract-svc"
+    extract_dir.mkdir()
+    subprocess.run(
+        ["dpkg-deb", "-x", str(deb), str(extract_dir)],
+        check=True, capture_output=True,
+    )
+    svc_path = extract_dir / "lib" / "systemd" / "system" / "microjs8.service"
+    svc = svc_path.read_text()
+    # Filter to non-comment lines so the in-file rationale text
+    # explaining the v0.0.8 change doesn't trip the check.
+    active_lines = [
+        line for line in svc.splitlines()
+        if not line.strip().startswith("#")
+    ]
+    active = "\n".join(active_lines)
+    assert "Restart=on-failure" in active, (
+        "Phase 19 v0.0.8: microjs8.service must use Restart=on-failure "
+        "so the HOME Exit button can actually exit the daemon"
+    )
+    assert "Restart=always" not in active, (
+        "Phase 19 v0.0.8: Restart=always defeats the Exit button"
+    )
+
+
+def test_rigctld_launcher_exits_zero_on_missing_hardware(tmp_path: Path):
+    """Phase 19 (v0.0.8): the rigctld launcher must exit 0 (not 1)
+    when the configured radio's device path isn't present. This
+    closes the 366-restart loop observed on PI-2W-TEST when QDX was
+    the default but no QDX was attached."""
+    deb = _run_packager(tmp_path)
+    extract_dir = tmp_path / "extract-launcher"
+    extract_dir.mkdir()
+    subprocess.run(
+        ["dpkg-deb", "-x", str(deb), str(extract_dir)],
+        check=True, capture_output=True,
+    )
+    launcher_path = extract_dir / "usr" / "local" / "bin" / "microjs8-rigctld-launcher"
+    launcher = launcher_path.read_text()
+    # Both QDX and DigiRig missing-hardware branches must exit 0
+    # Pattern: scan for the QDX/DigiRig sections and verify "exit 0"
+    # appears in each
+    assert "QDX not present" in launcher
+    assert "DigiRig not present" in launcher
+    # Each missing-hardware branch must say "exiting 0"
+    # (uses the v0.0.8 explanation text we added)
+    assert launcher.count("exiting 0 (no CAT until radio plugged in)") >= 2, (
+        "Phase 19 v0.0.8: launcher must exit 0 (not 1) on missing "
+        "hardware for BOTH qdx and xiegu-g90-digirig branches"
+    )

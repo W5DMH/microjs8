@@ -121,8 +121,18 @@ case "$RADIO_ID" in
         # access).
         DEVICE="/dev/serial/by-id/usb-QRP_Labs_QDX_Transceiver-if00"
         if [[ "$DRY_RUN" -eq 0 && ! -e "$DEVICE" ]]; then
-            echo "microjs8-rigctld-launcher: QDX not present at $DEVICE" >&2
-            exit 1
+            # Phase 19 (v0.0.8): exit 0, not 1. The QDX may simply not
+            # be plugged in yet; that's not a service failure, it's
+            # a "not applicable right now" condition. systemd's
+            # Restart=on-failure won't loop on exit 0. The operator's
+            # CatService in microjs8 will log "CAT disconnected" until
+            # they plug in the radio, after which they can:
+            #     sudo systemctl restart rigctld.service
+            # to pick up the newly-attached device. This change closes
+            # the 366-restart loop observed on PI-2W-TEST (May 21,
+            # 2026 — bare Pi without QDX attached).
+            echo "microjs8-rigctld-launcher: QDX not present at $DEVICE — exiting 0 (no CAT until radio plugged in)" >&2
+            exit 0
         fi
         ARGS=(-m 2028 -r "$DEVICE" -s 9600 -t 4532)
         ;;
@@ -135,9 +145,11 @@ case "$RADIO_ID" in
         # supported-radios wiki — not 3087, that's the X6100).
         DEVICE="/dev/digirig"
         if [[ "$DRY_RUN" -eq 0 && ! -e "$DEVICE" ]]; then
-            echo "microjs8-rigctld-launcher: DigiRig not present at $DEVICE" >&2
+            # Phase 19 (v0.0.8): exit 0, not 1. See qdx case above
+            # for the rationale.
+            echo "microjs8-rigctld-launcher: DigiRig not present at $DEVICE — exiting 0 (no CAT until radio plugged in)" >&2
             echo "  Check udev rule: 99-microjs8-digirig.rules" >&2
-            exit 1
+            exit 0
         fi
         ARGS=(
             -m 3088

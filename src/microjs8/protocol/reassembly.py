@@ -98,10 +98,38 @@ _BUFFERED_VERBS: frozenset[str] = frozenset({
 
 # Round audio offset to this granularity when keying buffers. The
 # decoder reports a float Hz (e.g. 1616.1), and consecutive frames
-# from the same TX usually land within ±10 Hz. Bucketing at 25 Hz
-# absorbs that jitter while still discriminating two stations that
-# TX'd 50 Hz apart.
-_OFFSET_BUCKET_HZ = 25.0
+# from the same TX typically land at IDENTICAL freq (the decoder is
+# deterministic per source). The bucket exists for two reasons:
+#   1. Robustness against minor (sub-Hz) decoder rounding noise
+#   2. Looking up which buffer a continuation frame belongs to
+#
+# Phase 19 (v0.0.8) reduced this from 25.0 → 10.0 after the
+# 2026-05-21 W5DMH/ND7M QSO surfaced cross-talk between buffers.
+# That session showed:
+#   - ND7M's reply at freq=987.5 Hz
+#   - DM16 continuation correctly at freq=987.5 Hz (same)
+#   - K3FHP's unrelated TX at freq=1006.8 Hz (+19 Hz away)
+#   - N3CHX/P1's unrelated TX at freq=1006.8 Hz
+# With ``_OFFSET_BUCKET_HZ = 25.0`` both 987.5 and 1006.8 rounded
+# to the SAME 1000 Hz bucket, and the K3FHP/N3CHX frames got
+# concatenated onto ND7M's reply buffer. The assembled body became
+# ``"GRID DM16 K3FHP: N3CHX/P1 HEARTBEAT SNR -12"`` — a data
+# integrity bug.
+#
+# Tightening to 10 Hz puts 987.5→990 and 1006.8→1010 in different
+# buckets. The continuation matcher (``_on_continuation``) also
+# applies a tighter raw-frequency check on top of the bucket key,
+# rejecting candidates whose raw_offset_hz disagrees by more than
+# ``_CONTINUATION_RAW_TOLERANCE_HZ``.
+_OFFSET_BUCKET_HZ = 10.0
+
+# Maximum raw-frequency disagreement allowed between an incoming
+# continuation frame and the buffer's last-seen raw offset. Even
+# inside a single bucket, two unrelated TXs whose raw offsets
+# differ by more than this should NOT be considered the same
+# conversation. 15 Hz is conservative: same-station decoder
+# determinism keeps real continuations at ~0 Hz drift in practice.
+_CONTINUATION_RAW_TOLERANCE_HZ = 15.0
 
 
 # Matches the body of a single-frame ``QUERY MSG <id>`` (after the
@@ -797,10 +825,17 @@ class MessageAssembler:
         emits it.
         """
         bucket = _bucket_offset(parsed.decoded.frequency_hz)
-        # Find candidate buffers at this audio offset bucket.
+        raw_offset = float(parsed.decoded.frequency_hz)
+        # Find candidate buffers at this audio offset bucket AND
+        # within tolerance of the buffer's last-seen raw offset.
+        # The raw check defeats cross-talk between unrelated
+        # transmissions that happen to fall in the same bucket but
+        # differ in raw frequency by enough that they're clearly
+        # distinct conversations. See _OFFSET_BUCKET_HZ comment.
         candidates = [
             (k, b) for k, b in self._buffers.items()
             if k[2] == bucket
+            and abs(b.raw_offset_hz - raw_offset) <= _CONTINUATION_RAW_TOLERANCE_HZ
         ]
         if not candidates:
             return None

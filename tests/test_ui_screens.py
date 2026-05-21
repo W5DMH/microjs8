@@ -729,38 +729,6 @@ def test_header_clock_renders_in_right_region(fonts):
     )
 
 
-def test_header_clock_does_not_overlap_long_title(fonts):
-    """With the longest title ('DIRECTED MENU' at 13 chars), the
-    right-aligned clock should still fit without overlapping.
-    Sanity check: there should be a gap of unpainted pixels between
-    the title's right edge and the clock's left edge."""
-    from PIL import Image, ImageDraw
-    from microjs8.ui.screens import _draw_header
-    from dataclasses import replace
-    snap = replace(_snapshot(Screen.DIRECTED_MENU), time_source="chrony")
-    img = Image.new("RGB", (theme.SCREEN_W, theme.SCREEN_H), theme.BG)
-    draw = ImageDraw.Draw(img)
-    _draw_header(draw, fonts, "DIRECTED MENU", snap)
-    # Find the rightmost painted pixel of the title, and the leftmost
-    # painted pixel after some gap. They shouldn't be adjacent.
-    title_right = 0
-    for x in range(0, 200):
-        for y in range(4, 24):
-            if img.getpixel((x, y)) != theme.HEADER_BG:
-                title_right = max(title_right, x)
-    clock_left = theme.SCREEN_W
-    for x in range(theme.SCREEN_W - 1, title_right + 5, -1):
-        for y in range(4, 24):
-            if img.getpixel((x, y)) != theme.HEADER_BG:
-                clock_left = min(clock_left, x)
-    gap = clock_left - title_right
-    assert gap >= 4, (
-        f"title right edge at x={title_right}, clock left edge at "
-        f"x={clock_left}, gap={gap}px — too tight, may overlap "
-        f"visually on hardware"
-    )
-
-
 def test_header_does_not_render_position_indicator(fonts):
     """The ring-position N/M indicator was removed in this iteration
     (it took space without telling the operator anything new). Verify
@@ -1006,3 +974,183 @@ def test_compose_no_battery_warning_when_emergency_override(fonts):
                 f"unexpected FG_WARN pixel at ({x},{y}) — battery warning should "
                 f"be suppressed under emergency override"
             )
+
+
+# ── Phase 19 / v0.0.8: three-zone banner layout ──────────────────────
+
+
+def test_banner_battery_zone_shows_dash_when_no_gauge(fonts):
+    """Phase 19 (v0.0.8): battery zone must render ``--%`` when the
+    fuel gauge isn't present (bare Pi / no bq27 chip). The state's
+    ``battery`` field is None in that case, and the zone must NOT
+    crash or show a stale number."""
+    from microjs8.ui.screens import _format_battery_for_header
+
+    s = _snapshot(Screen.HOME)
+    # Snapshot default has battery=None
+    assert s.battery is None
+    result = _format_battery_for_header(s)
+    assert result == "--%", f"expected '--%', got {result!r}"
+
+
+def test_banner_battery_zone_shows_percent_when_present(fonts):
+    """Phase 19: with a battery snapshot present, the zone renders
+    the integer percent followed by ``%``."""
+    from microjs8.ui.screens import _format_battery_for_header
+    from microjs8.power.battery import BatteryState
+    from dataclasses import replace
+
+    bat = BatteryState(
+        capacity=87,
+        voltage_v=3.92,
+        current_ma=-120.0,
+        temperature_c=24.0,
+        status="Discharging",
+    )
+    s = replace(_snapshot(Screen.HOME), battery=bat)
+    result = _format_battery_for_header(s)
+    assert result == "87%", f"expected '87%' (discharging), got {result!r}"
+
+
+def test_banner_battery_zone_shows_plus_when_charging(fonts):
+    """Phase 19: a leading ``+`` indicates charging."""
+    from microjs8.ui.screens import _format_battery_for_header
+    from microjs8.power.battery import BatteryState
+    from dataclasses import replace
+
+    bat = BatteryState(
+        capacity=87,
+        voltage_v=4.10,
+        current_ma=+250.0,
+        temperature_c=24.0,
+        status="Charging",
+    )
+    s = replace(_snapshot(Screen.HOME), battery=bat)
+    result = _format_battery_for_header(s)
+    assert result == "+87%", f"expected '+87%' (charging), got {result!r}"
+
+
+def test_banner_battery_color_red_when_no_gauge(fonts):
+    """Phase 19: bare Pi (no battery state) renders in FG_BAD red so
+    the operator notices that power state is unknown."""
+    from microjs8.ui import theme
+    from microjs8.ui.screens import _battery_color
+
+    s = _snapshot(Screen.HOME)
+    assert s.battery is None
+    assert _battery_color(s) == theme.FG_BAD
+
+
+def test_banner_battery_color_red_when_critically_low(fonts):
+    """Phase 19: <10% capacity → red. Operator needs to act now."""
+    from microjs8.ui import theme
+    from microjs8.ui.screens import _battery_color
+    from microjs8.power.battery import BatteryState
+    from dataclasses import replace
+
+    bat = BatteryState(
+        capacity=5,
+        voltage_v=3.3,
+        current_ma=-100.0,
+        temperature_c=24.0,
+        status="Discharging",
+    )
+    s = replace(_snapshot(Screen.HOME), battery=bat)
+    assert _battery_color(s) == theme.FG_BAD
+
+
+def test_banner_battery_color_yellow_when_low(fonts):
+    """Phase 19: 10-19% capacity → yellow warn. Operator should plug
+    in soon but it's not urgent."""
+    from microjs8.ui import theme
+    from microjs8.ui.screens import _battery_color
+    from microjs8.power.battery import BatteryState
+    from dataclasses import replace
+
+    bat = BatteryState(
+        capacity=15,
+        voltage_v=3.6,
+        current_ma=-100.0,
+        temperature_c=24.0,
+        status="Discharging",
+    )
+    s = replace(_snapshot(Screen.HOME), battery=bat)
+    assert _battery_color(s) == theme.FG_WARN
+
+
+def test_banner_battery_renders_on_all_screens(fonts):
+    """Phase 19: battery zone must render on EVERY screen, not just
+    HOME (the old behavior). Spot-check by rendering several
+    different screens and confirming the battery text appears in
+    the right zone of the header."""
+    from microjs8.ui import theme
+    from microjs8.ui.screens import _render_home, _render_heard, _render_setup
+    from microjs8.power.battery import BatteryState
+    from dataclasses import replace
+
+    bat = BatteryState(
+        capacity=42,
+        voltage_v=3.7,
+        current_ma=-100.0,
+        temperature_c=24.0,
+        status="Discharging",
+    )
+    # Test multiple screens. Each renders without crashing, and each
+    # has SOME non-background pixel in the rightmost slice (where
+    # the battery text lives).
+    for renderer, screen in [
+        (_render_home, Screen.HOME),
+        (_render_heard, Screen.HEARD),
+        (_render_setup, Screen.SETUP),
+    ]:
+        s = replace(_snapshot(screen), battery=bat)
+        img = renderer(s, fonts)
+        # Check the rightmost ~60 px of the header band has at least
+        # some non-background pixels (i.e., the battery text rendered)
+        non_bg_count = 0
+        for y in range(0, theme.HEADER_H):
+            for x in range(theme.SCREEN_W - 60, theme.SCREEN_W - theme.PAD_X):
+                px = img.getpixel((x, y))
+                if px != theme.HEADER_BG:
+                    non_bg_count += 1
+        assert non_bg_count > 5, (
+            f"battery zone empty on {screen.name}: only {non_bg_count} "
+            f"non-background pixels in right slice — battery missing"
+        )
+
+
+def test_banner_time_is_centered(fonts):
+    """Phase 19: time string must be CENTERED in the header, not
+    right-aligned. Verify by rendering and checking the rendered
+    text's midpoint ≈ SCREEN_W / 2.
+    """
+    from microjs8.ui import theme
+    from microjs8.ui.screens import _render_home
+
+    s = _snapshot(Screen.HOME)  # default snapshot, no gps required for time
+    img = _render_home(s, fonts)
+
+    # Find leftmost and rightmost non-header-bg pixels in the header
+    # band, then compare the midpoint to SCREEN_W/2. Skip the leftmost
+    # ~100 px (the title) and rightmost ~70 px (the battery) — focus
+    # on the center zone where the clock should be.
+    left_pixel = theme.SCREEN_W
+    right_pixel = 0
+    for y in range(2, theme.HEADER_H - 2):
+        for x in range(100, theme.SCREEN_W - 70):
+            px = img.getpixel((x, y))
+            if px != theme.HEADER_BG:
+                left_pixel = min(left_pixel, x)
+                right_pixel = max(right_pixel, x)
+
+    if right_pixel == 0:
+        # Clock didn't render — fail explicitly
+        raise AssertionError("clock not visible in header center zone")
+
+    text_center = (left_pixel + right_pixel) // 2
+    expected_center = theme.SCREEN_W // 2
+    # Allow ±15px tolerance for font metrics + descender quirks
+    assert abs(text_center - expected_center) < 15, (
+        f"clock not centered: text_center={text_center}, "
+        f"expected ~{expected_center} (±15)"
+    )

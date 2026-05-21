@@ -96,6 +96,7 @@ class InputRouter:
         emergency_arm_gesture: Optional["EmergencyArmGesture"] = None,
         allcall_query_msgs: Optional[Callable[[], bool]] = None,
         allcall_cq: Optional[Callable[[], bool]] = None,
+        request_exit: Optional[Callable[[], None]] = None,
     ) -> None:
         self._ui = ui
         # save_config(callsign, grid, units) -> True if saved cleanly.
@@ -158,6 +159,11 @@ class InputRouter:
         # corresponding ALLCALL screen row is a visual no-op.
         self._allcall_query_msgs = allcall_query_msgs
         self._allcall_cq = allcall_cq
+        # Phase 19 (v0.0.8): Exit button on HOME asks the daemon to
+        # terminate. The callback is fire-and-forget — it should set
+        # the daemon's stop event so run() returns cleanly. None
+        # disables the Exit button (tests, headless installs).
+        self._request_exit = request_exit
 
     # ── Late-binding setters ────────────────────────────────────────
     # These exist so app.py can construct the router early (before
@@ -381,39 +387,32 @@ class InputRouter:
     # ── Global hotkeys ───────────────────────────────────────────────
 
     def _handle_global_hotkey(self, key: Key, snapshot) -> bool:
-        """Returns True if the key was consumed as a global hotkey."""
-        # Even unconfigured stations can use Ctrl-S to jump to Setup
-        # (it's where they need to be anyway). Other hotkeys we gate.
-        if key is Key.CTRL_S:
-            self._ui.set_screen(Screen.SETUP)
-            return True
-        # Disallow other hotkeys when the station is unconfigured —
-        # they don't yet have a meaningful effect, and we don't want
-        # the operator to navigate away from Setup.
-        if not snapshot.tx_allowed and not snapshot.emergency_override:
-            return False
-        if key is Key.CTRL_Q:
-            self._ui.set_screen(Screen.ALLCALL)
-            return True
-        if key is Key.CTRL_H:
-            # Heartbeat toggle is wired in Step 6.
-            _log.info("Ctrl-H pressed (heartbeat toggle wired in Step 6)")
-            return True
+        """Returns True if the key was consumed as a global hotkey.
+
+        Phase 19 (v0.0.8): removed Ctrl-S/Ctrl-Q/Ctrl-H as user-
+        facing global hotkeys. Operators navigate exclusively via
+        arrow keys and the on-screen Exit button on HOME, per the
+        v0.0.8 UX simplification. Ctrl-B (backlight gesture) is
+        handled at the keyboard layer via the FN_B remap and never
+        reaches the router.
+
+        Method kept (returns False) so existing callers don't have
+        to change shape; can be repurposed later if a global hotkey
+        comes back.
+        """
         return False
 
     # ── Per-screen handlers ──────────────────────────────────────────
 
     def _handle_screen_key(self, event: KeyEvent, snapshot) -> None:
         # Phase 15: SHUTTING_DOWN — any keystroke that means "cancel"
-        # rolls the gesture back. Esc and Ctrl-C are the natural
-        # cancels; other keys are ignored so an operator who happens
-        # to be typing when Fn+Q fires doesn't accidentally affect
-        # the countdown (which is automatic on hold completion).
-        # The button watcher's cancel path is separate (key release);
-        # they share the gesture object so cancellation from either
-        # path takes effect via the idempotent cancel() return.
+        # rolls the gesture back. ESC is the universal cancel; Ctrl-C
+        # was an alias up through v0.0.7 but was removed in v0.0.8
+        # along with the rest of the Ctrl-letter shortcuts. Other keys
+        # are ignored so an operator who happens to be typing when
+        # Fn+Q fires doesn't accidentally affect the countdown.
         if snapshot.screen is Screen.SHUTTING_DOWN:
-            if event.key is Key.ESC or event.key is Key.CTRL_C:
+            if event.key is Key.ESC:
                 if self._shutdown_gesture is not None:
                     self._shutdown_gesture.cancel(source="keyboard Esc")
                 else:
@@ -458,6 +457,36 @@ class InputRouter:
                 self._handle_inbox_delete(snapshot)
                 return
             # ←/→ continue to ring nav below.
+
+        # Phase 19 (v0.0.8): HOME screen — single focusable element,
+        # the Exit button. Enter fires the daemon-exit callback. ↑/↓
+        # currently no-op (only one focusable item, so cycling is a
+        # noop); kept reserved for future HOME-page widgets.
+        if snapshot.screen is Screen.HOME:
+            if event.key is Key.ENTER:
+                if snapshot.focused_field == "home_exit":
+                    if self._request_exit is not None:
+                        _log.info(
+                            "Exit button activated on HOME — requesting "
+                            "daemon shutdown"
+                        )
+                        try:
+                            self._request_exit()
+                        except Exception:
+                            _log.exception(
+                                "request_exit callback raised"
+                            )
+                    else:
+                        # No exit callback wired (e.g. tests) — log
+                        # but don't crash.
+                        _log.debug(
+                            "Exit button pressed but no request_exit "
+                            "callback configured; ignoring"
+                        )
+                return
+            # UP/DOWN currently no-op on HOME; ←/→ continue to ring nav.
+            if event.key in (Key.UP, Key.DOWN):
+                return
 
         # Directed activity log (Screen.DIRECTED): ↑/↓ reserved for
         # future scroll-up-into-history (the bottom of the list is

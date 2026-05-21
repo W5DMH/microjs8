@@ -242,21 +242,6 @@ def test_keyboard_function_keys(evdev_codes):
     assert Key.ESC in keys
 
 
-def test_keyboard_ctrl_s_combination(evdev_codes):
-    ec = evdev_codes
-    events = [
-        _ev(ec.EV_KEY, ec.KEY_LEFTCTRL, 1),
-        _ev(ec.EV_KEY, ec.KEY_S, 1),
-        _ev(ec.EV_KEY, ec.KEY_S, 0),
-        _ev(ec.EV_KEY, ec.KEY_LEFTCTRL, 0),
-    ]
-    captured = _drive_kbd_thread(events)
-    keys = [e.key for e in captured if e.key is not None]
-    assert Key.CTRL_S in keys
-    # And no plain "s" was emitted.
-    assert all(e.char != "s" for e in captured)
-
-
 def test_keyboard_thread_stops_cleanly(evdev_codes):
     """No events scripted; thread should stop on stop() within 1s.
 

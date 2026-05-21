@@ -335,11 +335,12 @@ def test_two_stations_at_different_offsets_dont_collide():
 
 def test_offset_jitter_within_bucket_routes_correctly():
     """Decoder reports slightly different freq for same TX between
-    consecutive frames; our 25 Hz bucketing must absorb that jitter."""
+    consecutive frames; our 10 Hz bucketing must absorb that jitter."""
     asm = MessageAssembler()
     f1 = _starter(from_call="KD8PGB", to_call="W5DMH", body="MSG", freq=1500.3)
     asm.feed(f1)
-    # Continuation reported at 1502.7 Hz — different from 1500.3 by < 25 Hz
+    # Continuation reported at 1502.7 Hz — different from 1500.3 by < 10 Hz,
+    # so still hits the same bucket (1500) and within raw-tolerance.
     body = "OK"
     f2 = _continuation(body + " " + checksum16(body), freq=1502.7)
     results = asm.feed(f2)
@@ -820,4 +821,97 @@ def test_grammar_preserves_trailing_whitespace_in_unknown_body():
     assert p.kind.name == "UNKNOWN"
     assert p.body == "RAW CONTINUATION TEXT ", (
         f"grammar stripped trailing whitespace from continuation: {p.body!r}"
+    )
+
+
+# ── Phase 19 / v0.0.8: cross-bucket contamination defenses ───────────
+
+
+def test_continuations_at_different_buckets_dont_chain():
+    """Phase 19 (v0.0.8) — replays the 2026-05-21 W5DMH/ND7M QSO bug.
+
+    On v0.0.7 with _OFFSET_BUCKET_HZ=25, two unrelated stations at
+    987.5 Hz and 1006.8 Hz both bucketed to 1000 Hz, and the second
+    station's continuation frames got concatenated onto the first's
+    buffer. Assembled body became "GRID DM16 K3FHP: N3CHX/P1 HEARTBEAT
+    SNR -12" — a data integrity bug.
+
+    With the v0.0.8 fix (_OFFSET_BUCKET_HZ=10), the two frequencies
+    bucket to 990 and 1010 respectively and never collide.
+    """
+    clock = [4000.0]
+    asm = MessageAssembler(clock=lambda: clock[0])
+
+    # ND7M's directed-command response to W5DMH at 987.5 Hz.
+    # GRID is non-buffered (no checksum), waits for completion via
+    # timeout/preempt.
+    starter = _starter(
+        from_call="ND7M",
+        to_call="W5DMH",
+        body="GRID",
+        freq=987.5,
+        kind=FrameKind.DIRECTED_COMMAND,
+    )
+    asm.feed(starter)
+
+    # Continuation at 987.5 Hz — same bucket, IS the grid value.
+    clock[0] = 4015.0
+    cont_same = _continuation("DM16", freq=987.5, received_at=clock[0])
+    asm.feed(cont_same)
+
+    # Unrelated continuation 19.3 Hz away — buggy v0.0.7 chained
+    # this onto ND7M's buffer; must NOT under v0.0.8.
+    clock[0] = 4030.0
+    cont_unrelated = _continuation("K3FHP: ", freq=1006.8, received_at=clock[0])
+    asm.feed(cont_unrelated)
+
+    # Force timeout past NON_BUFFERED_TIMEOUT_S to emit.
+    clock[0] = 4060.0
+    emitted = asm.sweep_completed()
+
+    # Find ND7M's emission
+    nd7m_msgs = [m for m in emitted if m.from_call == "ND7M"]
+    assert len(nd7m_msgs) == 1, (
+        f"expected exactly 1 ND7M message, got {len(nd7m_msgs)}: {nd7m_msgs}"
+    )
+    nd7m = nd7m_msgs[0]
+    # CRITICAL: body must NOT contain "K3FHP" — that was the cross-talk.
+    assert "K3FHP" not in nd7m.body, (
+        f"ND7M's body contains unrelated K3FHP chatter — "
+        f"reassembly cross-talk bug regressed: body={nd7m.body!r}"
+    )
+    # The same-bucket continuation should have made it through.
+    assert "DM16" in nd7m.body, (
+        f"ND7M's grid 'DM16' got lost: body={nd7m.body!r}"
+    )
+
+
+def test_continuations_within_same_bucket_but_outside_raw_tolerance_dont_chain():
+    """Phase 19 — defense in depth on top of bucket tightening.
+
+    If two raw frequencies happen to land in the same 10 Hz bucket
+    (e.g. 1497 and 1503 both bucket to 1500), they should still be
+    treated as distinct conversations when their raw frequencies
+    disagree by more than _CONTINUATION_RAW_TOLERANCE_HZ (15 Hz).
+
+    This is currently a no-op since values in the same 10 Hz bucket
+    can't differ by more than ~10 Hz — but it remains a safety net
+    if a future maintainer widens the bucket without remembering
+    why it was tightened. The test pins the raw-tolerance contract.
+    """
+    from microjs8.protocol.reassembly import _CONTINUATION_RAW_TOLERANCE_HZ
+    # Pin the contract value so accidental widening fails this test.
+    assert _CONTINUATION_RAW_TOLERANCE_HZ <= 15.0, (
+        "raw-frequency tolerance must stay tight to prevent the v0.0.7 "
+        "QSO cross-talk bug from regressing"
+    )
+
+
+def test_offset_bucket_size_pinned_to_10hz():
+    """Phase 19 — pin the bucket size so a future commit can't
+    accidentally re-widen it and re-introduce the QSO cross-talk."""
+    from microjs8.protocol.reassembly import _OFFSET_BUCKET_HZ
+    assert _OFFSET_BUCKET_HZ == 10.0, (
+        f"_OFFSET_BUCKET_HZ must be 10.0 to prevent cross-bucket "
+        f"contamination (v0.0.7 QSO bug); got {_OFFSET_BUCKET_HZ}"
     )
