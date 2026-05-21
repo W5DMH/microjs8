@@ -1177,3 +1177,34 @@ def test_gfsk8_env_var_empty_string_means_no_gfsk8():
             f"MICROJS8_GFSK8_SO='' must short-circuit default paths; "
             f"got {found!r} (the fake .so under fake $HOME)"
         )
+
+
+def test_microjs8_service_has_restart_force_exit_status_75(tmp_path: Path):
+    """Phase 19 v0.0.9: the systemd unit must include
+    ``RestartForceExitStatus=75`` so the radio-cycle path (which exits
+    cleanly with code 75) triggers a restart even though the policy
+    is otherwise Restart=on-failure.
+
+    Without this directive, switching radios in Setup leaves the
+    daemon down (operator has to manually start it) — the regression
+    surfaced May 21, 2026 in field testing of v0.0.8.
+    """
+    deb = _run_packager(tmp_path)
+    extract_dir = tmp_path / "extract-rfes75"
+    extract_dir.mkdir()
+    subprocess.run(
+        ["dpkg-deb", "-x", str(deb), str(extract_dir)],
+        check=True, capture_output=True,
+    )
+    svc_path = extract_dir / "lib" / "systemd" / "system" / "microjs8.service"
+    svc = svc_path.read_text()
+    # Filter comments — the surrounding rationale text discusses 75 too.
+    active = "\n".join(
+        line for line in svc.splitlines()
+        if not line.strip().startswith("#")
+    )
+    assert "RestartForceExitStatus=75" in active, (
+        "Phase 19 v0.0.9: microjs8.service must include "
+        "RestartForceExitStatus=75 so the radio-cycle exit path "
+        "triggers a restart even with Restart=on-failure"
+    )

@@ -1339,10 +1339,14 @@ def test_home_exit_button_focused_by_default():
     assert s.focused_field_name() == "home_exit"
 
 
-def test_home_enter_calls_request_exit():
-    """Phase 19: Enter on HOME with home_exit focused must call the
-    request_exit callback. This is the operator's path to leave the
-    daemon cleanly (without needing systemctl stop or SSH)."""
+def test_home_enter_opens_exit_confirm_modal():
+    """Phase 19 v0.0.9: Enter on HOME with home_exit focused now
+    opens the EXIT_CONFIRM modal instead of firing request_exit
+    directly. The confirmation step prevents accidental exits from
+    a stray Enter on the default-focused EXIT button.
+
+    Pre-v0.0.9 (v0.0.8 behavior): Enter on home_exit → daemon exited.
+    """
     s = _state(screen=Screen.HOME)
     save = _SaveCapture()
     bypass = _BypassCapture()
@@ -1352,30 +1356,126 @@ def test_home_enter_calls_request_exit():
         request_exit=exit_cb,
     )
 
-    # Confirm focus is on the exit button (the only focusable item)
+    # Default focus on HOME is the exit button
     assert s.focused_field_name() == "home_exit"
 
     r.handle(KeyEvent(key=Key.ENTER))
-    assert exit_cb.calls == 1, (
-        f"Enter on HOME exit button must call request_exit; "
-        f"got {exit_cb.calls} calls"
+
+    # Modal is now active; request_exit must NOT have fired yet
+    assert s.snapshot().screen is Screen.EXIT_CONFIRM, (
+        "Enter on home_exit must transition to EXIT_CONFIRM, "
+        f"got screen={s.snapshot().screen}"
+    )
+    assert exit_cb.calls == 0, (
+        "request_exit must NOT fire from HOME — it fires only after "
+        "the operator confirms YES in the modal"
     )
 
 
-def test_home_enter_without_callback_does_not_crash():
-    """Phase 19: if no request_exit callback is wired (e.g. tests
-    that don't care about the exit path), Enter on the exit button
-    must be a clean no-op — no exception, daemon keeps running."""
+def test_exit_confirm_default_focus_is_no():
+    """Phase 19 v0.0.9: when EXIT_CONFIRM opens, focus must default
+    to NO (the safer choice). A stray Enter immediately after entering
+    the modal must cancel, not exit."""
+    s = _state(screen=Screen.HOME)
+    r, _, _ = _router(s)
+    r.handle(KeyEvent(key=Key.ENTER))     # HOME → EXIT_CONFIRM
+    assert s.focused_field_name() == "exit_no", (
+        f"EXIT_CONFIRM default focus must be 'exit_no', "
+        f"got {s.focused_field_name()!r}"
+    )
+
+
+def test_exit_confirm_enter_on_no_returns_to_home():
+    """Phase 19 v0.0.9: Enter on NO must cancel and return to HOME
+    without firing request_exit. Focus restored to home_exit."""
+    s = _state(screen=Screen.HOME)
+    save = _SaveCapture()
+    bypass = _BypassCapture()
+    exit_cb = _ExitCapture()
+    r = InputRouter(
+        s, save_config=save, emergency_bypass=bypass,
+        request_exit=exit_cb,
+    )
+    r.handle(KeyEvent(key=Key.ENTER))     # HOME → EXIT_CONFIRM
+    assert s.snapshot().screen is Screen.EXIT_CONFIRM
+    assert s.focused_field_name() == "exit_no"
+
+    r.handle(KeyEvent(key=Key.ENTER))     # EXIT_CONFIRM (NO) → HOME
+
+    assert s.snapshot().screen is Screen.HOME
+    assert s.focused_field_name() == "home_exit"
+    assert exit_cb.calls == 0, (
+        "request_exit must NOT fire when operator chose NO"
+    )
+
+
+def test_exit_confirm_esc_returns_to_home():
+    """Phase 19 v0.0.9: Esc on the modal also cancels (same as NO)."""
+    s = _state(screen=Screen.HOME)
+    r, _, _ = _router(s)
+    r.handle(KeyEvent(key=Key.ENTER))     # HOME → EXIT_CONFIRM
+    assert s.snapshot().screen is Screen.EXIT_CONFIRM
+    r.handle(KeyEvent(key=Key.ESC))       # cancel
+    assert s.snapshot().screen is Screen.HOME
+
+
+def test_exit_confirm_left_right_cycle_focus_between_no_and_yes():
+    """Phase 19 v0.0.9: LEFT and RIGHT toggle focus between NO and
+    YES within the modal — they do NOT escape to ring nav."""
+    s = _state(screen=Screen.HOME)
+    r, _, _ = _router(s)
+    r.handle(KeyEvent(key=Key.ENTER))     # HOME → EXIT_CONFIRM
+    assert s.focused_field_name() == "exit_no"
+
+    r.handle(KeyEvent(key=Key.RIGHT))     # NO → YES
+    assert s.focused_field_name() == "exit_yes"
+    assert s.snapshot().screen is Screen.EXIT_CONFIRM, (
+        "RIGHT must NOT trigger ring nav while modal is open"
+    )
+
+    r.handle(KeyEvent(key=Key.LEFT))      # YES → NO
+    assert s.focused_field_name() == "exit_no"
+    assert s.snapshot().screen is Screen.EXIT_CONFIRM
+
+
+def test_exit_confirm_yes_fires_request_exit():
+    """Phase 19 v0.0.9: Enter on YES is the only path that actually
+    fires the request_exit callback (and therefore exits the daemon)."""
+    s = _state(screen=Screen.HOME)
+    save = _SaveCapture()
+    bypass = _BypassCapture()
+    exit_cb = _ExitCapture()
+    r = InputRouter(
+        s, save_config=save, emergency_bypass=bypass,
+        request_exit=exit_cb,
+    )
+    r.handle(KeyEvent(key=Key.ENTER))     # HOME → EXIT_CONFIRM
+    r.handle(KeyEvent(key=Key.RIGHT))     # focus NO → YES
+    assert s.focused_field_name() == "exit_yes"
+    assert exit_cb.calls == 0             # not yet — only on Enter
+
+    r.handle(KeyEvent(key=Key.ENTER))     # confirm
+
+    assert exit_cb.calls == 1, (
+        f"Enter on YES must call request_exit; got {exit_cb.calls}"
+    )
+
+
+def test_exit_confirm_yes_without_callback_returns_to_home():
+    """Phase 19 v0.0.9: if request_exit isn't wired (headless tests),
+    Enter on YES must still return cleanly to HOME — no crash."""
     s = _state(screen=Screen.HOME)
     r, _, _ = _router(s)   # no request_exit injected
-    # Must not raise
-    r.handle(KeyEvent(key=Key.ENTER))
+    r.handle(KeyEvent(key=Key.ENTER))     # HOME → EXIT_CONFIRM
+    r.handle(KeyEvent(key=Key.RIGHT))     # focus NO → YES
+    r.handle(KeyEvent(key=Key.ENTER))     # confirm
+    # Without callback we just return to HOME
+    assert s.snapshot().screen is Screen.HOME
 
 
-def test_home_enter_swallowed_when_request_exit_raises():
-    """Phase 19: if the request_exit callback raises, the router
-    must swallow the exception. A buggy exit callback shouldn't
-    crash the input loop."""
+def test_exit_confirm_yes_swallows_callback_exception():
+    """Phase 19 v0.0.9: a request_exit callback that raises must NOT
+    crash the input loop. Same defense as v0.0.8 had on direct exit."""
     s = _state(screen=Screen.HOME)
     save = _SaveCapture()
     bypass = _BypassCapture()
@@ -1387,8 +1487,32 @@ def test_home_enter_swallowed_when_request_exit_raises():
         s, save_config=save, emergency_bypass=bypass,
         request_exit=boom,
     )
+    r.handle(KeyEvent(key=Key.ENTER))     # HOME → EXIT_CONFIRM
+    r.handle(KeyEvent(key=Key.RIGHT))     # focus YES
     # Must not raise
     r.handle(KeyEvent(key=Key.ENTER))
+
+
+def test_exit_confirm_default_focus_resets_on_re_entry():
+    """Phase 19 v0.0.9: if the operator entered the modal, moved focus
+    to YES, changed their mind, hit Esc, then opened the modal again
+    later — focus must reset to NO. Otherwise the 'safer default'
+    intent is silently defeated by stale focus state."""
+    s = _state(screen=Screen.HOME)
+    r, _, _ = _router(s)
+
+    # First visit: enter, cycle to YES, cancel
+    r.handle(KeyEvent(key=Key.ENTER))     # HOME → EXIT_CONFIRM
+    r.handle(KeyEvent(key=Key.RIGHT))     # NO → YES
+    assert s.focused_field_name() == "exit_yes"
+    r.handle(KeyEvent(key=Key.ESC))       # cancel back to HOME
+
+    # Second visit: focus must reset to NO
+    r.handle(KeyEvent(key=Key.ENTER))     # HOME → EXIT_CONFIRM again
+    assert s.focused_field_name() == "exit_no", (
+        f"Re-entering EXIT_CONFIRM must reset focus to NO; "
+        f"got {s.focused_field_name()!r}"
+    )
 
 
 def test_home_left_right_still_navigates_ring():

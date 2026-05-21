@@ -92,7 +92,12 @@ def main(argv: list[str] | None = None) -> int:
         log.exception("unhandled exception in run loop")
         return 1
 
-    return 0
+    # v0.0.9: the daemon exit code differentiates a clean shutdown
+    # (0 — operator clicked EXIT, or SIGTERM from systemctl stop;
+    # systemd's Restart=on-failure leaves us down) from a restart
+    # request (75 — radio profile cycled; systemd's
+    # RestartForceExitStatus=75 brings us back with the new config).
+    return app.exit_code
 
 
 if __name__ == "__main__":

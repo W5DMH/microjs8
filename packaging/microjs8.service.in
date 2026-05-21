@@ -56,6 +56,15 @@ ExecStart=/usr/share/APPLaunch/bin/microjs8
 Restart=on-failure
 RestartSec=5
 
+# v0.0.9: differentiate "radio profile cycled, restart me" from
+# "operator clicked EXIT, leave me down" via the daemon's exit code:
+#   0  → clean exit (Exit button, SIGTERM from systemctl stop) — stay down
+#   75 → restart requested (radio profile cycle in Setup) — come back up
+# RestartForceExitStatus overrides Restart=on-failure for the listed
+# exit codes, treating them as "always restart" without rate-limiting.
+# 75 is EX_TEMPFAIL from sysexits.h: "temporary failure, retry".
+RestartForceExitStatus=75
+
 # Graceful stop: deliver SIGTERM, give the process up to TimeoutStopSec
 # to handle it, then SIGKILL. The daemon's asyncio handler honors
 # SIGTERM and shuts down within ~2s.
