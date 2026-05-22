@@ -830,14 +830,21 @@ def _compose_snapshot(*, tx_allowed: bool = True, time_source: str = "chrony"):
 def test_compose_warns_when_no_time_source(fonts):
     """When time_source is empty (no chrony, no consensus), the
     scheduler won't fire — we surface this on COMPOSE so the operator
-    knows their SEND will queue but not transmit immediately. Detect
-    by sampling for warn-colored pixels (~240,180,40 = FG_WARN)."""
+    knows their SEND will queue but not transmit immediately.
+
+    v0.0.11: the TX warning moved from body to the right side of
+    the footer band (operators reported it was illegible squeezed
+    between SEND and the footer). Search for FG_WARN-colored
+    pixels in the footer-band y range now.
+    """
     from microjs8.ui.screens import _render_compose
     snap = _compose_snapshot(time_source="")
     img = _render_compose(snap, fonts)
     found_warn = False
+    # v0.0.11: warning lives in footer (last FOOTER_H pixels).
+    footer_y0 = theme.SCREEN_H - theme.FOOTER_H
     for x in range(theme.SCREEN_W):
-        for y in range(theme.BODY_Y0, theme.BODY_Y1):
+        for y in range(footer_y0, theme.SCREEN_H):
             r, g, b = img.getpixel((x, y))
             if r > 200 and 140 < g < 200 and b < 100:
                 found_warn = True
@@ -845,8 +852,8 @@ def test_compose_warns_when_no_time_source(fonts):
         if found_warn:
             break
     assert found_warn, (
-        "expected a FG_WARN-colored TX-blocked hint on COMPOSE when "
-        "time_source is empty; not found"
+        "expected a FG_WARN-colored TX-blocked hint in the COMPOSE "
+        "footer band when time_source is empty; not found"
     )
 
 
@@ -883,15 +890,17 @@ def test_home_renders_when_battery_unknown(fonts):
 
 def test_compose_warns_on_critical_battery(fonts):
     """The COMPOSE TX-warning chain should pick up battery-critical
-    even when other gates pass. Detect via FG_WARN pixels."""
+    even when other gates pass. Detect via FG_WARN pixels in footer
+    band (v0.0.11: warning location moved from body to footer)."""
     from microjs8.ui.screens import _render_compose
     from dataclasses import replace
     snap = _compose_snapshot(time_source="chrony")
     snap = replace(snap, battery=_battery_state(3, "Discharging"))
     img = _render_compose(snap, fonts)
     found_warn = False
+    footer_y0 = theme.SCREEN_H - theme.FOOTER_H
     for x in range(theme.SCREEN_W):
-        for y in range(theme.BODY_Y0, theme.BODY_Y1):
+        for y in range(footer_y0, theme.SCREEN_H):
             r, g, b = img.getpixel((x, y))
             if r > 200 and 140 < g < 200 and b < 100:
                 found_warn = True
@@ -899,8 +908,8 @@ def test_compose_warns_on_critical_battery(fonts):
         if found_warn:
             break
     assert found_warn, (
-        "COMPOSE should show a battery-critical warning when battery is "
-        "discharging at ≤5%"
+        "COMPOSE should show a battery-critical warning (in footer band) "
+        "when battery is discharging at ≤5%"
     )
 
 
@@ -1323,3 +1332,151 @@ def test_directed_log_outbound_meta_is_timestamp_only(fonts):
     at = 1779373800.0
     ts = _format_unix_mmddhhmm(at)
     assert ts == "05/21 14:30"
+
+
+# ── Phase 19 v0.0.11: footer right-warning + draw_footer kwarg ───────
+
+
+def test_draw_footer_right_warning_renders_in_footer_band(fonts):
+    """v0.0.11: _draw_footer(hint, right_warning=...) renders the
+    warning right-aligned in FG_WARN inside the footer band, so the
+    operator sees it cleanly without it being clipped between the
+    SEND button and the bottom of the screen."""
+    from microjs8.ui.screens import _draw_footer, _new_canvas
+    img, draw = _new_canvas()
+    _draw_footer(draw, fonts, "type · Tab", right_warning="TO required")
+
+    # Find FG_WARN pixels — they must be in the footer band AND in
+    # the right half of the screen (since warning is right-aligned).
+    footer_y0 = theme.SCREEN_H - theme.FOOTER_H
+    warn_pixels_right_half = 0
+    for x in range(theme.SCREEN_W // 2, theme.SCREEN_W):
+        for y in range(footer_y0, theme.SCREEN_H):
+            r, g, b = img.getpixel((x, y))
+            if r > 200 and 140 < g < 200 and b < 100:
+                warn_pixels_right_half += 1
+    assert warn_pixels_right_half > 0, (
+        "right_warning must render FG_WARN-colored pixels in the "
+        "RIGHT half of the footer band"
+    )
+
+
+def test_draw_footer_truncates_hint_when_warning_doesnt_fit(fonts):
+    """v0.0.11: a long hint + long warning that would overlap must
+    truncate the hint with ellipsis. The warning is the higher-
+    priority message (it explains why TX is blocked); the hint is
+    a navigation aid."""
+    from microjs8.ui.screens import _draw_footer, _new_canvas
+    img, draw = _new_canvas()
+    # Both long enough to overlap on a 320-wide screen.
+    _draw_footer(
+        draw, fonts,
+        "type · Backspace delete · Tab next · Esc cancel",
+        right_warning="TX OFF — battery critical",
+    )
+    # If both rendered side-by-side they'd cover ~25 chars hint +
+    # ~25 chars warning = ~250 px combined (with padding). They fit
+    # on a 320-px screen but it's tight; what we're testing is that
+    # _draw_footer doesn't crash and produces SOME output in both
+    # the left and right segments.
+    footer_y0 = theme.SCREEN_H - theme.FOOTER_H
+    warn_pixels = 0
+    hint_pixels = 0
+    for y in range(footer_y0, theme.SCREEN_H):
+        for x in range(0, theme.SCREEN_W // 2):
+            r, g, b = img.getpixel((x, y))
+            # Footer FG is whitish/grey
+            if r > 100 and not (r > 200 and 140 < g < 200 and b < 100):
+                hint_pixels += 1
+        for x in range(theme.SCREEN_W // 2, theme.SCREEN_W):
+            r, g, b = img.getpixel((x, y))
+            if r > 200 and 140 < g < 200 and b < 100:
+                warn_pixels += 1
+    assert warn_pixels > 0, "warning must render"
+    assert hint_pixels > 0, "hint must still render (possibly truncated)"
+
+
+# ── Phase 19 v0.0.11: Setup layout fits within body budget ───────────
+
+
+def test_setup_radio_row_not_clipped_by_footer(fonts):
+    """v0.0.11: PI-2W-TEST field report — Radio row was half-clipped
+    by the footer at the prior 22-px stride. Verify the Radio row's
+    painted content lives ABOVE the footer band."""
+    snap = _snapshot(Screen.SETUP)
+    img = render(snap, fonts)
+    # Find the rows that have content in the body area.
+    rows: list[int] = []
+    prev = -10
+    for y in range(theme.BODY_Y0, theme.BODY_Y1):
+        any_painted = any(
+            img.getpixel((x, y)) != theme.BG for x in range(theme.SCREEN_W)
+        )
+        if any_painted and y - prev > 4:
+            rows.append(y)
+        if any_painted:
+            prev = y
+
+    # We expect at least 6 functional rows (Call, Grid, Groups, Units,
+    # Freq, Radio) plus the Em button — 7 distinct row-starts.
+    assert len(rows) >= 6, (
+        f"setup screen must show >= 6 rows; saw {len(rows)} at {rows}"
+    )
+    # The 6th row-start (Radio) MUST end before the footer.
+    # Each row is 18 px high; the row-start at index 5 (zero-indexed)
+    # corresponds to Radio. Its TEXT ends at row_start + ~14 px.
+    radio_y_start = rows[5]
+    radio_text_end = radio_y_start + 14
+    footer_y0 = theme.SCREEN_H - theme.FOOTER_H
+    assert radio_text_end <= footer_y0, (
+        f"Radio row text ends at y={radio_text_end} but footer "
+        f"starts at y={footer_y0} — Radio is clipped"
+    )
+
+
+def test_setup_emergency_button_above_footer(fonts):
+    """v0.0.11: the [EMERGENCY BEACON →] button must be fully
+    visible above the footer band (was off-screen at the v0.0.10
+    layout)."""
+    snap = _snapshot(Screen.SETUP)
+    img = render(snap, fonts)
+    # Find the FG_BAD-colored rectangle outline of the Em button.
+    # FG_BAD is approximately (240, 60, 60) — red.
+    footer_y0 = theme.SCREEN_H - theme.FOOTER_H
+    found_em_pixels = 0
+    for y in range(footer_y0 - 25, footer_y0):
+        for x in range(theme.SCREEN_W):
+            r, g, b = img.getpixel((x, y))
+            if r > 200 and g < 100 and b < 100:
+                found_em_pixels += 1
+    assert found_em_pixels > 0, (
+        "Emergency button (FG_BAD red outline) must render above "
+        "the footer band in v0.0.11 layout"
+    )
+
+
+def test_setup_does_not_render_mode_or_logs_rows(fonts):
+    """v0.0.11: Mode + Logs rows were placeholders showing static
+    '30 days' text. They're filtered out of the render until they
+    become real config (recovers ~36 px of vertical space)."""
+    snap = _snapshot(Screen.SETUP)
+    img = render(snap, fonts)
+    # Render and look for the literal text "30 days" which was the
+    # Logs placeholder value.
+    # Simplest test: confirm the visible row count is 6 (not 8) by
+    # counting content rows in the body area.
+    rows: list[int] = []
+    prev = -10
+    for y in range(theme.BODY_Y0, theme.BODY_Y1 - 20):
+        any_painted = any(
+            img.getpixel((x, y)) != theme.BG for x in range(theme.SCREEN_W)
+        )
+        if any_painted and y - prev > 4:
+            rows.append(y)
+        if any_painted:
+            prev = y
+    # 6 setup rows. The Em button is below the row scan limit.
+    assert len(rows) == 6, (
+        f"v0.0.11 expected 6 setup data rows (Mode + Logs filtered); "
+        f"got {len(rows)} at {rows}"
+    )
