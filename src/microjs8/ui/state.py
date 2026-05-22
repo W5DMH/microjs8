@@ -544,6 +544,14 @@ class UISnapshot:
     # style newest-first display.
     directed_log_entries: tuple["DirectedActivityEntry", ...] = ()
 
+    # v0.0.10: scroll offsets for the Directed and Heard screens.
+    # 0 = show newest entries at the top of the visible window.
+    # Operator ↓ advances into older entries (higher offset). The
+    # renderer derives the footer "▲ N above / ▼ M below" hint from
+    # these values + the visible-row count.
+    directed_scroll_offset: int = 0
+    heard_scroll_offset: int = 0
+
     # Compose screen state. The TO field is the recipient callsign
     # (may be empty until the operator types or pre-population fires).
     # CMD is one of the ComposeCmd enum values (defaulting to FREE).
@@ -666,6 +674,15 @@ class UIState:
         # exchanges (SNR?, QUERY MSGS, ACKs, etc.) — both inbound
         # and outbound. Newest entry at the END of the tuple.
         self._directed_log_entries: tuple[DirectedActivityEntry, ...] = ()
+        # v0.0.10: scroll offsets for the Directed and Heard screens.
+        # 0 means "show newest at the top of the visible window"; the
+        # operator presses ↓ to advance into older entries. The
+        # offset's upper bound is enforced by the scroll methods so
+        # the renderer never receives an out-of-range value. The
+        # renderer derives a "more above / more below" hint from
+        # these offsets for the footer.
+        self._directed_scroll_offset: int = 0
+        self._heard_scroll_offset: int = 0
 
         # Compose screen state — fields, focus, and helpers. The TO
         # field defaults to "" but gets pre-populated from the Heard
@@ -1222,10 +1239,23 @@ class UIState:
         Marks dirty if the list actually changed (callsign membership
         OR most-recent timestamps), so high-frequency updates of the
         same N stations don't churn the screen.
+
+        v0.0.10 scroll behavior: clamp ``_heard_scroll_offset`` to a
+        valid range if entries were dropped (HEARD_CAP rollover) or
+        the list cleared on a callsign change. We do NOT reset the
+        offset to 0 on every new heard sighting — operators may be
+        actively reviewing older entries when a new station decodes,
+        and yanking them back to the top would be jarring. (Contrast
+        with directed_log which DOES auto-reset; the activity-log is
+        the operator's chat surface and they want to see new traffic
+        immediately.)
         """
         if heard == self._heard:
             return
         self._heard = heard
+        max_off = max(0, len(heard) - 1)
+        if self._heard_scroll_offset > max_off:
+            self._heard_scroll_offset = max_off
         self._dirty.set()
 
     def append_directed(self, row: DirectedRow) -> None:
@@ -1340,10 +1370,25 @@ class UIState:
         .snapshot()`` — caller does not need to slice; the renderer
         will take the most-recent N and the operator can scroll
         upward through history.
+
+        v0.0.10 scroll behavior: when the snapshot grows (new entry
+        arrived), reset ``_directed_scroll_offset`` to 0 so the
+        operator sees the newest entry immediately. If the snapshot
+        shrunk (clear() or buffer rollover), clamp to a valid range.
         """
         if entries == self._directed_log_entries:
             return
+        old_len = len(self._directed_log_entries)
+        new_len = len(entries)
         self._directed_log_entries = entries
+        if new_len > old_len:
+            # New entry appended — jump to top (newest).
+            self._directed_scroll_offset = 0
+        else:
+            # Clamp; the offset can't point past the last entry.
+            max_off = max(0, new_len - 1)
+            if self._directed_scroll_offset > max_off:
+                self._directed_scroll_offset = max_off
         self._dirty.set()
 
     def inbox_focus_up(self) -> None:
@@ -1369,6 +1414,65 @@ class UIState:
         if self._inbox_focused_index >= len(self._inbox_messages) - 1:
             return
         self._inbox_focused_index += 1
+        self._dirty.set()
+
+    # ── v0.0.10: Directed / Heard scroll offsets ─────────────────────
+
+    def directed_scroll_up(self) -> None:
+        """Scroll Directed view one row toward newer entries (offset−).
+
+        offset 0 = top of list (newest). No-op when already at 0.
+        Marks dirty only on observable change.
+        """
+        if self._directed_scroll_offset <= 0:
+            return
+        self._directed_scroll_offset -= 1
+        self._dirty.set()
+
+    def directed_scroll_down(self) -> None:
+        """Scroll Directed view one row toward older entries (offset+).
+
+        We cap at ``len(entries) - 1`` so the operator can't scroll
+        past the oldest visible row. Renderers cap further based on
+        their own visible-row budget.
+        """
+        max_off = max(0, len(self._directed_log_entries) - 1)
+        if self._directed_scroll_offset >= max_off:
+            return
+        self._directed_scroll_offset += 1
+        self._dirty.set()
+
+    def directed_scroll_reset(self) -> None:
+        """Reset Directed scroll to top (newest).
+
+        Called whenever a new entry is appended so the operator
+        always sees fresh activity without scrolling.
+        """
+        if self._directed_scroll_offset == 0:
+            return
+        self._directed_scroll_offset = 0
+        self._dirty.set()
+
+    def heard_scroll_up(self) -> None:
+        """Scroll Heard list one row toward newer (more recently heard)."""
+        if self._heard_scroll_offset <= 0:
+            return
+        self._heard_scroll_offset -= 1
+        self._dirty.set()
+
+    def heard_scroll_down(self) -> None:
+        """Scroll Heard list one row toward older entries."""
+        max_off = max(0, len(self._heard) - 1)
+        if self._heard_scroll_offset >= max_off:
+            return
+        self._heard_scroll_offset += 1
+        self._dirty.set()
+
+    def heard_scroll_reset(self) -> None:
+        """Reset Heard scroll to top (most recently heard)."""
+        if self._heard_scroll_offset == 0:
+            return
+        self._heard_scroll_offset = 0
         self._dirty.set()
 
     def inbox_open_detail(self) -> Optional[int]:
@@ -1839,6 +1943,8 @@ class UIState:
             inbox_focused_index=self._inbox_focused_index,
             inbox_detail_id=self._inbox_detail_id,
             directed_log_entries=self._directed_log_entries,
+            directed_scroll_offset=self._directed_scroll_offset,
+            heard_scroll_offset=self._heard_scroll_offset,
             compose_to=self._compose_to,
             compose_cmd=self._compose_cmd,
             compose_text=self._compose_text,

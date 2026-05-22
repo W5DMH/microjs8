@@ -82,6 +82,13 @@ def _run_packager(
         cmd.extend(["--version", version])
     if gfsk8_so is not None:
         cmd.extend(["--gfsk8-so", str(gfsk8_so)])
+    else:
+        # v0.0.10: the size guard refuses no-gfsk8 builds by default.
+        # Most packaging tests don't care about gfsk8 — they're
+        # checking postinst, service files, udev, etc. — so opt them
+        # into the no-gfsk8 path explicitly. Tests that specifically
+        # verify gfsk8 bundling pass gfsk8_so= and get the real flow.
+        cmd.append("--allow-no-gfsk8")
 
     env = os.environ.copy()
     if gfsk8_so is None:
@@ -1208,3 +1215,91 @@ def test_microjs8_service_has_restart_force_exit_status_75(tmp_path: Path):
         "RestartForceExitStatus=75 so the radio-cycle exit path "
         "triggers a restart even with Restart=on-failure"
     )
+
+
+# ── Phase 19 v0.0.10: build size guard ───────────────────────────────
+
+
+def test_build_deb_refuses_no_gfsk8_by_default(tmp_path: Path):
+    """v0.0.10: with no gfsk8 found AND no --allow-no-gfsk8 flag, the
+    builder must REFUSE rather than produce a tiny .deb that would
+    install fine but crash at TX/RX.
+
+    This closes the v0.0.8/v0.0.9 'shipped a 241 KB .deb by mistake'
+    foot-gun permanently.
+    """
+    # _run_packager defaults to MICROJS8_GFSK8_SO="" — auth no gfsk8.
+    # Without --allow-no-gfsk8, the build must exit non-zero.
+    cmd = [
+        "python3",
+        str(_repo_root() / "scripts" / "build_deb.py"),
+        "--output-dir", str(tmp_path),
+        "--quiet",
+    ]
+    env = os.environ.copy()
+    env["MICROJS8_GFSK8_SO"] = ""
+    result = subprocess.run(cmd, capture_output=True, text=True, env=env)
+
+    assert result.returncode != 0, (
+        "build_deb.py must REFUSE to produce a no-gfsk8 .deb by "
+        "default (no --allow-no-gfsk8 flag); got success"
+    )
+    assert "suspiciously small" in result.stderr or "gfsk8" in result.stderr, (
+        f"error message must explain WHY the build was refused; "
+        f"stderr: {result.stderr!r}"
+    )
+    # The bad .deb must be DELETED so it can't be uploaded by accident
+    debs = list(tmp_path.glob("*.deb"))
+    assert len(debs) == 0, (
+        f"the refused .deb must be deleted to prevent accidental "
+        f"upload; found {debs}"
+    )
+
+
+def test_build_deb_allows_no_gfsk8_with_explicit_flag(tmp_path: Path):
+    """v0.0.10: --allow-no-gfsk8 lets the operator deliberately
+    produce a no-gfsk8 .deb (e.g. for CI / minimal targets where
+    gfsk8 is provided separately)."""
+    cmd = [
+        "python3",
+        str(_repo_root() / "scripts" / "build_deb.py"),
+        "--output-dir", str(tmp_path),
+        "--quiet",
+        "--allow-no-gfsk8",
+    ]
+    env = os.environ.copy()
+    env["MICROJS8_GFSK8_SO"] = ""
+    result = subprocess.run(cmd, capture_output=True, text=True, env=env)
+
+    assert result.returncode == 0, (
+        f"--allow-no-gfsk8 must permit the build; got rc={result.returncode} "
+        f"stderr={result.stderr!r}"
+    )
+    debs = list(tmp_path.glob("*.deb"))
+    assert len(debs) == 1, f"expected one .deb, got {debs}"
+    # Confirm it's the no-gfsk8 variant (small) — we OPTED IN
+    assert debs[0].stat().st_size < 1_000_000
+
+
+def test_build_deb_with_explicit_gfsk8_skips_size_guard(tmp_path: Path):
+    """v0.0.10: when the operator passes --gfsk8-so explicitly,
+    the size guard MUST NOT trip even if the provided .so is tiny.
+    Rationale: the operator made an explicit choice about gfsk8
+    content; the guard exists for the 'I forgot' case, not to
+    second-guess deliberate decisions.
+
+    Test method: pass a small fake .so via --gfsk8-so and confirm
+    the build succeeds without --allow-no-gfsk8 in the picture.
+    """
+    fake_so = tmp_path / "gfsk8.cpython-311-aarch64-linux-gnu.so"
+    fake_so.write_bytes(b"\x7fELF" + b"\x00" * 100)
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+
+    # _run_packager with gfsk8_so= passes --gfsk8-so and does NOT
+    # pass --allow-no-gfsk8 — exactly the "explicit gfsk8 path"
+    # case the guard should NOT block.
+    deb = _run_packager(out_dir, gfsk8_so=fake_so)
+    # The .deb will be small (tiny fake .so), but it built successfully
+    # despite being below 1 MB — that's the test.
+    assert deb.exists()

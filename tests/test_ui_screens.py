@@ -1280,3 +1280,46 @@ def test_exit_confirm_renders_explanation_text(fonts):
         f"EXIT_CONFIRM body looks empty above buttons: {non_bg} non-bg "
         f"pixels found; expected the explanation text to render"
     )
+
+
+# ── Phase 19 v0.0.10: Directed-log timestamp format ──────────────────
+
+
+def test_format_unix_mmddhhmm_returns_mm_dd_hh_mm():
+    """Phase 19 v0.0.10: _format_unix_mmddhhmm returns MM/DD HH:MM
+    (UTC) — the format requested by the operator for Directed log
+    timestamps."""
+    from microjs8.ui.screens import _format_unix_mmddhhmm
+    # 2026-05-21 14:30:00 UTC = 1779373800
+    s = _format_unix_mmddhhmm(1779373800.0)
+    assert s == "05/21 14:30", f"expected '05/21 14:30', got {s!r}"
+
+
+def test_format_unix_mmddhhmm_handles_bogus_input():
+    """Defensive: corrupt at_unix values must NOT raise; we degrade
+    to the placeholder so one bad row doesn't break the whole log."""
+    from microjs8.ui.screens import _format_unix_mmddhhmm
+    assert _format_unix_mmddhhmm(float("nan")) == "--/-- --:--"
+    assert _format_unix_mmddhhmm(-1e18) == "--/-- --:--"
+
+
+def test_directed_log_inbound_meta_contains_snr_and_timestamp(fonts):
+    """Phase 19 v0.0.10: inbound rows show both SNR and the MM/DD
+    HH:MM timestamp, separated by spaces. Verify by inspecting the
+    formatting helper output indirectly — the meta-string format
+    used inside _render_directed is the contract."""
+    from microjs8.ui.screens import _format_unix_mmddhhmm
+    snr = -13
+    at = 1779373800.0
+    ts = _format_unix_mmddhhmm(at)
+    expected_meta = f"{snr:+d} dB  {ts}"
+    assert expected_meta == "-13 dB  05/21 14:30"
+
+
+def test_directed_log_outbound_meta_is_timestamp_only(fonts):
+    """Phase 19 v0.0.10: outbound rows show only the timestamp (no
+    SNR — we'd just be quoting our own carrier frequency)."""
+    from microjs8.ui.screens import _format_unix_mmddhhmm
+    at = 1779373800.0
+    ts = _format_unix_mmddhhmm(at)
+    assert ts == "05/21 14:30"

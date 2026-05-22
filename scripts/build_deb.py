@@ -522,6 +522,29 @@ def main(argv: Optional[list[str]] = None) -> int:
             "will fail with ModuleNotFoundError until gfsk8 is provided)."
         ),
     )
+    # v0.0.10 build-hygiene guard. Twice in a row (v0.0.8 and v0.0.9)
+    # a no-gfsk8 .deb (~240 KB) was uploaded to GitHub by mistake
+    # because the gfsk8 search path didn't find anything. The .deb
+    # was technically valid, but installing it gave operators a
+    # daemon that crashed at TX/RX time with ModuleNotFoundError.
+    #
+    # This flag inverts the default: the builder now REFUSES to
+    # produce a no-gfsk8 .deb unless the operator passes --allow-
+    # no-gfsk8 explicitly. The opt-in stays available for the rare
+    # case (e.g. CI builds where gfsk8 will be apt-installed
+    # separately on the target) but accidental tiny .debs become
+    # impossible.
+    parser.add_argument(
+        "--allow-no-gfsk8", action="store_true",
+        help=(
+            "Allow building a .deb without the gfsk8 .so bundled. "
+            "Without this flag, the builder will refuse if gfsk8 "
+            "isn't found and bundled — protects against accidentally "
+            "shipping a tiny no-gfsk8 .deb to operators. Use only "
+            "when you intentionally want a no-gfsk8 build (CI, "
+            "minimal images, etc)."
+        ),
+    )
     args = parser.parse_args(argv)
 
     logging.basicConfig(
@@ -537,7 +560,57 @@ def main(argv: Optional[list[str]] = None) -> int:
         keep_staging=args.keep_staging,
         gfsk8_so_path=args.gfsk8_so,
     )
-    print(f"built: {deb_path}")
+
+    # v0.0.10 size guard: a properly-built .deb with gfsk8 is ~3.3 MB
+    # (gfsk8.so alone is 24 MB on disk but compresses well in the .deb).
+    # Without gfsk8 the .deb is ~240 KB. Refuse anything below the
+    # 1 MB threshold unless the operator EXPLICITLY made a choice
+    # about gfsk8 content:
+    #
+    #   - --gfsk8-so /some/path → operator vouched for the content,
+    #     guard does not apply (even tiny custom builds are OK)
+    #   - --allow-no-gfsk8 → operator opted into no-gfsk8 .deb
+    #
+    # The guard exists specifically to catch the "I forgot about
+    # gfsk8" case where neither flag was passed and the default
+    # search didn't find anything.
+    operator_made_explicit_choice = (
+        args.gfsk8_so is not None or args.allow_no_gfsk8
+    )
+    size = deb_path.stat().st_size
+    SIZE_GUARD_THRESHOLD = 1_000_000     # 1 MB
+    if size < SIZE_GUARD_THRESHOLD and not operator_made_explicit_choice:
+        # Delete the bad artifact so it can't be accidentally
+        # uploaded. The operator gets a clear error + recovery path.
+        deb_path.unlink()
+        print(
+            f"\n"
+            f"  ════════════════════════════════════════════════════════════════\n"
+            f"  ERROR: built .deb is suspiciously small ({size:,} bytes < {SIZE_GUARD_THRESHOLD:,})\n"
+            f"  ════════════════════════════════════════════════════════════════\n"
+            f"  Most likely cause: gfsk8.so was not bundled. A .deb without\n"
+            f"  gfsk8 will install fine but the daemon will crash at TX/RX\n"
+            f"  with ModuleNotFoundError.\n"
+            f"\n"
+            f"  The bad .deb has been deleted so it can't be uploaded by\n"
+            f"  accident.\n"
+            f"\n"
+            f"  To fix:\n"
+            f"    1. Confirm gfsk8 is built and find its path:\n"
+            f"         find / -name 'gfsk8*.so' 2>/dev/null\n"
+            f"\n"
+            f"    2. Rebuild with the explicit path:\n"
+            f"         python3 scripts/build_deb.py --output-dir dist \\\n"
+            f"             --gfsk8-so /path/to/gfsk8.cpython-311-aarch64-linux-gnu.so\n"
+            f"\n"
+            f"  If you intentionally want a .deb WITHOUT gfsk8 (CI, etc):\n"
+            f"    python3 scripts/build_deb.py --output-dir dist --allow-no-gfsk8\n"
+            f"  ════════════════════════════════════════════════════════════════\n",
+            file=sys.stderr,
+        )
+        return 1
+
+    print(f"built: {deb_path} ({size:,} bytes)")
     return 0
 
 
