@@ -9,7 +9,7 @@ A pocket JS8 transceiver controller for amateur radio. Headless appliance: no JS
 - **M5Stack CardputerZero** — built-in 46-key QWERTY + 1.9″ LCD + integrated battery (pre-launch as of 2026-Q2)
 - **Bare Raspberry Pi Zero 2 W + Waveshare 1.9″ 320×170 SPI display** — operator supplies their own USB keyboard. Currently the recommended on-air rig.
 
-Drives a QRP Labs QDX, or any radio behind a DigiRig USB audio + RTS keying interface (Xiegu G90, Baofeng UV-5R, etc.).
+Drives a QRP Labs QDX, Xiegu G90 with a DigiRig interface or a DigiRig with "Unknown" RTS keyed radios without CAT control ( Baofeng UV5R, Quansheng, Kenwood handhelds or DL2MAN (tr)Usdx radios) .
 
 ---
 
@@ -411,7 +411,7 @@ MicroJS8 is the CardputerZero realization of the design first prototyped in [Min
 
 ## Copyright + License
 
-Copyright © 2025-2026 Donald Hunter, W5DMH
+Copyright © 2025-2026 Daniel Hurd, W5DMH
 
 MicroJS8 is free software: you can redistribute it and/or modify it under the terms of the GNU General Public License version 3 as published by the Free Software Foundation. See `LICENSE` for the full text.
 
@@ -424,5 +424,3 @@ GPL-3.0 is the same license as the gfsk8 fork MicroJS8 depends on, and the same 
 - **MiniJS8** — the Pi Zero 2W proof-of-concept that defined the protocol port, screen ring, and operational ergonomics: https://github.com/W5DMH/minijs8
 - **Waveshare** — for the affordable 1.9″ 320×170 SPI panel that makes the bare-Pi rig possible.
 - **M5Stack** — for the CardputerZero hardware platform and the AppBuilder SDK that makes pocket-Linux JS8 actually feasible.
-
-73 de W5DMH
