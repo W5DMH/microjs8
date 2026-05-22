@@ -1203,17 +1203,20 @@ def test_allcall_enter_on_heartbeat_opens_modal():
 
 
 def test_allcall_enter_on_query_msgs_fires_callback():
+    """Phase 19 v0.0.10: QUERY MSGS fires the broadcast AND jumps
+    to DIRECTED so the operator sees the outgoing entry in the log."""
     s = _state(screen=Screen.ALLCALL)
     r, qm_calls, cq_calls = _router_with_allcall_callbacks(s)
     r.handle(KeyEvent(key=Key.DOWN))   # focus 0 → 1 (QUERY MSGS)
     r.handle(KeyEvent(key=Key.ENTER))
     assert qm_calls == [True]
     assert cq_calls == []
-    # Screen unchanged — fire-and-forget.
-    assert s.snapshot().screen is Screen.ALLCALL
+    # v0.0.10: jump to DIRECTED so operator sees outbound traffic log
+    assert s.snapshot().screen is Screen.DIRECTED
 
 
 def test_allcall_enter_on_cq_fires_callback():
+    """Phase 19 v0.0.10: CQ broadcast also jumps to DIRECTED."""
     s = _state(screen=Screen.ALLCALL)
     r, qm_calls, cq_calls = _router_with_allcall_callbacks(s)
     r.handle(KeyEvent(key=Key.DOWN))   # 0 → 1
@@ -1221,12 +1224,16 @@ def test_allcall_enter_on_cq_fires_callback():
     r.handle(KeyEvent(key=Key.ENTER))
     assert qm_calls == []
     assert cq_calls == [True]
-    assert s.snapshot().screen is Screen.ALLCALL
+    assert s.snapshot().screen is Screen.DIRECTED
 
 
 def test_allcall_enter_without_callbacks_silently_noop():
     """Router constructed without ALLCALL callbacks (e.g., tests
-    without an outbound queue) — Enter is a visual no-op, no crash."""
+    without an outbound queue) — Enter is a visual no-op, no crash.
+
+    v0.0.10: even with no callback wired, we DON'T jump to DIRECTED
+    because nothing was sent — staying on ALLCALL is more accurate
+    than misleading the operator with a phantom log destination."""
     s = _state(screen=Screen.ALLCALL)
     save = _SaveCapture()
     bypass = _BypassCapture()
@@ -1238,7 +1245,11 @@ def test_allcall_enter_without_callbacks_silently_noop():
 
 
 def test_allcall_callback_exception_doesnt_crash_router():
-    """A misbehaving outbound queue must not bring down input."""
+    """A misbehaving outbound queue must not bring down input.
+
+    v0.0.10: callback raised → still jump to DIRECTED so operator
+    knows their input registered (the DIRECTED screen will be empty
+    of the new entry, which is also accurate)."""
     s = _state(screen=Screen.ALLCALL)
     save = _SaveCapture()
     bypass = _BypassCapture()
@@ -1252,7 +1263,8 @@ def test_allcall_callback_exception_doesnt_crash_router():
     )
     r.handle(KeyEvent(key=Key.DOWN))
     r.handle(KeyEvent(key=Key.ENTER))   # raises but is caught
-    assert s.snapshot().screen is Screen.ALLCALL
+    # v0.0.10: still navigates so operator gets feedback
+    assert s.snapshot().screen is Screen.DIRECTED
 
 
 # ── HB_MODE_SELECT ──────────────────────────────────────────────────
@@ -1271,7 +1283,10 @@ def test_hb_modal_down_cycles_focus():
     assert s.snapshot().hb_select_focus == 2
 
 
-def test_hb_modal_enter_commits_and_returns():
+def test_hb_modal_enter_commits_and_returns_to_directed():
+    """Phase 19 v0.0.10: committing a firing HB mode (SINGLE / 20MIN
+    / 1HR) jumps to DIRECTED so the operator sees the first beacon
+    TX in the activity log."""
     from microjs8.ui.state import HbMode
 
     s = _state(screen=Screen.ALLCALL)
@@ -1283,8 +1298,27 @@ def test_hb_modal_enter_commits_and_returns():
     r.handle(KeyEvent(key=Key.DOWN))
     # Commit.
     r.handle(KeyEvent(key=Key.ENTER))
-    assert s.snapshot().screen is Screen.ALLCALL
+    # v0.0.10: firing modes land on DIRECTED
+    assert s.snapshot().screen is Screen.DIRECTED
     assert s.snapshot().hb_mode is HbMode.TWENTY_MIN
+
+
+def test_hb_modal_commit_off_returns_to_allcall():
+    """Phase 19 v0.0.10: committing OFF doesn't fire a beacon, so
+    DIRECTED would have nothing new to show — stay on ALLCALL."""
+    from microjs8.ui.state import HbMode
+
+    s = _state(screen=Screen.ALLCALL)
+    s.set_hb_mode(HbMode.SINGLE)  # baseline so committing OFF is meaningful
+    r, _, _ = _router_with_allcall_callbacks(s)
+    r.handle(KeyEvent(key=Key.ENTER))   # open modal (focus on SINGLE)
+    # Move focus back to OFF (index 0)
+    r.handle(KeyEvent(key=Key.UP))
+    # Commit.
+    r.handle(KeyEvent(key=Key.ENTER))
+    # OFF returns to ALLCALL, NOT to DIRECTED — nothing fired
+    assert s.snapshot().screen is Screen.ALLCALL
+    assert s.snapshot().hb_mode is HbMode.OFF
 
 
 def test_hb_modal_esc_cancels_without_changing_mode():
@@ -1574,3 +1608,77 @@ def fonts():
     """Shared fonts fixture for render tests."""
     from microjs8.ui.fonts import load_fonts
     return load_fonts()
+
+
+# ── Phase 19 v0.0.10: Directed / Heard scroll ────────────────────────
+
+
+def test_directed_up_arrow_scrolls_up():
+    """v0.0.10: ↑ on DIRECTED screen → directed_scroll_up."""
+    from microjs8.activity import DirectedActivityEntry, Direction
+    s = _state(screen=Screen.DIRECTED)
+    entries = tuple(
+        DirectedActivityEntry(
+            at_unix=1700000000.0 + i, direction=Direction.IN,
+            other_call=f"N{i}", verb="V", body="", snr_db=0, freq_hz=0.0,
+        ) for i in range(5)
+    )
+    s.set_directed_log(entries)
+    s.directed_scroll_down()
+    s.directed_scroll_down()
+    assert s.snapshot().directed_scroll_offset == 2
+
+    save = _SaveCapture()
+    bypass = _BypassCapture()
+    r = InputRouter(s, save_config=save, emergency_bypass=bypass)
+    r.handle(KeyEvent(key=Key.UP))
+    assert s.snapshot().directed_scroll_offset == 1
+    r.handle(KeyEvent(key=Key.UP))
+    assert s.snapshot().directed_scroll_offset == 0
+    # ↑ at top is a no-op
+    r.handle(KeyEvent(key=Key.UP))
+    assert s.snapshot().directed_scroll_offset == 0
+
+
+def test_directed_down_arrow_scrolls_down():
+    """v0.0.10: ↓ on DIRECTED screen → directed_scroll_down."""
+    from microjs8.activity import DirectedActivityEntry, Direction
+    s = _state(screen=Screen.DIRECTED)
+    entries = tuple(
+        DirectedActivityEntry(
+            at_unix=1700000000.0 + i, direction=Direction.IN,
+            other_call=f"N{i}", verb="V", body="", snr_db=0, freq_hz=0.0,
+        ) for i in range(3)
+    )
+    s.set_directed_log(entries)
+    save = _SaveCapture()
+    bypass = _BypassCapture()
+    r = InputRouter(s, save_config=save, emergency_bypass=bypass)
+    r.handle(KeyEvent(key=Key.DOWN))
+    r.handle(KeyEvent(key=Key.DOWN))
+    assert s.snapshot().directed_scroll_offset == 2
+    # Cap at len-1
+    r.handle(KeyEvent(key=Key.DOWN))
+    assert s.snapshot().directed_scroll_offset == 2
+
+
+def test_heard_up_down_arrow_scrolls_heard_list():
+    """v0.0.10: ↑/↓ on HEARD screen → heard_scroll_up/down."""
+    from microjs8.protocol.types import HeardStation
+    s = _state(screen=Screen.HEARD)
+    heard = tuple(
+        HeardStation(
+            callsign=f"N{i}A", snr_db=-10, grid="EN83",
+            frequency_hz=1500.0, distance_mi=None, bearing_deg=None,
+            last_heard=1700000000.0 + i,
+        ) for i in range(5)
+    )
+    s.set_heard(heard)
+    save = _SaveCapture()
+    bypass = _BypassCapture()
+    r = InputRouter(s, save_config=save, emergency_bypass=bypass)
+    r.handle(KeyEvent(key=Key.DOWN))
+    r.handle(KeyEvent(key=Key.DOWN))
+    assert s.snapshot().heard_scroll_offset == 2
+    r.handle(KeyEvent(key=Key.UP))
+    assert s.snapshot().heard_scroll_offset == 1

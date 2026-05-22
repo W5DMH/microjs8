@@ -981,3 +981,84 @@ def test_single_frame_buffered_does_not_supersede(tmp_path):
     # Both entries present — no supersede.
     assert len(snap) == 2
 
+
+
+# ── Phase 19 v0.0.10: defensive heard upsert from assembled dispatch ──
+
+
+def test_dispatch_assembled_upserts_heard_for_sender(tmp_path: Path):
+    """Phase 19 v0.0.10: _dispatch_assembled must upsert the sender
+    into the heard list. Closes the field-test issue where a directed
+    message sender (e.g. ND7M sending "GRID DM16") wouldn't appear in
+    Heard if the first frame's parse was noisy — the reassembled
+    message would still surface in the DIRECTED log but the operator
+    couldn't reply via Compose's TO dropdown because the callsign
+    wasn't in Heard.
+
+    The upsert is idempotent (ON CONFLICT DO UPDATE), so this firing
+    in addition to _on_decoded_frame's single-frame path is safe.
+    """
+    from microjs8.store.db import MessageStore
+
+    app = _make_app(tmp_path)
+    # Attach a real MessageStore so the heard upsert has somewhere to land
+    app._store = MessageStore(tmp_path / "store.db")
+    asm_msg = _assembled(
+        from_call="ND7M",
+        to_call="W5DMH",
+        verb="GRID",
+        body="DM16",
+        checksum_valid=False,   # non-buffered directed; doesn't matter for heard
+    )
+    frame = _frame(snr=-12, freq=987.5)
+
+    # Pre-check: heard table empty
+    assert len(app._store.heard_stations()) == 0
+
+    app._dispatch_assembled(asm_msg, frame)
+
+    # Post: ND7M should be in heard
+    heard = app._store.heard_stations()
+    assert len(heard) == 1, f"expected 1 heard row, got {len(heard)}"
+    assert heard[0].callsign == "ND7M"
+    # GRID body parsed → grid populated
+    assert heard[0].grid == "DM16"
+    # SNR taken from the frame parameter
+    assert heard[0].snr_db == -12
+
+
+def test_dispatch_assembled_with_no_store_does_not_crash(tmp_path: Path):
+    """Phase 19 v0.0.10: defensive — if no MessageStore is attached
+    (tests / minimal embed), the new heard-upsert path must skip
+    cleanly without raising."""
+    app = _make_app(tmp_path)
+    app._store = None     # explicitly no store
+
+    asm_msg = _assembled(
+        from_call="ND7M", to_call="W5DMH", verb="GRID", body="DM16",
+        checksum_valid=False,
+    )
+    # Must not raise
+    app._dispatch_assembled(asm_msg, _frame())
+
+
+def test_dispatch_assembled_heard_upsert_idempotent(tmp_path: Path):
+    """Phase 19 v0.0.10: firing twice for the same sender keeps a
+    single heard row (the upsert clause does ON CONFLICT DO UPDATE,
+    not INSERT)."""
+    from microjs8.store.db import MessageStore
+
+    app = _make_app(tmp_path)
+    app._store = MessageStore(tmp_path / "store.db")
+
+    asm_msg = _assembled(
+        from_call="ND7M", to_call="W5DMH", verb="GRID", body="DM16",
+        checksum_valid=False,
+    )
+    app._dispatch_assembled(asm_msg, _frame(snr=-12))
+    app._dispatch_assembled(asm_msg, _frame(snr=-5))  # fresher SNR
+
+    heard = app._store.heard_stations()
+    assert len(heard) == 1, "duplicate upserts must not multiply rows"
+    # The freshest SNR wins (ON CONFLICT DO UPDATE replaces snr_db)
+    assert heard[0].snr_db == -5

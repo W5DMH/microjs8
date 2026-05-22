@@ -302,3 +302,101 @@ def test_directed_heartbeat_emits_full_body_after_continuation(tmp_path):
     # Body contains BOTH the original SNR and the continuation MSG ID.
     assert "SNR +04" in e.body
     assert "MSG ID 61" in e.body
+
+
+# ── Phase 19 v0.0.10: outbound broadcasts in the Directed log ────────
+
+
+def test_allcall_query_msgs_appends_outbound_to_directed_log(tmp_path: Path):
+    """Phase 19 v0.0.10: firing @ALLCALL QUERY MSGS must append an
+    outbound row to the DIRECTED activity log so the operator sees
+    their own broadcast alongside any incoming replies.
+
+    Pre-v0.0.10 the only feedback was a journal log line — operators
+    on the device had no visual confirmation that their query fired.
+    """
+    from microjs8.activity import Direction
+    app = _make_app(tmp_path)
+    # Snapshot pre-state
+    before = app._directed_activity.snapshot()
+    assert len(before) == 0
+
+    fired = app._allcall_query_msgs_sync()
+    assert fired is True
+
+    after = app._directed_activity.snapshot()
+    assert len(after) == 1, f"expected one new directed row, got {len(after)}"
+    row = after[0]
+    assert row.direction is Direction.OUT
+    assert row.other_call == "@ALLCALL"
+    assert row.verb == "QUERY"
+    assert "MSGS" in row.body
+
+
+def test_allcall_cq_appends_outbound_to_directed_log(tmp_path: Path):
+    """Phase 19 v0.0.10: CQ broadcast also appears in the DIRECTED log."""
+    from microjs8.activity import Direction
+    app = _make_app(tmp_path)
+    fired = app._allcall_cq_sync()
+    assert fired is True
+
+    rows = app._directed_activity.snapshot()
+    assert len(rows) == 1
+    row = rows[0]
+    assert row.direction is Direction.OUT
+    assert row.other_call == "@ALLCALL"
+    assert row.verb == "CQ"
+    # Body carries the 4-char grid (configured "EN83" → first 4 chars).
+    assert row.body == "EN83"
+
+
+def test_allcall_query_msgs_no_double_log_on_enqueue_failure(tmp_path: Path):
+    """Phase 19 v0.0.10: when the outbound queue is missing entirely
+    (e.g. minimal test setup), the broadcast is NOT enqueued AND we
+    must NOT log a phantom outbound row to the activity feed."""
+    app = _make_app(tmp_path)
+    app._outbound_queue = None    # disable enqueue path
+
+    fired = app._allcall_query_msgs_sync()
+    assert fired is False
+    # No outbound row should have been logged because nothing was
+    # actually transmitted.
+    rows = app._directed_activity.snapshot()
+    assert len(rows) == 0, (
+        "must not log a phantom outbound row when the TX queue is absent"
+    )
+
+
+def test_heartbeat_beacon_on_fire_logs_to_directed(tmp_path: Path):
+    """Phase 19 v0.0.10: the HeartbeatBeacon's on_fire callback hook
+    must call _log_hb_out which appends a row to the DIRECTED log.
+
+    We invoke _log_hb_out directly (not the full beacon thread) since
+    the callback's contract is what we care about — the beacon-thread
+    plumbing is exercised by test_beacon.py.
+    """
+    from microjs8.activity import Direction
+    app = _make_app(tmp_path)
+    # Inline path: no asyncio loop means call_soon_threadsafe is bypassed
+    # and _enqueue_log runs synchronously.
+    app._loop = None
+
+    app._log_hb_out("W5DMH: @HB HEARTBEAT EN83")
+
+    rows = app._directed_activity.snapshot()
+    assert len(rows) == 1, f"expected 1 row, got {len(rows)}"
+    row = rows[0]
+    assert row.direction is Direction.OUT
+    assert row.other_call == "@HB"
+    assert row.verb == "HEARTBEAT"
+    assert row.body == "EN83"
+
+
+def test_heartbeat_beacon_on_fire_empty_text_does_not_crash(tmp_path: Path):
+    """Phase 19 v0.0.10: defensive — empty wire text shouldn't raise.
+    The on_fire path is invoked from a background thread, so a crash
+    there could take down the beacon thread silently."""
+    app = _make_app(tmp_path)
+    app._loop = None
+    # Must not raise
+    app._log_hb_out("")

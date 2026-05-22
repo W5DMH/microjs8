@@ -59,6 +59,7 @@ class _BaseBeacon(threading.Thread):
         immediate_on_start: bool = False,
         single_shot: bool = False,
         on_complete: Optional[Callable[[], None]] = None,
+        on_fire: Optional[Callable[[str], None]] = None,
         name: str = "beacon",
     ) -> None:
         """
@@ -73,6 +74,13 @@ class _BaseBeacon(threading.Thread):
         window, then revert. When the single-shot completes, the
         ``on_complete`` callback (if provided) is invoked from the
         beacon thread so the app can flip the UI's mode back to OFF.
+
+        ``on_fire`` (v0.0.10) is called with the wire text after a
+        successful enqueue. The app uses this to log outbound
+        heartbeats to the DIRECTED activity feed so the operator
+        sees their own beacons alongside received traffic. Called
+        from the beacon thread; the callback should marshal back to
+        the asyncio thread if it touches anything thread-unsafe.
         """
         super().__init__(name=name, daemon=True)
         self._queue = queue
@@ -83,6 +91,7 @@ class _BaseBeacon(threading.Thread):
         self._immediate_on_start = immediate_on_start
         self._single_shot = single_shot
         self._on_complete = on_complete
+        self._on_fire = on_fire
         self._stop_event = threading.Event()
         self._fire_count = 0
 
@@ -157,6 +166,17 @@ class _BaseBeacon(threading.Thread):
         self._fire_count += 1
         _log.info("beacon %s: queued message id=%d text=%r",
                   self.name, msg_id, text)
+        # v0.0.10: notify the app so it can log this outgoing
+        # broadcast to the directed-activity feed. Callback runs on
+        # the beacon thread — implementations are responsible for
+        # marshalling back to the asyncio loop if needed.
+        if self._on_fire is not None:
+            try:
+                self._on_fire(text)
+            except Exception:
+                _log.exception(
+                    "beacon %s: on_fire callback raised", self.name
+                )
 
 
 # ── Concrete beacons ────────────────────────────────────────────────
@@ -186,6 +206,7 @@ class HeartbeatBeacon(_BaseBeacon):
         random_offset_s: float = HEARTBEAT_RANDOM_OFFSET_S,
         single_shot: bool = False,
         on_complete: Optional[Callable[[], None]] = None,
+        on_fire: Optional[Callable[[str], None]] = None,
     ) -> None:
         self._identity_factory = identity_factory
         super().__init__(
@@ -199,6 +220,7 @@ class HeartbeatBeacon(_BaseBeacon):
             immediate_on_start=True,
             single_shot=single_shot,
             on_complete=on_complete,
+            on_fire=on_fire,
             name="hb-beacon",
         )
 

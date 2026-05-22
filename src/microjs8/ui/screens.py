@@ -369,43 +369,49 @@ def _render_home(state: UISnapshot, fonts: Fonts) -> Image.Image:
     # out which source is currently driving slot timing.
     time_src_label, time_src_color = _time_source_label(state)
 
+    # v0.0.10: row layout tightened to make space for the slim
+    # Exit button at the bottom without crowding. Two structural
+    # changes from v0.0.9:
+    #   1. Call+Grid merged into a single row ("W5DMH (EN83ih)"
+    #      or "(unset) at (unset)" with FG_BAD if either is missing)
+    #   2. Row stride 18 → 16 px (still legible at FONT_BODY 14pt,
+    #      gives 12 px more headroom)
+    # Together that leaves a clean ~10 px gap above the Exit button
+    # even with the Inbox notification visible (worst case).
     y = theme.BODY_Y0 + 2
-    _kv_row(draw, fonts, y, "Call", state.callsign, value_color=callsign_color)
-    y += 18
-    # Grid: show configured grid, with GPS-derived in parentheses if
-    # different (so the operator can see at a glance "I'm in a different
-    # grid than I told the radio").
-    grid_text = grid_display
+    row_stride = 16
+
+    # ── Row 1: Call (Grid) — combined to save vertical space ──────────
+    if state.callsign == "N0CALL":
+        combined = f"(unset) at {grid_display}"
+        combined_color = theme.FG_BAD
+    elif not state.grid:
+        combined = f"{state.callsign} at (unset)"
+        combined_color = theme.FG_BAD
+    else:
+        combined = f"{state.callsign} at {state.grid}"
+        combined_color = theme.FG
+    # If GPS thinks we're in a different grid than configured, append
+    # the GPS-derived one so the operator notices the mismatch.
     if state.gps_grid and state.grid and state.gps_grid != state.grid:
-        grid_text = f"{grid_display} (gps {state.gps_grid})"
-    elif state.gps_grid and not state.grid:
-        # Configured grid is unset but GPS knows where we are
-        grid_text = f"(unset; gps {state.gps_grid})"
-    _kv_row(draw, fonts, y, "Grid", grid_text, value_color=grid_color)
-    y += 18
+        combined = f"{state.callsign} at {state.grid} (gps {state.gps_grid})"
+    _kv_row(draw, fonts, y, "Stn", combined, value_color=combined_color)
+    y += row_stride
     _kv_row(draw, fonts, y, "TimeSrc", time_src_label, value_color=time_src_color)
-    y += 18
+    y += row_stride
     _kv_row(draw, fonts, y, "GPS", gps_label, value_color=gps_color)
-    y += 18
+    y += row_stride
     _kv_row(draw, fonts, y, "Freq", f"{freq_mhz:.3f} MHz", value_color=theme.FG)
-    y += 18
+    y += row_stride
     # CAT status — green when rigctld is connected and we can transmit,
     # dim "--" when not. Without CAT we can only receive.
     cat_label = "CONNECTED" if state.cat_connected else "--"
     cat_color = theme.FG_GOOD if state.cat_connected else theme.FG_DIM
     _kv_row(draw, fonts, y, "CAT", cat_label, value_color=cat_color)
-    # v0.0.9: Batt row removed from HOME body. The three-zone banner
-    # introduced in v0.0.8 already shows battery state on every screen,
-    # so the dedicated HOME row was redundant duplication. Power-state
-    # diagnostics (charging/discharging glyph, exact voltage) can live
-    # in a future "diagnostics" subscreen if operators need them. The
-    # at-a-glance percent + color in the banner covers the daily case.
-    #
-    # The y += 18 increment that used to follow the CAT row (to make
-    # room for Batt) was deliberate — the Inbox block conditionally
-    # adds its own y += 18 only when it actually renders, so the
-    # space below CAT is now used by Inbox (when there's mail) or
-    # left empty (when there isn't).
+    # v0.0.9: Batt row removed from HOME body (banner covers it).
+    # v0.0.10: row stride tightened to 16; Call+Grid merged into the
+    # single 'Stn' row above. These two changes together carve out
+    # enough vertical space for the Exit button at the bottom.
 
     # Inbox indicator — only rendered when there's something to
     # show, so the operator's eye is drawn to it. Format:
@@ -419,7 +425,7 @@ def _render_home(state: UISnapshot, fonts: Fonts) -> Image.Image:
     has_unread = state.inbox_unread_count > 0
     has_held = state.inbox_held_count > 0
     if has_unread or has_held:
-        y += 18
+        y += row_stride
         if has_unread and has_held:
             label = (
                 f"{state.inbox_unread_count} unread "
@@ -434,17 +440,25 @@ def _render_home(state: UISnapshot, fonts: Fonts) -> Image.Image:
         color = theme.FG_WARN if has_unread else theme.FG_DIM
         _kv_row(draw, fonts, y, "Inbox", label, value_color=color)
 
-    # ── Phase 19 (v0.0.8): EXIT button ──────────────────────────────
-    # Last item in HOME's focusable chain. Pressing Enter on it fires
-    # the request_exit callback wired in app.py (sets self._stop so
-    # run() returns cleanly). Operators on CardputerZero/APPLaunch use
-    # this to leave microjs8 and return to APPLaunch; operators on
-    # bare Pi use it to stop the daemon without dropping to SSH.
+    # ── Phase 19 v0.0.8 + v0.0.10 sizing ────────────────────────────
+    # EXIT button — Enter on it opens the EXIT_CONFIRM modal (v0.0.9)
+    # which then either exits the daemon or returns to HOME.
+    #
+    # v0.0.10 slim-down: from field testing the v0.0.9 button (80×18
+    # at FONT_BODY 14pt) was visually crowding both the CAT row above
+    # AND the footer below, and threatened to collide with the Inbox
+    # "X unread" notification when mail arrived. v0.0.10 makes it
+    # smaller and pins it higher above the footer:
+    #   - width 80 → 60 px (still wide enough for "EXIT" label + padding)
+    #   - height 18 → 14 px (single-line button rather than chunky)
+    #   - label at FONT_SMALL (11) instead of FONT_BODY (14) so it
+    #     looks like a "leave" button rather than a primary action
+    #   - bottom margin 4 → 8 px (more separation from footer)
     is_exit_focus = (state.focused_field == "home_exit")
-    btn_w = 80
-    btn_h = 18
-    # Anchor near the bottom of the body area, just above the footer.
-    btn_y = theme.BODY_Y1 - btn_h - 4
+    btn_w = 60
+    btn_h = 14
+    # Anchor near the bottom of the body area with breathing room.
+    btn_y = theme.BODY_Y1 - btn_h - 8
     btn_x0 = (theme.SCREEN_W - btn_w) // 2
     btn = (btn_x0, btn_y, btn_x0 + btn_w, btn_y + btn_h)
     if is_exit_focus:
@@ -458,12 +472,15 @@ def _render_home(state: UISnapshot, fonts: Fonts) -> Image.Image:
         exit_color = theme.FG_DIM
     exit_label = "EXIT"
     try:
-        exit_w = int(draw.textlength(exit_label, font=fonts.body))
+        exit_w = int(draw.textlength(exit_label, font=fonts.small))
+        bbox = fonts.small.getbbox("X")
+        label_h = bbox[3] - bbox[1]
     except Exception:
-        exit_w = 32
+        exit_w = 24
+        label_h = 11
     exit_x = btn_x0 + (btn_w - exit_w) // 2
-    exit_y = btn_y + (btn_h - 14) // 2 - 1
-    draw.text((exit_x, exit_y), exit_label, font=fonts.body, fill=exit_color)
+    exit_y = btn_y + (btn_h - label_h) // 2 - 1
+    draw.text((exit_x, exit_y), exit_label, font=fonts.small, fill=exit_color)
 
     if state.emergency_override:
         if state.gps.has_position:
@@ -547,9 +564,16 @@ def _render_heard(state: UISnapshot, fonts: Fonts) -> Image.Image:
     )
     y += 4
 
-    # Render up to HEARD_ROWS_VISIBLE actual heard stations.
+    # v0.0.10: scroll-aware row slice. ``_heard_scroll_offset`` is the
+    # operator's vertical position into the full heard table. The
+    # visible window shows HEARD_ROWS_VISIBLE rows starting from
+    # ``offset`` (most-recent first), so offset=0 → newest at top,
+    # higher offsets reveal older entries.
+    offset = max(0, state.heard_scroll_offset)
+    total = len(state.heard)
+    visible_count = theme.HEARD_ROWS_VISIBLE
+    rows = state.heard[offset : offset + visible_count]
     now = time.time()
-    rows = state.heard[: theme.HEARD_ROWS_VISIBLE]
     if not rows:
         draw.text(
             (theme.PAD_X, y + 6),
@@ -569,6 +593,7 @@ def _render_heard(state: UISnapshot, fonts: Fonts) -> Image.Image:
         _draw_footer(draw, fonts, "← →  cycle screens")
         return img
 
+    rendered_count = 0
     for station in rows:
         color = _age_color(now - station.last_heard)
         # Render each column. Numbers right-justified for readability;
@@ -588,10 +613,28 @@ def _render_heard(state: UISnapshot, fonts: Fonts) -> Image.Image:
         for x, cell in zip(cols, cells):
             draw.text((x, y), cell, font=fonts.body_mono, fill=color)
         y += theme.HEARD_ROW_H
+        rendered_count += 1
         if y > theme.BODY_Y1 - theme.HEARD_ROW_H:
             break
 
-    _draw_footer(draw, fonts, f"{len(state.heard)} heard · ← → cycle")
+    # v0.0.10 footer hint: show how many entries are above/below the
+    # visible window so operators on the tiny screen know there's
+    # more to scroll to. Examples (terminal slash separates segments):
+    #   "12 heard / ↑ 4 newer · ↓ 0 / ← → cycle"     mid-list
+    #   "12 heard · ↓ 11 older / ← → cycle"           at top
+    #   "12 heard · ↑ 11 newer / ← → cycle"           at bottom
+    above = offset
+    below = max(0, total - offset - rendered_count)
+    scroll_segments: list[str] = []
+    if above > 0:
+        scroll_segments.append(f"↑ {above}")
+    if below > 0:
+        scroll_segments.append(f"↓ {below}")
+    if scroll_segments:
+        footer = f"{total} heard · {' '.join(scroll_segments)} · ← → cycle"
+    else:
+        footer = f"{total} heard · ← → cycle"
+    _draw_footer(draw, fonts, footer)
     return img
 
 
@@ -754,16 +797,37 @@ def _render_directed(state: UISnapshot, fonts: Fonts) -> Image.Image:
     # first-line budget depends on its meta width (right-aligned SNR
     # or time stamp), so we compute meta + first-line budget per
     # entry before wrapping.
+    #
+    # v0.0.10: scroll offset. ``state.directed_scroll_offset`` skips
+    # the newest N entries — operator pressed ↓ N times to step back
+    # in time. We iterate ``reversed(entries)`` so the first OFFSET
+    # iterations are dropped before we start rendering.
     rendered: list[tuple] = []   # (entry, lines, meta, meta_w, is_in)
     rows_consumed = 0
+    scroll_offset = max(0, state.directed_scroll_offset)
+    total_entries = len(entries)
+    # Clamp to valid range — state.directed_scroll_offset SHOULD be
+    # in range already (the state-mutator caps), but defensive against
+    # stale snapshots that haven't seen a recent set_directed_log.
+    if scroll_offset >= total_entries and total_entries > 0:
+        scroll_offset = total_entries - 1
+    skipped = 0
+    rendered_entry_count = 0
     for entry in reversed(entries):
+        if skipped < scroll_offset:
+            skipped += 1
+            continue
         is_in = (entry.direction.value == "IN")
+        # v0.0.10: timestamp on every entry (MM/DD HH:MM, UTC). Inbound
+        # entries with an SNR reading get "<snr> dB <timestamp>" so
+        # operators can correlate signal quality with time. Outbound
+        # has no SNR (we'd just be quoting our own carrier) so we show
+        # the timestamp alone.
+        ts = _format_unix_mmddhhmm(entry.at_unix)
         if is_in and entry.snr_db is not None:
-            meta = f"{entry.snr_db:+d} dB"
-        elif not is_in:
-            meta = _format_unix_hhmm(entry.at_unix)
+            meta = f"{entry.snr_db:+d} dB  {ts}"
         else:
-            meta = ""
+            meta = ts
         try:
             meta_w = int(draw.textlength(meta, font=fonts.small)) if meta else 0
         except Exception:
@@ -818,6 +882,7 @@ def _render_directed(state: UISnapshot, fonts: Fonts) -> Image.Image:
                     lines[-1] = (last + ellipsis) if last else ellipsis
         rendered.append((entry, lines, meta, meta_w, is_in))
         rows_consumed += len(lines)
+        rendered_entry_count += 1
         if rows_consumed >= max_total_rows:
             break
 
@@ -851,14 +916,24 @@ def _render_directed(state: UISnapshot, fonts: Fonts) -> Image.Image:
         if y > theme.BODY_Y1 - 2:
             break
 
-    # Footer hint: count + nav. Total reflects what's IN THE LOG, not
-    # just what fits on screen — operators want to know if the buffer
-    # is filling up.
+    # v0.0.10 footer: entries count + scroll-position hint. The hint
+    # tells the operator how many entries are above or below the
+    # visible window so they know there's more to scroll to.
+    #   "N entries · ↑ 4 · ↓ 12 · ← →"     mid-list
+    #   "N entries · ↓ 17 · ← →"            at top
+    #   "N entries · ↑ 17 · ← →"            at bottom
     n_total = len(entries)
+    above = scroll_offset
+    below = max(0, n_total - scroll_offset - rendered_entry_count)
+    segments = [f"{n_total} entries"]
+    if above > 0:
+        segments.append(f"↑ {above}")
+    if below > 0:
+        segments.append(f"↓ {below}")
+    segments.append("← →")
     if n_total >= 200:  # bumping near cap
-        footer = f"{n_total} entries (cap) · ← →"
-    else:
-        footer = f"{n_total} entries · ← →"
+        segments[0] = f"{n_total} entries (cap)"
+    footer = " · ".join(segments)
     _draw_footer(draw, fonts, footer)
     return img
 
@@ -880,6 +955,27 @@ def _format_unix_hhmm(at_unix: float) -> str:
         return f"{gm.tm_hour:02d}:{gm.tm_min:02d}"
     except Exception:
         return "--:--"
+
+
+def _format_unix_mmddhhmm(at_unix: float) -> str:
+    """Format a Unix timestamp as ``MM/DD HH:MM`` in UTC.
+
+    Phase 19 v0.0.10: introduced for the Directed activity log, which
+    accumulates across sessions and benefits from a date prefix so
+    operators can tell yesterday's exchange from today's at a glance.
+
+    Failures fall back to ``--/-- --:--`` so a corrupt entry doesn't
+    take down the row render.
+    """
+    try:
+        import time as _time
+        gm = _time.gmtime(at_unix)
+        return (
+            f"{gm.tm_mon:02d}/{gm.tm_mday:02d} "
+            f"{gm.tm_hour:02d}:{gm.tm_min:02d}"
+        )
+    except Exception:
+        return "--/-- --:--"
 
 
 def _render_inbox(state: UISnapshot, fonts: Fonts) -> Image.Image:

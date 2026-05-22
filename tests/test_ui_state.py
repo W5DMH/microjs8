@@ -126,3 +126,191 @@ def test_set_identity_change_marks_dirty():
     s.consume_dirty()
     s.set_identity("VE3XYZ", "FN03", "miles", True)
     assert s.consume_dirty() is True
+
+
+# ── Phase 19 v0.0.10: Directed / Heard scroll offsets ────────────────
+
+
+def test_directed_scroll_starts_at_zero():
+    from microjs8.ui.state import UIState
+    s = _state()
+    assert s.snapshot().directed_scroll_offset == 0
+
+
+def test_directed_scroll_down_advances_offset():
+    """v0.0.10: ↓ on DIRECTED advances offset toward older entries."""
+    from microjs8.ui.state import UIState
+    from microjs8.activity import DirectedActivityEntry, Direction
+    s = _state()
+    # 5 entries in the log
+    entries = tuple(
+        DirectedActivityEntry(
+            at_unix=1700000000.0 + i,
+            direction=Direction.IN,
+            other_call=f"N{i}AAA",
+            verb="HEARTBEAT",
+            body=f"EN8{i}",
+            snr_db=-10,
+            freq_hz=1500.0,
+        ) for i in range(5)
+    )
+    s.set_directed_log(entries)
+    # set_directed_log RESETS to 0 (new entries arrived)
+    assert s.snapshot().directed_scroll_offset == 0
+
+    s.directed_scroll_down()
+    assert s.snapshot().directed_scroll_offset == 1
+    s.directed_scroll_down()
+    assert s.snapshot().directed_scroll_offset == 2
+
+
+def test_directed_scroll_down_caps_at_last_entry():
+    """v0.0.10: can't scroll past the oldest entry."""
+    from microjs8.ui.state import UIState
+    from microjs8.activity import DirectedActivityEntry, Direction
+    s = _state()
+    entries = tuple(
+        DirectedActivityEntry(
+            at_unix=1700000000.0 + i,
+            direction=Direction.IN,
+            other_call=f"N{i}AAA",
+            verb="X", body="", snr_db=-10, freq_hz=1500.0,
+        ) for i in range(3)
+    )
+    s.set_directed_log(entries)
+    for _ in range(10):
+        s.directed_scroll_down()
+    # Capped at len-1 = 2
+    assert s.snapshot().directed_scroll_offset == 2
+
+
+def test_directed_scroll_up_at_top_is_noop():
+    """v0.0.10: ↑ at offset 0 doesn't go negative."""
+    from microjs8.ui.state import UIState
+    s = _state()
+    s.directed_scroll_up()
+    assert s.snapshot().directed_scroll_offset == 0
+
+
+def test_new_directed_entry_resets_scroll_to_top():
+    """v0.0.10: when a new entry arrives, the operator's scroll
+    position resets to 0 so they see the newest entry. This is the
+    chat-style semantic — new traffic interrupts review."""
+    from microjs8.ui.state import UIState
+    from microjs8.activity import DirectedActivityEntry, Direction
+    s = _state()
+    entries = tuple(
+        DirectedActivityEntry(
+            at_unix=1700000000.0 + i, direction=Direction.IN,
+            other_call=f"X{i}", verb="V", body="", snr_db=-5, freq_hz=0.0,
+        ) for i in range(3)
+    )
+    s.set_directed_log(entries)
+    s.directed_scroll_down()
+    s.directed_scroll_down()
+    assert s.snapshot().directed_scroll_offset == 2
+
+    # Now a new entry arrives → expand to 4 entries
+    new_entries = entries + (
+        DirectedActivityEntry(
+            at_unix=1700000003.0, direction=Direction.IN,
+            other_call="NEW", verb="V", body="", snr_db=0, freq_hz=0.0,
+        ),
+    )
+    s.set_directed_log(new_entries)
+    # Reset to 0 — operator now sees the new entry at top.
+    assert s.snapshot().directed_scroll_offset == 0
+
+
+def test_directed_scroll_offset_clamped_when_log_shrinks():
+    """v0.0.10: if entries vanish (clear/rollover), offset clamps to
+    the new max rather than dangling past the end."""
+    from microjs8.ui.state import UIState
+    from microjs8.activity import DirectedActivityEntry, Direction
+    s = _state()
+    big = tuple(
+        DirectedActivityEntry(
+            at_unix=1700000000.0 + i, direction=Direction.IN,
+            other_call=f"X{i}", verb="V", body="", snr_db=0, freq_hz=0.0,
+        ) for i in range(10)
+    )
+    s.set_directed_log(big)
+    for _ in range(8):
+        s.directed_scroll_down()
+    assert s.snapshot().directed_scroll_offset == 8
+
+    # Now drop to 3 entries
+    small = big[:3]
+    s.set_directed_log(small)
+    # Clamped to 2 (len-1)
+    assert s.snapshot().directed_scroll_offset == 2
+
+
+def test_heard_scroll_starts_at_zero_and_clamps():
+    """v0.0.10: heard scroll offset behavior — starts at 0, advances
+    with ↓, clamps when list shrinks, does NOT reset on new heard
+    (contrast with directed which DOES reset)."""
+    from microjs8.ui.state import UIState
+    from microjs8.protocol.types import HeardStation
+    s = _state()
+    heard = tuple(
+        HeardStation(
+            callsign=f"N{i}A",
+            snr_db=-10,
+            grid="EN83",
+            frequency_hz=1500.0,
+            distance_mi=None, bearing_deg=None,
+            last_heard=1700000000.0 + i,
+        ) for i in range(8)
+    )
+    s.set_heard(heard)
+    assert s.snapshot().heard_scroll_offset == 0
+    s.heard_scroll_down()
+    s.heard_scroll_down()
+    s.heard_scroll_down()
+    assert s.snapshot().heard_scroll_offset == 3
+
+    # Add a new heard station — offset should NOT reset (operator
+    # may be reviewing older stations; don't yank them back to top)
+    heard_plus = (
+        HeardStation(
+            callsign="NEW", snr_db=-5, grid="EN84",
+            frequency_hz=1500.0, distance_mi=None, bearing_deg=None,
+            last_heard=1700000099.0,
+        ),
+    ) + heard
+    s.set_heard(heard_plus)
+    assert s.snapshot().heard_scroll_offset == 3, (
+        "heard scroll must NOT reset on new arrivals"
+    )
+
+    # Heard list shrinks (callsign-change clear or HEARD_CAP rollover)
+    s.set_heard(heard_plus[:2])
+    # Clamped to 1 (len-1)
+    assert s.snapshot().heard_scroll_offset == 1
+
+
+def test_heard_scroll_up_at_top_is_noop():
+    from microjs8.ui.state import UIState
+    s = _state()
+    s.heard_scroll_up()
+    assert s.snapshot().heard_scroll_offset == 0
+
+
+def test_directed_scroll_reset_jumps_to_top():
+    """v0.0.10: directed_scroll_reset() forces offset back to 0
+    regardless of current position (used for explicit navigation)."""
+    from microjs8.ui.state import UIState
+    from microjs8.activity import DirectedActivityEntry, Direction
+    s = _state()
+    entries = tuple(
+        DirectedActivityEntry(
+            at_unix=1700000000.0 + i, direction=Direction.IN,
+            other_call=f"X{i}", verb="V", body="", snr_db=0, freq_hz=0.0,
+        ) for i in range(5)
+    )
+    s.set_directed_log(entries)
+    s.directed_scroll_down()
+    s.directed_scroll_down()
+    s.directed_scroll_reset()
+    assert s.snapshot().directed_scroll_offset == 0

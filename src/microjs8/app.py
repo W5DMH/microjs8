@@ -1819,6 +1819,62 @@ class MicroJS8App:
         for multi-frame MSG TO: with long bodies (deferred until
         we have on-air data).
         """
+        # v0.0.10 defensive heard upsert. Pre-v0.0.10 the heard upsert
+        # fired only from _on_decoded_frame's single-frame path (when
+        # the FIRST frame of a multi-frame exchange decoded cleanly).
+        # Field testing showed that a noisy/clipped first frame would
+        # parse as UNKNOWN with from_call=None — the reassembler later
+        # still produced a complete message, but the sender never
+        # entered the heard list. Operators saw the directed entry
+        # in DIRECTED but couldn't find the callsign in HEARD (and
+        # therefore couldn't reply via Compose's TO dropdown).
+        #
+        # The upsert is idempotent (ON CONFLICT DO UPDATE on the
+        # heard_stations table) so doing it here too is safe even
+        # when the first-frame path already fired. We don't have an
+        # SNR per-frame on AssembledMessage, so we fall back to the
+        # passed-in ``frame`` (the latest decoded frame of the
+        # assembly chain) — that's the freshest signal-quality
+        # reading available for this sender.
+        if assembled.from_call and self._store is not None:
+            try:
+                their_grid = None
+                # Best-effort grid extraction: if the assembled body
+                # starts with the GRID command, the next token is the
+                # grid. We don't parse aggressively — the heard upsert
+                # COALESCEs NULL grid into whatever's already stored.
+                if assembled.verb == "GRID":
+                    body_tokens = assembled.body.split()
+                    if body_tokens:
+                        # GRID body is just the grid square (e.g. "DM16")
+                        candidate = body_tokens[0].upper()
+                        if 4 <= len(candidate) <= 6 and candidate[0].isalpha():
+                            their_grid = candidate
+                our_grid = self._config.station.grid or None
+                dist_mi, bearing = distance_and_bearing(
+                    our_grid, their_grid,
+                    units=self._config.units_distance,
+                )
+                snr = frame.snr_db if frame is not None else None
+                fhz = frame.frequency_hz if frame is not None else assembled.offset_hz
+                station = HeardStation(
+                    callsign=assembled.from_call,
+                    snr_db=snr,
+                    grid=their_grid,
+                    frequency_hz=fhz,
+                    distance_mi=dist_mi,
+                    bearing_deg=bearing,
+                    last_heard=assembled.completed_at,
+                )
+                self._store.upsert_heard_station(station)
+                heard = tuple(self._store.heard_stations(limit=50))
+                if self._ui_state is not None:
+                    self._ui_state.set_heard(heard)
+            except Exception:
+                _log.exception(
+                    "heard upsert from assembled message failed"
+                )
+
         if not assembled.checksum_valid:
             _log.info(
                 "assembled message (cs invalid) from=%s to=%s verb=%s "
@@ -2188,12 +2244,69 @@ class MicroJS8App:
             on_complete=(
                 self._hb_single_complete if single_shot else None
             ),
+            # v0.0.10: log every outbound heartbeat to the Directed
+            # activity feed so the operator sees their own beacons
+            # alongside any incoming traffic. Pre-v0.0.10 the only
+            # visible record was a journal log line — operators on
+            # the device's screen had no indication that their
+            # beacon had fired. The callback runs on the beacon
+            # thread; _log_hb_out marshals back to asyncio.
+            on_fire=self._log_hb_out,
         )
         self._hb_beacon.start()
         _log.info(
             "heartbeat: %s started (interval=%.0fs, single_shot=%s)",
             mode.value, interval_s, single_shot,
         )
+
+    def _log_hb_out(self, text: str) -> None:
+        """v0.0.10: log an outbound heartbeat to the Directed activity
+        feed. Called from the beacon thread; bounces into the asyncio
+        loop because the directed-activity log and UI refresh hook
+        aren't thread-safe.
+
+        Wire form is ``<call>: @HB HEARTBEAT <grid>``. We surface as:
+            to=@HB, verb=HEARTBEAT, body=<grid>
+        — matching how inbound heartbeats render so outgoing entries
+        sit visually consistent in the log.
+        """
+        # Parse grid out of the wire text. The factory in beacon.py
+        # builds "<callsign>: @HB HEARTBEAT <grid>", so the last
+        # whitespace-separated token is the grid.
+        grid = ""
+        try:
+            tokens = text.strip().split()
+            if tokens:
+                grid = tokens[-1]
+        except Exception:
+            pass
+
+        def _enqueue_log() -> None:
+            try:
+                self._directed_activity.record_out(
+                    to_call="@HB",
+                    verb="HEARTBEAT",
+                    body=grid,
+                )
+                self._refresh_directed_log_ui()
+            except Exception:
+                _log.exception(
+                    "activity.record_out (heartbeat) raised"
+                )
+
+        loop = getattr(self, "_loop", None)
+        if loop is None or loop.is_closed():
+            # Loop not yet running (early-startup race) — log inline.
+            # The asyncio bounce is best-effort; the daemon is still
+            # functional without the UI update if the loop's not up.
+            _enqueue_log()
+            return
+        try:
+            loop.call_soon_threadsafe(_enqueue_log)
+        except RuntimeError:
+            # Loop has closed between the check and the call — same
+            # graceful fallback as above.
+            _enqueue_log()
 
     def _hb_identity(self) -> Optional[tuple[str, str]]:
         """Beacon's identity-factory callback. Returns the current
@@ -2374,6 +2487,22 @@ class MicroJS8App:
         _log.info(
             "allcall query_msgs: enqueued row %d: %r", row_id, wire
         )
+        # v0.0.10: also log the outgoing broadcast in the Directed
+        # activity log so the operator sees their own QUERY MSGS
+        # appear alongside replies they receive. Pre-v0.0.10 only
+        # composed messages produced an outbound log entry; ALLCALL
+        # broadcasts were invisible to the operator after firing.
+        try:
+            self._directed_activity.record_out(
+                to_call="@ALLCALL",
+                verb="QUERY",
+                body="MSGS",
+            )
+            self._refresh_directed_log_ui()
+        except Exception:
+            _log.exception(
+                "activity.record_out (allcall query_msgs) raised"
+            )
         return True
 
     def _allcall_cq_sync(self) -> bool:
@@ -2410,6 +2539,18 @@ class MicroJS8App:
             _log.warning("allcall cq: queue full, dropped")
             return False
         _log.info("allcall cq: enqueued row %d: %r", row_id, wire)
+        # v0.0.10: log outbound CQ to the Directed activity feed.
+        try:
+            self._directed_activity.record_out(
+                to_call="@ALLCALL",
+                verb="CQ",
+                body=grid[:4],
+            )
+            self._refresh_directed_log_ui()
+        except Exception:
+            _log.exception(
+                "activity.record_out (allcall cq) raised"
+            )
         return True
 
     # ── Phase 11: group-query auto-respond ───────────────────────────
