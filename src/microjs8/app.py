@@ -1414,7 +1414,20 @@ class MicroJS8App:
             _log.exception("decoded-frame handler raised")
 
     def _update_heard_for(self, parsed) -> None:
-        """Compute distance/bearing, upsert the heard row, refresh UI list."""
+        """Compute distance/bearing, upsert the heard row, refresh UI list.
+
+        v0.0.11 self-filter: never upsert our OWN callsign. The radio's
+        monitor (or any path that loops our TX back into the decoder)
+        can produce a decode with from_call == us, which pre-v0.0.11
+        ended up in the Heard table as an echo of ourselves. Operators
+        observed this in PI-2W-TEST field testing and it was clearly a
+        bug — the Heard list represents stations OTHER than us.
+        """
+        # v0.0.11: refuse to upsert ourselves. Compare uppercase so
+        # n0call/N0CALL etc. always match regardless of config form.
+        our_call = (self._config.station.callsign or "").upper().strip()
+        if our_call and (parsed.from_call or "").upper().strip() == our_call:
+            return
         their_grid = parsed.grid  # set on heartbeat / CQ; None on directed
         our_grid = self._config.station.grid or None
         # Distance/bearing — compute only when we have both grids.
@@ -1819,24 +1832,33 @@ class MicroJS8App:
         for multi-frame MSG TO: with long bodies (deferred until
         we have on-air data).
         """
-        # v0.0.10 defensive heard upsert. Pre-v0.0.10 the heard upsert
-        # fired only from _on_decoded_frame's single-frame path (when
-        # the FIRST frame of a multi-frame exchange decoded cleanly).
-        # Field testing showed that a noisy/clipped first frame would
-        # parse as UNKNOWN with from_call=None — the reassembler later
-        # still produced a complete message, but the sender never
-        # entered the heard list. Operators saw the directed entry
-        # in DIRECTED but couldn't find the callsign in HEARD (and
-        # therefore couldn't reply via Compose's TO dropdown).
+        # v0.0.10 defensive heard upsert + v0.0.11 fixes.
+        # Pre-v0.0.10 the heard upsert fired only from _on_decoded_frame's
+        # single-frame path. A noisy/clipped first frame would parse as
+        # UNKNOWN with from_call=None, so the sender never entered Heard
+        # even though the reassembled message arrived intact.
         #
-        # The upsert is idempotent (ON CONFLICT DO UPDATE on the
-        # heard_stations table) so doing it here too is safe even
-        # when the first-frame path already fired. We don't have an
-        # SNR per-frame on AssembledMessage, so we fall back to the
-        # passed-in ``frame`` (the latest decoded frame of the
-        # assembly chain) — that's the freshest signal-quality
-        # reading available for this sender.
-        if assembled.from_call and self._store is not None:
+        # v0.0.11 corrections from PI-2W-TEST field testing:
+        #   1. SKIP when frame is None — the reassembly-timeout path
+        #      calls us with frame=None. We have no SNR, and the
+        #      heard_stations schema requires NOT NULL on snr_db. The
+        #      single-frame path (line 1276) already added these
+        #      callsigns when their FIRST frame decoded with from_call
+        #      and a real SNR; this defensive upsert is only needed
+        #      for the rare case where it didn't. Skipping the no-SNR
+        #      path drops the IntegrityError spam without losing
+        #      sightings.
+        #   2. REFUSE our own callsign — same self-filter as
+        #      _update_heard_for. The radio's monitor / hardware-level
+        #      loopback can feed our TX back into the decoder and
+        #      produce an AssembledMessage with from_call == us.
+        our_call = (self._config.station.callsign or "").upper().strip()
+        if (
+            assembled.from_call
+            and self._store is not None
+            and frame is not None                       # v0.0.11 fix #1
+            and (assembled.from_call or "").upper().strip() != our_call   # v0.0.11 fix #2
+        ):
             try:
                 their_grid = None
                 # Best-effort grid extraction: if the assembled body
@@ -1855,13 +1877,11 @@ class MicroJS8App:
                     our_grid, their_grid,
                     units=self._config.units_distance,
                 )
-                snr = frame.snr_db if frame is not None else None
-                fhz = frame.frequency_hz if frame is not None else assembled.offset_hz
                 station = HeardStation(
                     callsign=assembled.from_call,
-                    snr_db=snr,
+                    snr_db=frame.snr_db,
                     grid=their_grid,
-                    frequency_hz=fhz,
+                    frequency_hz=frame.frequency_hz,
                     distance_mi=dist_mi,
                     bearing_deg=bearing,
                     last_heard=assembled.completed_at,

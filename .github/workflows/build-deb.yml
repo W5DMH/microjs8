@@ -17,7 +17,12 @@ on:
   pull_request:
 
 permissions:
-  contents: write   # needed to attach assets to a Release on tag push
+  # v0.0.11: lowered from `contents: write`. Pre-v0.0.11 we used
+  # write for the "Attach to Release" step (now removed). The
+  # workflow only inspects + uploads workflow artifacts now, both
+  # of which need only the default read access. Principle of
+  # least privilege.
+  contents: read
 
 # Opt all JavaScript actions in this workflow into the Node.js 24
 # runtime ahead of GitHub's June 2 2026 forced cutover. Silences the
@@ -80,10 +85,27 @@ jobs:
             echo "::warning::systemd-analyze reported non-fatal issues (ok)"
           fi
 
-      - name: Build .deb
+      - name: Build .deb (inspection-only — no gfsk8)
+        # v0.0.11: pass --allow-no-gfsk8 explicitly.
+        #
+        # The GitHub-hosted runner has no access to the gfsk8 source
+        # repo (it's a separate project not vendored here), so it
+        # cannot produce a shippable .deb. The v0.0.10 size guard
+        # now refuses no-gfsk8 builds by default — that's correct
+        # behavior. We opt in here because this job exists to:
+        #   - lint the package STRUCTURE (control file, postinst,
+        #     systemd unit, file layout)
+        #   - catch debian-policy regressions via lintian
+        #   - verify the Python package copies cleanly
+        # The resulting .deb is intentionally NOT installable as a
+        # working radio app. The "Attach to Release" step that used
+        # to upload this broken .deb on tag pushes has been removed
+        # (v0.0.11) — every Release attaches a locally-built .deb
+        # from hf256 instead. The GHA artifact is for review only.
         run: |
-          python3 scripts/build_deb.py --output-dir dist
+          python3 scripts/build_deb.py --output-dir dist --allow-no-gfsk8
           ls -la dist/
+          echo "::warning::This .deb is inspection-only — no gfsk8 bundled. Do not install."
 
       - name: Inspect .deb
         # Print the package metadata + file inventory to the job log
@@ -119,22 +141,21 @@ jobs:
           DEB=$(ls dist/*.deb | head -1)
           lintian --no-tag-display-limit "$DEB" || true
 
-      - name: Upload artifact (PRs and main)
-        # Phase 7 hotfix: the prior filter
-        #   if: github.event_name != 'push' || github.ref != 'refs/tags/v*'
-        # was tautological — `!= 'refs/tags/v*'` is a literal string
-        # comparison, not a glob, so it always matched. Mirror the
-        # release step below using startsWith() for symmetry.
-        if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
+      - name: Upload artifact (for inspection)
+        # v0.0.11: simplified — upload as a workflow artifact on
+        # ALL events (PR / push / tag). Pre-v0.0.11 we had separate
+        # branches for tag-push (auto-attach to Release) vs other
+        # (upload as workflow artifact). The auto-attach was
+        # dangerous: it uploaded the GHA-built no-gfsk8 .deb to the
+        # GitHub Release, which operators then mis-downloaded and
+        # installed. v0.0.8 and v0.0.9 both shipped briefly broken
+        # this way before the operator manually clobbered the upload
+        # with their hf256-built .deb. v0.0.11 stops the workflow
+        # from ever touching a Release — all attached binaries are
+        # explicitly uploaded by the operator from a verified local
+        # build.
         uses: actions/upload-artifact@v4
         with:
-          name: microjs8-deb
+          name: microjs8-deb-inspection-only
           path: dist/*.deb
           retention-days: 30
-
-      - name: Attach to Release (tag push)
-        if: ${{ startsWith(github.ref, 'refs/tags/v') }}
-        uses: softprops/action-gh-release@v2
-        with:
-          files: dist/*.deb
-          generate_release_notes: true

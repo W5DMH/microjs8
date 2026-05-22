@@ -1062,3 +1062,160 @@ def test_dispatch_assembled_heard_upsert_idempotent(tmp_path: Path):
     assert len(heard) == 1, "duplicate upserts must not multiply rows"
     # The freshest SNR wins (ON CONFLICT DO UPDATE replaces snr_db)
     assert heard[0].snr_db == -5
+
+
+# ── Phase 19 v0.0.11: own-callsign filter + skip-no-SNR ──────────────
+
+
+def test_dispatch_assembled_does_not_upsert_self(tmp_path: Path):
+    """v0.0.11: never add our own callsign to the heard list.
+
+    The radio's monitor / hardware loopback can feed our TX back into
+    the decoder, producing an AssembledMessage with from_call == us.
+    Pre-v0.0.11 we'd add W5DMH to Heard as an echo of ourselves.
+    """
+    from microjs8.store.db import MessageStore
+
+    app = _make_app(tmp_path)
+    app._store = MessageStore(tmp_path / "store.db")
+    asm_msg = _assembled(
+        from_call="W5DMH",     # OUR callsign (matches the test app config)
+        to_call="@HB",
+        verb="HEARTBEAT",
+        body="EN83",
+        checksum_valid=False,
+    )
+    frame = _frame(snr=-3, freq=1500.0)
+    app._dispatch_assembled(asm_msg, frame)
+
+    heard = app._store.heard_stations()
+    assert len(heard) == 0, (
+        f"refused: our own callsign must not be added to heard list; "
+        f"got {heard}"
+    )
+
+
+def test_dispatch_assembled_skips_when_no_frame_provided(tmp_path: Path):
+    """v0.0.11: skip defensive upsert when frame=None (reassembly
+    timeout path). The single-frame _update_heard_for path has
+    already run with a real SNR for that sender's first frame —
+    trying to insert with snr=None hits NOT NULL constraint.
+
+    Closes the IntegrityError spam observed in PI-2W-TEST journal.
+    """
+    from microjs8.store.db import MessageStore
+
+    app = _make_app(tmp_path)
+    app._store = MessageStore(tmp_path / "store.db")
+    asm_msg = _assembled(
+        from_call="KD8GIJ", to_call="W5DMH", verb="HEARTBEAT",
+        body="HEARTBEAT SNR -02",
+        checksum_valid=False,
+    )
+    # No frame — this is the reassembly-timeout call site.
+    # Pre-v0.0.11 this raised sqlite3.IntegrityError; post-v0.0.11
+    # it should silently skip (no row added, no exception).
+    app._dispatch_assembled(asm_msg, None)
+
+    heard = app._store.heard_stations()
+    assert len(heard) == 0, (
+        f"defensive upsert must skip when frame=None; got {heard}"
+    )
+
+
+def test_dispatch_assembled_normal_path_still_upserts(tmp_path: Path):
+    """v0.0.11 regression guard: the original v0.0.10 path (real
+    frame + foreign callsign) must STILL upsert. We don't want the
+    self-filter or no-SNR-skip to break the actual use case."""
+    from microjs8.store.db import MessageStore
+
+    app = _make_app(tmp_path)
+    app._store = MessageStore(tmp_path / "store.db")
+    asm_msg = _assembled(
+        from_call="KD8PGB",        # NOT us
+        to_call="W5DMH",
+        verb="GRID",
+        body="EN82",
+        checksum_valid=False,
+    )
+    frame = _frame(snr=-9, freq=1500.0)
+    app._dispatch_assembled(asm_msg, frame)
+
+    heard = app._store.heard_stations()
+    assert len(heard) == 1
+    assert heard[0].callsign == "KD8PGB"
+    assert heard[0].snr_db == -9
+    assert heard[0].grid == "EN82"
+
+
+def test_update_heard_for_does_not_upsert_self(tmp_path: Path):
+    """v0.0.11: _update_heard_for must refuse our own callsign.
+
+    The radio's monitor or hardware-level loopback can feed our own
+    TX back into the decoder, producing a ParsedFrame with
+    from_call == us. The Heard list represents OTHER stations, never
+    us. Without this filter, operators see W5DMH appear in their own
+    Heard list every time they transmit a heartbeat (observed in
+    PI-2W-TEST field testing of v0.0.10).
+    """
+    from microjs8.store.db import MessageStore
+    from microjs8.protocol.types import FrameKind, ParsedFrame
+
+    app = _make_app(tmp_path)
+    app._store = MessageStore(tmp_path / "store.db")
+
+    # Build a ParsedFrame that LOOKS like our own heartbeat returning
+    # via the radio's monitor: from_call = "W5DMH" (matches config).
+    decoded = DecodedFrame(
+        text="W5DMH: @HB HEARTBEAT EN83", raw="",
+        snr_db=0, frequency_hz=1500.0,
+        dt_seconds=0.0, submode=0, quality=0, frame_type=0,
+        utc_seconds_of_day=0, received_at=1700000000.0,
+    )
+    parsed = ParsedFrame(
+        decoded=decoded,
+        kind=FrameKind.HEARTBEAT,
+        from_call="W5DMH",       # our own callsign
+        to_call="@HB",
+        grid="EN83",
+        body="",
+        is_for_us=False,
+    )
+    app._update_heard_for(parsed)
+
+    heard = app._store.heard_stations()
+    assert len(heard) == 0, (
+        f"_update_heard_for must refuse our own callsign; "
+        f"got {[h.callsign for h in heard]}"
+    )
+
+
+def test_update_heard_for_normal_path_still_works(tmp_path: Path):
+    """v0.0.11 regression guard: a foreign callsign still gets
+    upserted via _update_heard_for."""
+    from microjs8.store.db import MessageStore
+    from microjs8.protocol.types import FrameKind, ParsedFrame
+
+    app = _make_app(tmp_path)
+    app._store = MessageStore(tmp_path / "store.db")
+
+    decoded = DecodedFrame(
+        text="KD8PGB: @HB HEARTBEAT EN82", raw="",
+        snr_db=-7, frequency_hz=1500.0,
+        dt_seconds=0.0, submode=0, quality=0, frame_type=0,
+        utc_seconds_of_day=0, received_at=1700000000.0,
+    )
+    parsed = ParsedFrame(
+        decoded=decoded,
+        kind=FrameKind.HEARTBEAT,
+        from_call="KD8PGB",        # not us
+        to_call="@HB",
+        grid="EN82",
+        body="",
+        is_for_us=False,
+    )
+    app._update_heard_for(parsed)
+
+    heard = app._store.heard_stations()
+    assert len(heard) == 1
+    assert heard[0].callsign == "KD8PGB"

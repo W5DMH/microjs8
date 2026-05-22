@@ -314,9 +314,25 @@ def _format_time_for_header(state: UISnapshot) -> str:
 
 
 def _draw_footer(
-    draw: ImageDraw.ImageDraw, fonts: Fonts, hint: str
+    draw: ImageDraw.ImageDraw,
+    fonts: Fonts,
+    hint: str,
+    *,
+    right_warning: Optional[str] = None,
 ) -> None:
-    """Single-line hint at the bottom of the screen."""
+    """Single-line hint at the bottom of the screen.
+
+    v0.0.11: ``right_warning`` renders a short warning string right-
+    aligned within the same footer band, in FG_WARN (yellow). Used by
+    Compose to surface TO/FOR/MSG-ID validation problems in a spot
+    that's clearly visible (pre-v0.0.11 the warning sat between SEND
+    and the footer band where it could be clipped on dense screens).
+
+    If the right-warning would collide horizontally with the hint
+    text, the hint is truncated with an ellipsis to make room. The
+    warning is the more critical message — operators need to see WHY
+    they can't transmit.
+    """
     y0 = theme.SCREEN_H - theme.FOOTER_H
     draw.rectangle(
         [(0, y0), (theme.SCREEN_W - 1, theme.SCREEN_H - 1)],
@@ -325,6 +341,39 @@ def _draw_footer(
     draw.line(
         [(0, y0 - 1), (theme.SCREEN_W - 1, y0 - 1)], fill=theme.SEPARATOR
     )
+
+    if right_warning:
+        # Render warning right-aligned first so we can clip the hint
+        # if necessary.
+        try:
+            warn_w = int(draw.textlength(right_warning, font=fonts.small))
+        except Exception:
+            warn_w = 6 * len(right_warning)
+        warn_x = theme.SCREEN_W - theme.PAD_X - warn_w
+        draw.text(
+            (warn_x, y0 + 3),
+            right_warning, font=fonts.small, fill=theme.FG_WARN,
+        )
+        # Available width for the hint, with a 6 px gap before warning.
+        hint_max_x = warn_x - 6
+        # If the hint won't fit, ellipsize it.
+        try:
+            hint_w = int(draw.textlength(hint, font=fonts.small))
+        except Exception:
+            hint_w = 6 * len(hint)
+        if theme.PAD_X + hint_w > hint_max_x:
+            # Trim from the right until it fits (binary-ish trim is
+            # overkill for this short string — linear is fine).
+            available = hint_max_x - theme.PAD_X
+            while hint and True:
+                try:
+                    w = int(draw.textlength(hint + "…", font=fonts.small))
+                except Exception:
+                    w = 6 * (len(hint) + 1)
+                if w <= available:
+                    break
+                hint = hint[:-1]
+            hint = (hint + "…") if hint else ""
     draw.text(
         (theme.PAD_X, y0 + 3), hint, font=fonts.small, fill=theme.FOOTER_FG
     )
@@ -1584,15 +1633,12 @@ def _render_compose(state: UISnapshot, fonts: Fonts) -> Image.Image:
     elif not is_store and not state.time_source:
         tx_warning = "queued — awaiting time sync"
 
-    if tx_warning:
-        try:
-            w = int(draw.textlength(tx_warning, font=fonts.small))
-        except Exception:
-            w = 6 * len(tx_warning)
-        draw.text(
-            ((theme.SCREEN_W - w) // 2, y),
-            tx_warning, font=fonts.small, fill=theme.FG_WARN,
-        )
+    # v0.0.11: tx_warning is now rendered INSIDE the footer band on
+    # the right, via _draw_footer's right_warning kwarg. Pre-v0.0.11
+    # we drew it as a free-floating line above the footer, which on
+    # dense Compose screens got clipped between the SEND button and
+    # the footer banner. Putting it in the footer guarantees it's
+    # visible and consistent across all four field-focus states.
 
     # ── Footer hint, contextual to focus ────────────────────────────
     if is_to_focus:
@@ -1624,7 +1670,7 @@ def _render_compose(state: UISnapshot, fonts: Fonts) -> Image.Image:
         hint = f"Enter {action} · Tab next · Esc cancel"
     else:
         hint = "Tab pick field · Esc cancel"
-    _draw_footer(draw, fonts, hint)
+    _draw_footer(draw, fonts, hint, right_warning=tx_warning)
     return img
 
 
@@ -1906,9 +1952,31 @@ def _render_setup(state: UISnapshot, fonts: Fonts) -> Image.Image:
     # adds a caret at the end of the buffer.
     rows = _setup_rows(state)
 
-    y = theme.BODY_Y0 + 6
-    row_h = 22
+    # v0.0.11 layout tightening. PI-2W-TEST field reports surfaced
+    # that the Radio row was getting half-clipped by the footer at the
+    # prior 22 px stride. Body budget (BODY_Y1 - BODY_Y0 = 128 px)
+    # couldn't accommodate 8 rows × 22 (176 px) + the Emergency button
+    # (32 px). Three corrections together:
+    #   1. Row stride 22 → 18 (-20%, operator-requested)
+    #   2. Mode + Logs rows dropped (placeholder values "30 days"
+    #      not actually configurable; live in _setup_rows but
+    #      filtered here for v0.0.11)
+    #   3. Em button shrunk 24 → 14 high with a tighter top gap
+    #   4. y_start shifted from BODY_Y0+6 → BODY_Y0+2 (recovers 4 px)
+    # Result: 6 rows × 18 = 108 px + Em button 4+14 = 18 px below,
+    # total = 126 px, fits inside the 128-px body budget.
+    y = theme.BODY_Y0 + 2
+    row_h = 18
     label_w = 64
+
+    # v0.0.11: filter to the rows we actually render. Mode + Logs are
+    # placeholders that show static "30 days" — keeping them in
+    # _setup_rows lets future config wire them up without re-plumbing
+    # the data path, but we don't render them in this version.
+    VISIBLE_ROW_NAMES = {
+        "callsign", "grid", "groups", "units", "freq_hz", "radio",
+    }
+    rows = [r for r in rows if r[0] in VISIBLE_ROW_NAMES]
 
     for field_name, label, value, value_color in rows:
         is_focused = (state.focused_field == field_name) and not state.editing_field
@@ -1948,29 +2016,35 @@ def _render_setup(state: UISnapshot, fonts: Fonts) -> Image.Image:
     # ── Emergency bypass row ────────────────────────────────────────
     # A labeled, focusable button at the bottom of the Setup screen.
     # Activated by Tab-into-it then Enter (no hold gesture).
+    #
+    # v0.0.11: slimmed from 24 → 14 high so it fits in the remaining
+    # body budget after the row-stride reduction. The label still
+    # uses FONT_BODY for legibility.
     is_em_focused = (
         state.focused_field == "emergency_bypass" and not state.editing_field
     )
-    em_y = y + 8
+    em_y = y + 4
+    em_h = 14
     if is_em_focused:
         draw.rectangle(
-            [(theme.PAD_X, em_y), (theme.SCREEN_W - theme.PAD_X, em_y + 24)],
+            [(theme.PAD_X, em_y), (theme.SCREEN_W - theme.PAD_X, em_y + em_h)],
             fill=theme.EMERGENCY_BG,
         )
         em_color = theme.EMERGENCY_FG
     else:
         draw.rectangle(
-            [(theme.PAD_X, em_y), (theme.SCREEN_W - theme.PAD_X, em_y + 24)],
+            [(theme.PAD_X, em_y), (theme.SCREEN_W - theme.PAD_X, em_y + em_h)],
             outline=theme.FG_BAD,
         )
         em_color = theme.FG_BAD
     em_text = "[EMERGENCY BEACON →]"
-    bbox = fonts.body.getbbox(em_text)
+    bbox = fonts.small.getbbox(em_text)
     tw = bbox[2] - bbox[0]
+    th = bbox[3] - bbox[1]
     draw.text(
-        ((theme.SCREEN_W - tw) // 2, em_y + 5),
+        ((theme.SCREEN_W - tw) // 2, em_y + (em_h - th) // 2 - 1),
         em_text,
-        font=fonts.body,
+        font=fonts.small,
         fill=em_color,
     )
 
