@@ -30,7 +30,7 @@ Drives a QRP Labs QDX, Xiegu G90 with a DigiRig interface or a DigiRig with "Unk
 | SBC | Raspberry Pi Zero 2 W | Quad Cortex-A53 @ 1 GHz, 512 MB RAM, Bookworm |
 | Display | Waveshare 1.9″ 320×170 SPI (ST7789V2) | `fb_st7789v` overlay, /dev/fb1 |
 | Keyboard | Any USB HID keyboard | M5Stack CardputerZero keyboard works via USB-C-to-A |
-| Transceiver | QRP Labs QDX (primary), Xiegu G90 + DigiRig, Baofeng UV-5R + DigiRig | RTS-PTT via DigiRig, native CAT on QDX |
+| Transceiver | QRP Labs QDX (primary), Xiegu G90 + DigiRig, Baofeng UV-5R + DigiRig | RTS-PTT via DigiRig, No CAT (tr)Usdx |
 | GPS | u-blox 7 USB GLONASS dongle | gpsd-managed; auto-fills grid + time |
 | USB hub | Powered or unpowered micro-OTG hub | Required to attach radio + GPS + keyboard simultaneously |
 | Power | 5 V / ≥ 2 A USB supply or power bank | No internal battery on the bare-Pi rig |
