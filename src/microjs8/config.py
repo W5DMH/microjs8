@@ -18,6 +18,10 @@ Callsign and grid validation follows amateur-radio convention:
 Any other validation failure raises ``ConfigError``. The daemon catches
 this at startup and refuses to enter the run loop — better to fail loudly
 than to operate from a malformed config.
+
+v0.0.12: ``[hmi]`` section added so the operator can pick between the
+USB-keyboard backend (default; reads /dev/input/by-id/*-event-kbd) and
+the UART-keyboard backend (Cardputer ADV via /dev/serial0).
 """
 
 from __future__ import annotations
@@ -71,6 +75,21 @@ _GRID6_RE = re.compile(r"^[A-R]{2}[0-9]{2}[a-x]{2}$")
 # is recognizable on the air (though we won't TX with it set).
 UNCONFIGURED_CALLSIGN = "N0CALL"
 
+# HMI keyboard backends. Mutually exclusive at runtime — the daemon
+# instantiates one based on [hmi] keyboard. Both deliver KeyEvent
+# objects to the same InputRouter so the rest of the UI is backend-
+# agnostic. "auto" is intentionally NOT supported: ambiguity over
+# which backend wins on simultaneous keypresses (USB + UART both
+# connected) is more confusing than a one-line config edit.
+_HMI_KEYBOARD_CHOICES: frozenset[str] = frozenset({"usb", "uart"})
+
+# Common UART baud rates. We don't reject uncommon rates outright
+# (someone might want a custom rate for a specific keyboard) but we
+# log a warning to surface typos like 11520 vs 115200.
+_COMMON_BAUD_RATES: frozenset[int] = frozenset(
+    {9600, 19200, 38400, 57600, 115200, 230400, 460800, 921600}
+)
+
 
 class ConfigError(Exception):
     """Raised when the loaded configuration is invalid."""
@@ -107,6 +126,31 @@ class StationConfig:
 
 
 @dataclass(frozen=True)
+class HmiConfig:
+    """HMI (human-machine interface) backend configuration.
+
+    Selects which keyboard backend the daemon uses. The two backends
+    are mutually exclusive at runtime — see ``_HMI_KEYBOARD_CHOICES``
+    for the supported values.
+
+    ``"usb"`` (default) reads evdev events from
+    ``/dev/input/by-id/*-event-kbd``. Covers USB HID keyboards and
+    the CardputerZero's internal TCA8418 keypad. The ``uart_*``
+    fields are ignored in this mode.
+
+    ``"uart"`` reads pre-resolved key events from a Pi hardware
+    UART (default ``/dev/serial0`` @ 115200). Used when paired with
+    an M5Stack Cardputer ADV running the microjs8-cardputer-link
+    firmware via its EXT 14-pin header. See
+    ``docs/CARDPUTER_LINK.md`` for the operator setup.
+    """
+
+    keyboard: str = "usb"
+    uart_device: str = "/dev/serial0"
+    uart_baud: int = 115200
+
+
+@dataclass(frozen=True)
 class Config:
     """Top-level configuration.
 
@@ -127,6 +171,9 @@ class Config:
     # radios.py registry to use for hamlib model + baud rate + PTT
     # method. Default is "qdx" since that's our reference hardware.
     radio_id: str = "qdx"
+
+    # v0.0.12: HMI backend selection (USB vs UART keyboard).
+    hmi: HmiConfig = field(default_factory=HmiConfig)
 
     # Path the config was loaded from. Useful for log messages and for
     # the eventual first-boot wizard which writes back to this path.
@@ -254,6 +301,66 @@ def _validate_groups(value: Any) -> tuple[str, ...]:
     return tuple(out)
 
 
+def _validate_hmi_keyboard(value: Any) -> str:
+    """Validate the [hmi] keyboard backend name."""
+    if not isinstance(value, str):
+        raise ConfigError(
+            f"[hmi] keyboard must be a string, got {type(value).__name__}"
+        )
+    normalized = value.strip().lower()
+    if normalized not in _HMI_KEYBOARD_CHOICES:
+        raise ConfigError(
+            f"[hmi] keyboard {value!r} not recognized; "
+            f"valid choices: {sorted(_HMI_KEYBOARD_CHOICES)}"
+        )
+    return normalized
+
+
+def _validate_uart_device(value: Any) -> str:
+    """Validate the [hmi] uart_device path.
+
+    Must be an absolute path. We don't stat() the file — the device
+    may not exist at config-load time (e.g. UART hardware not yet
+    enabled in /boot/firmware/config.txt), and the keyboard thread
+    handles missing devices gracefully at start.
+    """
+    if not isinstance(value, str):
+        raise ConfigError(
+            f"[hmi] uart_device must be a string path, "
+            f"got {type(value).__name__}"
+        )
+    if not value:
+        raise ConfigError("[hmi] uart_device must not be empty")
+    if not value.startswith("/"):
+        raise ConfigError(
+            f"[hmi] uart_device must be an absolute path, got {value!r}"
+        )
+    return value
+
+
+def _validate_uart_baud(value: Any) -> int:
+    """Validate the [hmi] uart_baud rate.
+
+    Common rates are listed in _COMMON_BAUD_RATES; uncommon values
+    pass but log a warning so typos like 11520 (missing zero) are
+    surfaced without forcing a hard reject.
+    """
+    # Reject bool first since bool is a subclass of int in Python and
+    # we don't want True/False sneaking through.
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ConfigError(
+            f"[hmi] uart_baud must be an integer, got {type(value).__name__}"
+        )
+    if value <= 0:
+        raise ConfigError(f"[hmi] uart_baud must be positive, got {value}")
+    if value not in _COMMON_BAUD_RATES:
+        _log.warning(
+            "[hmi] uart_baud=%d is unusual; common rates are %s",
+            value, sorted(_COMMON_BAUD_RATES),
+        )
+    return value
+
+
 def _from_dict(data: dict[str, Any], source_path: Path) -> Config:
     """Build a Config from a parsed TOML dict, validating each field."""
     station_data = data.get("station", {})
@@ -276,10 +383,24 @@ def _from_dict(data: dict[str, Any], source_path: Path) -> Config:
         raise ConfigError("[radio] section must be a table")
     radio_id = _validate_radio_id(radio_data.get("id", "qdx"))
 
+    # [hmi] section (v0.0.12). Defaults: keyboard="usb",
+    # uart_device="/dev/serial0", uart_baud=115200. The defaults
+    # preserve pre-v0.0.12 behavior for any config that omits the
+    # section entirely.
+    hmi_data = data.get("hmi", {})
+    if not isinstance(hmi_data, dict):
+        raise ConfigError("[hmi] section must be a table")
+    hmi = HmiConfig(
+        keyboard=_validate_hmi_keyboard(hmi_data.get("keyboard", "usb")),
+        uart_device=_validate_uart_device(hmi_data.get("uart_device", "/dev/serial0")),
+        uart_baud=_validate_uart_baud(hmi_data.get("uart_baud", 115200)),
+    )
+
     return Config(
         station=station,
         units_distance=units,
         radio_id=radio_id,
+        hmi=hmi,
         source_path=source_path,
     )
 
@@ -344,10 +465,11 @@ def load() -> Config:
 
     if config.station.is_configured:
         _log.info(
-            "config loaded: callsign=%s grid=%s units=%s",
+            "config loaded: callsign=%s grid=%s units=%s hmi.keyboard=%s",
             config.station.callsign,
             config.station.grid,
             config.units_distance,
+            config.hmi.keyboard,
         )
     else:
         _log.warning(
@@ -366,6 +488,7 @@ def save_atomic(
     units: str,
     radio_id: Optional[str] = None,
     groups: Optional[tuple[str, ...]] = None,
+    hmi: Optional[HmiConfig] = None,
 ) -> Config:
     """Validate and atomically write a new live configuration.
 
@@ -390,6 +513,13 @@ def save_atomic(
         reads the current live config to preserve whatever groups
         are already set. Same preservation rationale as radio_id —
         a single-field edit shouldn't blow away unrelated fields.
+    hmi : optional HmiConfig
+        HMI backend configuration. When None (default), reads the
+        current live config to preserve whatever was last written.
+        Same preservation rationale as radio_id and groups — the
+        Setup UI doesn't expose HMI mode editing today, so its
+        save_atomic calls leave hmi at None and preserve whatever
+        the operator hand-edited in /etc/microjs8/config.toml.
 
     The write target is ``paths.config_path()``, NOT the
     ``shipped_default_path()`` — defaults are read-only on the image.
@@ -399,23 +529,35 @@ def save_atomic(
     grid = _validate_grid(grid)
     units = _validate_units(units)
 
-    # If radio_id wasn't explicitly supplied, preserve whatever the
-    # current live config has (or fall back to the default). Avoids
-    # the trap of "edit callsign → next restart, [radio] is gone".
-    if radio_id is None or groups is None:
+    # If any non-station field wasn't explicitly supplied, preserve
+    # whatever the current live config has (or fall back to defaults).
+    # Avoids the trap of "edit callsign → next restart, [radio] or
+    # [hmi] is gone".
+    if radio_id is None or groups is None or hmi is None:
         try:
             current = load()
             if radio_id is None:
                 radio_id = current.radio_id
             if groups is None:
                 groups = current.station.groups
+            if hmi is None:
+                hmi = current.hmi
         except ConfigError:
             if radio_id is None:
                 radio_id = "qdx"  # safe fallback — same as Config dataclass default
             if groups is None:
                 groups = ()
+            if hmi is None:
+                hmi = HmiConfig()
     radio_id = _validate_radio_id(radio_id)
     groups = _validate_groups(groups)
+    # Re-validate hmi fields in case the caller constructed an
+    # HmiConfig with bypassed validators (e.g. via dataclasses.replace).
+    hmi = HmiConfig(
+        keyboard=_validate_hmi_keyboard(hmi.keyboard),
+        uart_device=_validate_uart_device(hmi.uart_device),
+        uart_baud=_validate_uart_baud(hmi.uart_baud),
+    )
 
     live = paths.config_path()
     paths.ensure_writable_dirs()
@@ -428,6 +570,20 @@ def save_atomic(
     else:
         groups_toml = ""
 
+    # Only emit [hmi] if it differs from defaults — keeps config.toml
+    # clean for operators on the USB-keyboard path who never touch
+    # the UART backend. We still validate non-default writes above.
+    if hmi == HmiConfig():
+        hmi_toml = ""
+    else:
+        hmi_toml = (
+            "\n"
+            "[hmi]\n"
+            f'keyboard = "{hmi.keyboard}"\n'
+            f'uart_device = "{hmi.uart_device}"\n'
+            f"uart_baud = {hmi.uart_baud}\n"
+        )
+
     body = (
         "# MiniJS8 — live configuration (written by setup wizard)\n"
         f'units_distance = "{units}"\n'
@@ -439,6 +595,7 @@ def save_atomic(
         "\n"
         "[radio]\n"
         f'id = "{radio_id}"\n'
+        f"{hmi_toml}"
     )
 
     tmp = live.with_suffix(live.suffix + ".tmp")
@@ -457,8 +614,8 @@ def save_atomic(
         raise ConfigError(f"failed to write {live}: {exc}") from exc
 
     _log.info(
-        "config saved: callsign=%s grid=%s units=%s radio=%s groups=%s",
-        callsign, grid, units, radio_id, list(groups),
+        "config saved: callsign=%s grid=%s units=%s radio=%s groups=%s hmi.keyboard=%s",
+        callsign, grid, units, radio_id, list(groups), hmi.keyboard,
     )
     # Re-load to return a parsed Config — also catches the (unlikely)
     # case where what we just wrote doesn't round-trip cleanly.

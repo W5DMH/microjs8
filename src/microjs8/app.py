@@ -445,16 +445,34 @@ class MicroJS8App:
             self._battery_reader = None
 
     def _start_keyboard_thread_best_effort(self, loop: asyncio.AbstractEventLoop) -> None:
-        """Start the USB keyboard reader thread.
+        """Start the keyboard reader thread(s).
 
-        The thread itself handles 'no keyboard plugged in' gracefully —
-        it just retries discovery every 2 s, so we don't need to skip
-        the start in headless or no-keyboard cases.
+        Two backends, mutually exclusive per [hmi] keyboard config:
+          - "usb" (default): discover /dev/input/by-id/*-event-kbd
+            devices and spawn one KeyboardThread per device (covers
+            USB HID keyboards AND the CardputerZero's internal
+            TCA8418 keypad — Phase 16 unified them).
+          - "uart" (v0.0.12): open the Pi hardware UART (default
+            /dev/serial0) and read pre-resolved key events from an
+            attached keyboard like the M5Stack Cardputer ADV running
+            microjs8-cardputer-link firmware. See
+            docs/CARDPUTER_LINK.md for operator setup.
+
+        Failures are non-fatal — a missing keyboard logs and leaves
+        the UI input-locked rather than crashing the daemon at startup.
         """
         if self._headless:
             _log.info("running headless — keyboard thread skipped")
             return
         assert self._router is not None
+
+        # v0.0.12: [hmi] keyboard = "uart" routes to the UART backend
+        # (Cardputer ADV link). USB / TCA8418 discovery is skipped —
+        # the two backends are mutually exclusive at runtime. To switch
+        # back, edit /etc/microjs8/config.toml: [hmi] keyboard = "usb".
+        if self._config.hmi.keyboard == "uart":
+            self._start_uart_keyboard_best_effort(loop)
+            return
 
         # Phase 16: discover all keyboards (TCA8418 + USB) and spawn
         # one reader thread per device. All threads marshal events
@@ -511,6 +529,66 @@ class MicroJS8App:
         if not self._keyboards:
             _log.warning(
                 "all keyboard threads failed to start — UI will be input-locked"
+            )
+
+    def _start_uart_keyboard_best_effort(self, loop: asyncio.AbstractEventLoop) -> None:
+        """Start the UART keyboard reader thread (v0.0.12 Cardputer ADV link).
+
+        Reads pre-resolved key events from a Pi hardware UART (typically
+        ``/dev/serial0``) and routes them through the same InputRouter
+        the USB / TCA8418 backends use. The wire format is one event
+        per ``\\n``-terminated line at 115200 8N1 — see
+        ``docs/CARDPUTER_LINK.md`` and ``microjs8.input.uart_keyboard``.
+
+        The thread is appended to ``self._keyboards`` so the existing
+        cleanup in ``_cleanup_with_grace`` stops it alongside any other
+        keyboard threads (both share the ``.stop()`` / ``.join()`` /
+        ``.name`` / ``.is_alive()`` interface).
+
+        Failures (pyserial missing, device not openable, ImportError)
+        log and return without raising — the daemon keeps running,
+        UI is input-locked until the operator fixes the underlying
+        cause and ``systemctl restart microjs8`` cycles it.
+        """
+        assert self._router is not None
+        try:
+            # Lazy import so hosts without pyserial can still import
+            # the app module for headless / CI use. pyserial is only
+            # actually required if the operator opts into UART mode.
+            from microjs8.input.uart_keyboard import UartKeyboardThread
+        except ImportError:
+            _log.exception(
+                "could not import UartKeyboardThread — UI will be input-locked"
+            )
+            return
+
+        device = self._config.hmi.uart_device
+        baud = self._config.hmi.uart_baud
+        router_handle = self._router.handle
+
+        def _on_event(event: KeyEvent) -> None:
+            # Marshal from the keyboard thread back to the asyncio
+            # event loop where the router lives. Mirrors the
+            # call_soon_threadsafe pattern KeyboardThread uses
+            # internally (USB backend takes loop+callback at __init__;
+            # UartKeyboardThread is loop-agnostic so we wrap here).
+            loop.call_soon_threadsafe(router_handle, event)
+
+        try:
+            kbd = UartKeyboardThread(
+                device=device,
+                baud=baud,
+                on_event=_on_event,
+            )
+            kbd.start()
+            self._keyboards.append(kbd)
+            _log.info(
+                "uart keyboard thread started: device=%s baud=%d",
+                device, baud,
+            )
+        except Exception:
+            _log.exception(
+                "could not start UART keyboard thread — UI will be input-locked"
             )
 
     def _start_gps_reader_best_effort(self, loop: asyncio.AbstractEventLoop) -> None:
