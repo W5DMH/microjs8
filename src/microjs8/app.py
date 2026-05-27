@@ -250,11 +250,19 @@ class MicroJS8App:
         before because systemd uses SIGTERM.
         """
         _log.warning("poweroff requested via HOME EXIT button")
-        # systemctl_poweroff() is fire-and-forget — it invokes
-        # `systemctl poweroff` via subprocess (the helper handles
-        # polkit). We don't need to set _stop ourselves; systemd will
-        # SIGTERM us shortly and request_stop fires from that.
-        systemctl_poweroff()
+        # v0.0.14 fix: systemctl_poweroff is an async coroutine
+        # (uses asyncio.create_subprocess_exec internally so it
+        # does not block the event loop). A bare call would create
+        # a coroutine object that is never executed -- Python emits
+        # a RuntimeWarning to stderr (not journal) and nothing
+        # happens. asyncio.create_task schedules it on the running
+        # event loop. We are invoked from a router callback running
+        # on that loop, so create_task picks it up automatically.
+        # We intentionally do not hold a reference to the task --
+        # systemd will SIGTERM us shortly and the normal shutdown
+        # sequence (request_stop fires from the signal handler)
+        # takes over from there.
+        asyncio.create_task(systemctl_poweroff())
 
     @property
     def exit_code(self) -> int:

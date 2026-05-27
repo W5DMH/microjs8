@@ -1,20 +1,25 @@
-"""Tests for v0.0.13 HOME EXIT button → graceful Pi poweroff.
+"""Tests for v0.0.13+ HOME EXIT button -> graceful Pi poweroff.
 
 What changed in v0.0.13:
-  - ``App.request_poweroff()`` is a new method that calls
-    ``microjs8.input.systemctl_poweroff()``.
-  - The InputRouter is wired with ``request_exit=app.request_poweroff``
-    (was ``request_exit=app.request_stop`` in v0.0.12 and earlier).
+  - MicroJS8App.request_poweroff() method that calls
+    microjs8.input.systemctl_poweroff() (an async helper).
+  - InputRouter wired with request_exit=app.request_poweroff (was
+    app.request_stop in v0.0.12 and earlier).
+
+What changed in v0.0.14:
+  - The async helper is now properly scheduled on the running event
+    loop via asyncio.create_task() instead of a bare call. The bare
+    call created a coroutine object that was never executed, so the
+    Pi never shut down. v0.0.14 fixes the scheduling.
 
 What stays the same:
-  - ``request_stop()`` is unchanged — still used by SIGTERM handlers
-    and any direct ``systemctl stop microjs8`` invocation.
-  - ``request_restart()`` is unchanged — radio-cycle path still uses it.
+  - request_stop() is unchanged -- still used by SIGTERM handlers
+    and any direct 'systemctl stop microjs8' invocation.
+  - request_restart() is unchanged.
   - The EXIT_CONFIRM modal's NO/YES focus behavior is unchanged.
 
-These tests verify the wiring rather than the full daemon lifecycle.
-``systemctl_poweroff`` is patched so the test runner doesn't actually
-try to halt the host (which would be a very bad test side-effect).
+The tests below patch both systemctl_poweroff and asyncio.create_task
+so they don't need a running event loop or actually halt the host.
 """
 
 from __future__ import annotations
@@ -25,30 +30,57 @@ import pytest
 
 
 class TestRequestPoweroff:
-    """App.request_poweroff() calls systemctl_poweroff()."""
+    """App.request_poweroff() schedules systemctl_poweroff() as a task."""
 
-    def test_calls_systemctl_poweroff(self) -> None:
-        # Import lazily so this test runs even on hosts where
+    def test_schedules_systemctl_poweroff_as_task(self) -> None:
+        # Import lazily so the test runs even on hosts where
         # microjs8 isn't installed system-wide (CI, dev boxes).
         from microjs8 import app as app_module
 
-        # We instantiate a bare App via __new__ to avoid pulling in
-        # all the config / display / GPS init that a real App() call
-        # triggers. request_poweroff only needs the logger, so this
-        # is a safe shortcut.
+        # Instantiate a bare App via __new__ to avoid pulling in all
+        # the config / display / GPS init that a real App() call
+        # triggers. request_poweroff only needs the logger and the
+        # imported names at module scope, so this shortcut is safe.
         instance = app_module.MicroJS8App.__new__(app_module.MicroJS8App)
 
-        with patch.object(app_module, "systemctl_poweroff") as mock_poweroff:
+        # A sentinel object stands in for the coroutine that
+        # systemctl_poweroff would normally return. We don't care
+        # what the object IS, only that the same object reaches
+        # asyncio.create_task -- proving the full chain works.
+        fake_coro = object()
+
+        # Force plain MagicMock (NOT AsyncMock) for the helper patch.
+        # unittest.mock auto-detects that systemctl_poweroff is
+        # 'async def' and substitutes AsyncMock by default. AsyncMock
+        # returns its own coroutine when called -- our return_value
+        # sentinel never reaches create_task, so the assertion fails
+        # with a confusing "coroutine vs sentinel" mismatch. Using
+        # MagicMock explicitly makes the helper a plain callable that
+        # returns the sentinel directly.
+        plain_helper = MagicMock(return_value=fake_coro)
+        with patch.object(
+            app_module, "systemctl_poweroff", plain_helper,
+        ), patch(
+            "asyncio.create_task",
+        ) as mock_create_task:
             instance.request_poweroff()
-            mock_poweroff.assert_called_once_with()
+
+        # The helper was invoked (which would have created the coroutine).
+        plain_helper.assert_called_once_with()
+        # And create_task was invoked with that coroutine.
+        # This catches the v0.0.14 bug: the previous code called
+        # systemctl_poweroff() without scheduling it, so create_task
+        # was never invoked.
+        mock_create_task.assert_called_once_with(fake_coro)
 
     def test_does_not_set_stop_event_directly(self) -> None:
-        # request_poweroff relies on systemd to SIGTERM us; it shouldn't
-        # set the stop event directly. systemd's SIGTERM handler (which
-        # is request_stop) does that for us. This separation matters
-        # because we want the daemon to still be running until systemd
-        # tells us to stop — that way the operator's UI doesn't freeze
-        # before systemctl poweroff has been invoked.
+        # request_poweroff relies on systemd to SIGTERM us; it
+        # shouldn't set the stop event directly. systemd's SIGTERM
+        # handler (which is request_stop) does that for us. This
+        # separation matters because we want the daemon to still be
+        # running until systemd tells us to stop -- that way the
+        # operator's UI doesn't freeze before systemctl poweroff has
+        # been invoked.
         from microjs8 import app as app_module
 
         instance = app_module.MicroJS8App.__new__(app_module.MicroJS8App)
@@ -57,19 +89,21 @@ class TestRequestPoweroff:
         mock_stop.is_set.return_value = False
         instance._stop = mock_stop
 
-        with patch.object(app_module, "systemctl_poweroff"):
+        with patch.object(app_module, "systemctl_poweroff"), \
+                patch("asyncio.create_task"):
             instance.request_poweroff()
 
         mock_stop.set.assert_not_called()
 
     def test_logs_poweroff_request(self, caplog) -> None:
-        # The poweroff is significant — log it at WARNING so it's
+        # The poweroff is significant -- log it at WARNING so it's
         # visible in journalctl without -v even on a quiet system.
         from microjs8 import app as app_module
 
         instance = app_module.MicroJS8App.__new__(app_module.MicroJS8App)
 
-        with patch.object(app_module, "systemctl_poweroff"):
+        with patch.object(app_module, "systemctl_poweroff"), \
+                patch("asyncio.create_task"):
             with caplog.at_level("WARNING"):
                 instance.request_poweroff()
 
