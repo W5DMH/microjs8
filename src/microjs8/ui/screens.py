@@ -2179,7 +2179,7 @@ def _render_shutting_down(state: UISnapshot, fonts: Fonts) -> Image.Image:
 
 
 def _render_exit_confirm(state: UISnapshot, fonts: Fonts) -> Image.Image:
-    """EXIT_CONFIRM modal — "Exit MicroJS8?" with NO / YES buttons.
+    """EXIT_CONFIRM modal — "POWER OFF PI?" with NO / YES buttons.
 
     Phase 19 v0.0.9: a thin layer of friction between the HOME EXIT
     button and the actual daemon exit. From the May 21, 2026 field
@@ -2187,15 +2187,22 @@ def _render_exit_confirm(state: UISnapshot, fonts: Fonts) -> Image.Image:
     too easy to trigger by a stray Enter, dropping the operator out
     of the running daemon by accident.
 
+    v0.0.13: the YES action now powers off the Pi (via
+    ``App.request_poweroff`` which calls ``systemctl_poweroff()``)
+    rather than just stopping the daemon. Modal title and body
+    updated accordingly. The friction (default-focus NO, explicit
+    arrow-key move to YES) becomes even more important since the
+    consequence is more drastic — operator must intentionally pick
+    YES.
+
     Layout (320 × 170):
       ┌──────────────────────────────────────────┐
-      │ EXIT MICROJS8?           HH:MM:SS    87% │   header
+      │ POWER OFF PI?            HH:MM:SS    87% │   header
       ├──────────────────────────────────────────┤
       │                                          │
-      │       Exit the daemon? Unsaved          │
-      │       traffic in the outbound            │
-      │       queue will be retried              │
-      │       at the next start.                 │
+      │       Power off the Pi?                  │
+      │       Unsaved outbound traffic           │
+      │       will retry at next boot.           │
       │                                          │
       │       ┌─────────┐    ┌─────────┐         │
       │       │   NO    │    │   YES   │         │
@@ -2207,19 +2214,23 @@ def _render_exit_confirm(state: UISnapshot, fonts: Fonts) -> Image.Image:
 
     Default focus is on NO (green outline). Operator must explicitly
     move focus to YES (red outline) before pressing Enter to actually
-    exit. ←/→ cycles focus; Enter on YES fires the request_exit
-    callback; Enter on NO or Esc returns to HOME with the EXIT
-    button re-focused.
+    power off. ←/→ cycles focus; Enter on YES fires the request_exit
+    callback (which in v0.0.13+ triggers a Pi poweroff); Enter on NO
+    or Esc returns to HOME with the EXIT button re-focused.
     """
     img, draw = _new_canvas()
-    _draw_header(draw, fonts, "EXIT MICROJS8?", state)
+    _draw_header(draw, fonts, "POWER OFF PI?", state)
 
     # Explanatory body — three short lines of context so the operator
     # knows what the YES action actually does.
+    #
+    # v0.0.13: action changed from "exit daemon" to "poweroff Pi" so
+    # the wording reflects the consequence the operator will see when
+    # they press YES — the Pi halts, not just the app.
     body_lines = (
-        "Exit the daemon?",
+        "Power off the Pi?",
         "Unsaved outbound traffic",
-        "will retry at next start.",
+        "will retry at next boot.",
     )
     y = theme.BODY_Y0 + 10
     line_h = 18

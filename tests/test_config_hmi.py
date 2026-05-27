@@ -32,9 +32,11 @@ from microjs8.config import (
 
 
 class TestHmiConfigDefaults:
-    def test_default_keyboard_is_usb(self) -> None:
+    def test_default_keyboard_is_auto(self) -> None:
+        # v0.0.13: default flipped from "usb" to "auto" so the
+        # rig is plug-and-play between USB and UART keyboards.
         hmi = HmiConfig()
-        assert hmi.keyboard == "usb"
+        assert hmi.keyboard == "auto"
 
     def test_default_uart_device(self) -> None:
         hmi = HmiConfig()
@@ -174,8 +176,8 @@ def _minimal_dict_with_hmi(hmi: dict) -> dict:
 
 class TestFromDictHmiSection:
     def test_missing_section_uses_defaults(self, tmp_path) -> None:
-        # Pre-v0.0.12 config files don't have [hmi]; defaults must
-        # produce the USB-keyboard behavior.
+        # Pre-v0.0.12 config files don't have [hmi]; defaults
+        # produce the plug-and-play "auto" behavior (since v0.0.13).
         data = {
             "station": {"callsign": "K1ABC", "grid": "FN42"},
             "units_distance": "miles",
@@ -183,7 +185,7 @@ class TestFromDictHmiSection:
         }
         cfg = _from_dict(data, tmp_path / "config.toml")
         assert cfg.hmi == HmiConfig()
-        assert cfg.hmi.keyboard == "usb"
+        assert cfg.hmi.keyboard == "auto"
 
     def test_full_uart_config(self, tmp_path) -> None:
         data = _minimal_dict_with_hmi({

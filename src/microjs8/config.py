@@ -75,13 +75,27 @@ _GRID6_RE = re.compile(r"^[A-R]{2}[0-9]{2}[a-x]{2}$")
 # is recognizable on the air (though we won't TX with it set).
 UNCONFIGURED_CALLSIGN = "N0CALL"
 
-# HMI keyboard backends. Mutually exclusive at runtime — the daemon
-# instantiates one based on [hmi] keyboard. Both deliver KeyEvent
-# objects to the same InputRouter so the rest of the UI is backend-
-# agnostic. "auto" is intentionally NOT supported: ambiguity over
-# which backend wins on simultaneous keypresses (USB + UART both
-# connected) is more confusing than a one-line config edit.
-_HMI_KEYBOARD_CHOICES: frozenset[str] = frozenset({"usb", "uart"})
+# HMI keyboard backends. Three choices:
+#
+#   - "auto"  (default, v0.0.13+) — start BOTH USB and UART backends if
+#     either device is present. Each backend handles its own absence
+#     gracefully (USB: 2 s reconnect loop; UART: thread exits cleanly
+#     when /dev/serial0 isn't openable). Operator can plug in either
+#     keyboard, and events from either flow through the same router.
+#     This is the plug-and-play default.
+#
+#   - "usb" — explicit single-backend: USB / TCA8418 only, UART skipped
+#     entirely. Useful when /dev/serial0 isn't reserved for keyboard
+#     input (e.g. operator wants the UART for a different peripheral
+#     like a GPS module on a non-default port).
+#
+#   - "uart" — explicit single-backend: UART only, USB skipped. Useful
+#     when running the Cardputer ADV sandwich and you specifically
+#     don't want a USB keyboard to override input.
+#
+# Pre-v0.0.13 configs default to "usb" if absent. v0.0.13+ shipped
+# configs and the dataclass default both flip to "auto".
+_HMI_KEYBOARD_CHOICES: frozenset[str] = frozenset({"auto", "usb", "uart"})
 
 # Common UART baud rates. We don't reject uncommon rates outright
 # (someone might want a custom rate for a specific keyboard) but we
@@ -129,23 +143,28 @@ class StationConfig:
 class HmiConfig:
     """HMI (human-machine interface) backend configuration.
 
-    Selects which keyboard backend the daemon uses. The two backends
-    are mutually exclusive at runtime — see ``_HMI_KEYBOARD_CHOICES``
-    for the supported values.
+    Selects which keyboard backend(s) the daemon uses. Three choices
+    via the ``keyboard`` field — see ``_HMI_KEYBOARD_CHOICES`` for
+    canonical docs.
 
-    ``"usb"`` (default) reads evdev events from
-    ``/dev/input/by-id/*-event-kbd``. Covers USB HID keyboards and
-    the CardputerZero's internal TCA8418 keypad. The ``uart_*``
-    fields are ignored in this mode.
+    ``"auto"`` (default since v0.0.13): the daemon attempts BOTH USB
+    and UART backends at startup. Each gracefully handles its own
+    absent device, so the rig is plug-and-play: connect a USB keyboard
+    OR a Cardputer ADV via UART (or both), and whichever is present
+    drives the UI. Events flow through the same router; identical
+    ``KeyEvent`` shape from either source.
 
-    ``"uart"`` reads pre-resolved key events from a Pi hardware
-    UART (default ``/dev/serial0`` @ 115200). Used when paired with
-    an M5Stack Cardputer ADV running the microjs8-cardputer-link
-    firmware via its EXT 14-pin header. See
-    ``docs/CARDPUTER_LINK.md`` for the operator setup.
+    ``"usb"``: explicit single-backend — discover only USB / TCA8418
+    keyboards. The ``uart_*`` fields are ignored.
+
+    ``"uart"``: explicit single-backend — open only the UART. Used
+    when paired with an M5Stack Cardputer ADV running the
+    microjs8-cardputer-link firmware via its EXT 14-pin header. The
+    USB discovery path is skipped entirely. See
+    ``docs/CARDPUTER_LINK.md`` for the hardware setup.
     """
 
-    keyboard: str = "usb"
+    keyboard: str = "auto"
     uart_device: str = "/dev/serial0"
     uart_baud: int = 115200
 
@@ -383,15 +402,19 @@ def _from_dict(data: dict[str, Any], source_path: Path) -> Config:
         raise ConfigError("[radio] section must be a table")
     radio_id = _validate_radio_id(radio_data.get("id", "qdx"))
 
-    # [hmi] section (v0.0.12). Defaults: keyboard="usb",
-    # uart_device="/dev/serial0", uart_baud=115200. The defaults
-    # preserve pre-v0.0.12 behavior for any config that omits the
-    # section entirely.
+    # [hmi] section (v0.0.12). Defaults: keyboard="auto" (since
+    # v0.0.13), uart_device="/dev/serial0", uart_baud=115200. The
+    # defaults are plug-and-play: both USB and UART backends are
+    # attempted, whichever has a device drives the UI. Operators
+    # who want strict single-backend behavior can set "usb" or "uart"
+    # explicitly. Pre-v0.0.13 configs that hardcoded "usb" or "uart"
+    # continue to behave identically — only the absent-section
+    # default changed.
     hmi_data = data.get("hmi", {})
     if not isinstance(hmi_data, dict):
         raise ConfigError("[hmi] section must be a table")
     hmi = HmiConfig(
-        keyboard=_validate_hmi_keyboard(hmi_data.get("keyboard", "usb")),
+        keyboard=_validate_hmi_keyboard(hmi_data.get("keyboard", "auto")),
         uart_device=_validate_uart_device(hmi_data.get("uart_device", "/dev/serial0")),
         uart_baud=_validate_uart_baud(hmi_data.get("uart_baud", 115200)),
     )

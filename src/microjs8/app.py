@@ -221,6 +221,41 @@ class MicroJS8App:
             self._restart_requested = True
             self._stop.set()
 
+    def request_poweroff(self) -> None:
+        """Request a graceful Pi power-off (v0.0.13+).
+
+        Called by the HOME EXIT button. Triggers ``systemctl_poweroff()``
+        which signals systemd to begin the system halt sequence:
+
+          1. systemd sends SIGTERM to microjs8.service (and every other
+             service). Our SIGTERM handler is ``request_stop`` which
+             sets the stop event so ``run()`` returns cleanly — audio
+             drains, SQLite commits, PTT releases, render thread joins.
+          2. systemd waits for all services to terminate (with a
+             timeout); we typically exit in well under a second.
+          3. systemd halts the kernel; the Pi powers off.
+
+        Why this is the right thing for the HOME EXIT button: in the
+        integrated Cardputer+Pi sandwich rig, "exit" from the operator's
+        point of view means "I'm done with this session". Just stopping
+        the daemon leaves the Pi running and the operator with no UI to
+        re-launch it — they'd have to SSH in or pull power. Powering off
+        the Pi matches mental model and conserves battery.
+
+        Pre-v0.0.13: the HOME EXIT button called ``request_stop`` only,
+        leaving the Pi running. v0.0.13+ wires it to this method
+        instead. Use ``request_stop`` directly (or send SIGTERM) if you
+        want to stop the daemon without powering off — e.g. from the
+        ``systemctl stop microjs8`` command, which still works as
+        before because systemd uses SIGTERM.
+        """
+        _log.warning("poweroff requested via HOME EXIT button")
+        # systemctl_poweroff() is fire-and-forget — it invokes
+        # `systemctl poweroff` via subprocess (the helper handles
+        # polkit). We don't need to set _stop ourselves; systemd will
+        # SIGTERM us shortly and request_stop fires from that.
+        systemctl_poweroff()
+
     @property
     def exit_code(self) -> int:
         """The exit code main() should use after ``run()`` returns.
@@ -327,9 +362,13 @@ class MicroJS8App:
             allcall_cq=self._allcall_cq_sync,
             # Phase 19 (v0.0.8): Exit button on HOME calls request_exit
             # which sets the stop event so run() returns cleanly.
-            # request_stop() is the same method our SIGTERM handler
-            # uses, so the exit path is identical to systemctl stop.
-            request_exit=self.request_stop,
+            # v0.0.13: request_exit now points to request_poweroff (not
+            # request_stop). The operator's HOME EXIT button now
+            # gracefully shuts down the entire Pi, not just the daemon.
+            # See request_poweroff() docstring for rationale. systemctl
+            # stop / SIGTERM paths still use request_stop directly so
+            # an admin can stop the daemon without halting the Pi.
+            request_exit=self.request_poweroff,
         )
 
         # ── Display, shutdown gesture, backlight, keyboard, GPS ──────
@@ -447,52 +486,79 @@ class MicroJS8App:
     def _start_keyboard_thread_best_effort(self, loop: asyncio.AbstractEventLoop) -> None:
         """Start the keyboard reader thread(s).
 
-        Two backends, mutually exclusive per [hmi] keyboard config:
-          - "usb" (default): discover /dev/input/by-id/*-event-kbd
-            devices and spawn one KeyboardThread per device (covers
-            USB HID keyboards AND the CardputerZero's internal
-            TCA8418 keypad — Phase 16 unified them).
-          - "uart" (v0.0.12): open the Pi hardware UART (default
-            /dev/serial0) and read pre-resolved key events from an
-            attached keyboard like the M5Stack Cardputer ADV running
-            microjs8-cardputer-link firmware. See
-            docs/CARDPUTER_LINK.md for operator setup.
+        Three modes via ``[hmi] keyboard`` config:
 
-        Failures are non-fatal — a missing keyboard logs and leaves
-        the UI input-locked rather than crashing the daemon at startup.
+          - ``"auto"`` (default since v0.0.13): start BOTH USB and
+            UART backends. Each gracefully handles its own absent
+            device. Plug in either keyboard and events flow through
+            the same router — truly plug-and-play. Both keyboards
+            simultaneously is OK too; events interleave at the
+            router. This is the default for new installs.
+
+          - ``"usb"``: only the USB / TCA8418 discovery path runs.
+            UART is skipped entirely.
+
+          - ``"uart"`` (v0.0.12): only the UART backend runs (default
+            ``/dev/serial0`` @ 115200). USB discovery is skipped.
+            Used when paired with an M5Stack Cardputer ADV running
+            microjs8-cardputer-link firmware. See
+            ``docs/CARDPUTER_LINK.md`` for operator setup.
+
+        Failures are non-fatal — a missing device logs and leaves the
+        UI input-locked (or partially input-locked) rather than
+        crashing the daemon at startup.
         """
         if self._headless:
             _log.info("running headless — keyboard thread skipped")
             return
         assert self._router is not None
 
-        # v0.0.12: [hmi] keyboard = "uart" routes to the UART backend
-        # (Cardputer ADV link). USB / TCA8418 discovery is skipped —
-        # the two backends are mutually exclusive at runtime. To switch
-        # back, edit /etc/microjs8/config.toml: [hmi] keyboard = "usb".
-        if self._config.hmi.keyboard == "uart":
-            self._start_uart_keyboard_best_effort(loop)
-            return
+        mode = self._config.hmi.keyboard
+        _log.info("keyboard backend mode: %s", mode)
 
-        # Phase 16: discover all keyboards (TCA8418 + USB) and spawn
-        # one reader thread per device. All threads marshal events
-        # through the same callback (the router), so the router sees
-        # a unified KeyEvent stream regardless of which physical
-        # keyboard produced it. Source tagging lets each thread
-        # apply the correct Fn-mapping (TCA8418 uses kernel-keymap
-        # scancodes; USB uses Ctrl+B → FN_B remap).
+        # In "auto" mode, attempt BOTH backends. Each handles its own
+        # absent-device case gracefully (USB: 2 s reconnect loop;
+        # UART: thread logs + exits if /dev/serial0 isn't openable).
+        # Explicit modes start exactly one backend.
+        if mode in ("auto", "usb"):
+            self._start_usb_keyboards_best_effort(loop)
+        if mode in ("auto", "uart"):
+            self._start_uart_keyboard_best_effort(loop)
+
+        if not self._keyboards:
+            _log.warning(
+                "no keyboard threads started — UI will be input-locked. "
+                "Plug in a USB keyboard, or verify the Cardputer-ADV "
+                "UART link is wired and /dev/serial0 is enabled."
+            )
+
+    def _start_usb_keyboards_best_effort(self, loop: asyncio.AbstractEventLoop) -> None:
+        """Discover and start USB / TCA8418 keyboard threads.
+
+        Phase 16 unified path: enumerate ``/dev/input/by-id/*-event-kbd``
+        and spawn one ``KeyboardThread`` per device. All threads marshal
+        events through the same router callback so the router sees a
+        unified ``KeyEvent`` stream regardless of which physical
+        keyboard produced it. Source tagging (``source="usb"`` or
+        ``source="tca8418"``) lets each thread apply the correct
+        Fn-mapping (TCA8418 uses kernel-keymap scancodes; USB uses
+        Ctrl+B → FN_B remap).
+
+        Refactored out of ``_start_keyboard_thread_best_effort`` in
+        v0.0.13 so the auto-mode dispatcher can call it alongside the
+        UART backend without duplicating discovery logic.
+        """
+        assert self._router is not None
         try:
             from microjs8.input.keyboard import discover_keyboards
             keyboards = discover_keyboards()
         except Exception:
-            _log.exception("keyboard discovery raised; UI will be input-locked")
-            keyboards = []
+            _log.exception("keyboard discovery raised; USB path skipped")
+            return
 
         if not keyboards:
-            _log.warning(
-                "no keyboards found at /dev/input/by-id/*-event-kbd — "
-                "UI will be input-locked. Plug in a USB keyboard or "
-                "verify the TCA8418 kernel driver is loaded."
+            _log.info(
+                "no USB / TCA8418 keyboards at /dev/input/by-id/*-event-kbd"
             )
             return
 
@@ -526,11 +592,6 @@ class MicroJS8App:
                     source, path,
                 )
 
-        if not self._keyboards:
-            _log.warning(
-                "all keyboard threads failed to start — UI will be input-locked"
-            )
-
     def _start_uart_keyboard_best_effort(self, loop: asyncio.AbstractEventLoop) -> None:
         """Start the UART keyboard reader thread (v0.0.12 Cardputer ADV link).
 
@@ -546,19 +607,21 @@ class MicroJS8App:
         ``.name`` / ``.is_alive()`` interface).
 
         Failures (pyserial missing, device not openable, ImportError)
-        log and return without raising — the daemon keeps running,
-        UI is input-locked until the operator fixes the underlying
-        cause and ``systemctl restart microjs8`` cycles it.
+        log and return without raising — the daemon keeps running.
+        In auto-mode this is expected on rigs without a Cardputer ADV
+        attached (the USB backend handles input); in explicit "uart"
+        mode it means the operator needs to fix the underlying cause
+        and ``systemctl restart microjs8``.
         """
         assert self._router is not None
         try:
             # Lazy import so hosts without pyserial can still import
             # the app module for headless / CI use. pyserial is only
-            # actually required if the operator opts into UART mode.
+            # actually required if the auto/uart path is exercised.
             from microjs8.input.uart_keyboard import UartKeyboardThread
         except ImportError:
             _log.exception(
-                "could not import UartKeyboardThread — UI will be input-locked"
+                "could not import UartKeyboardThread — UART path skipped"
             )
             return
 
@@ -588,7 +651,7 @@ class MicroJS8App:
             )
         except Exception:
             _log.exception(
-                "could not start UART keyboard thread — UI will be input-locked"
+                "could not start UART keyboard thread — UART path skipped"
             )
 
     def _start_gps_reader_best_effort(self, loop: asyncio.AbstractEventLoop) -> None:
