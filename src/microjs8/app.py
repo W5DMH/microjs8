@@ -532,6 +532,13 @@ class MicroJS8App:
             self._start_usb_keyboards_best_effort(loop)
         if mode in ("auto", "uart"):
             self._start_uart_keyboard_best_effort(loop)
+        # v0.0.16: I2C backend (M5Stack CardKB v1.1 at 0x5F by default).
+        # Same plug-and-play semantics as USB+UART -- in auto mode, the
+        # backend attempts to open /dev/i2c-<bus> and reads address 0x5F
+        # at 33 Hz. If smbus2 is missing or the bus isn't enabled, the
+        # thread logs and exits without affecting the other backends.
+        if mode in ("auto", "i2c"):
+            self._start_i2c_keyboard_best_effort(loop)
 
         if not self._keyboards:
             _log.warning(
@@ -660,6 +667,80 @@ class MicroJS8App:
         except Exception:
             _log.exception(
                 "could not start UART keyboard thread — UART path skipped"
+            )
+
+    def _start_i2c_keyboard_best_effort(self, loop: asyncio.AbstractEventLoop) -> None:
+        """Start the I2C keyboard reader thread (v0.0.16 CardKB link).
+
+        Polls a CardKB-style I2C keyboard (default M5Stack CardKB v1.1
+        at /dev/i2c-1 address 0x5F) at 33 Hz and routes events
+        through the same InputRouter the USB / UART backends use.
+        See docs/I2C_KEYBOARD.md for the hardware setup and
+        microjs8.input.i2c_keyboard for the wire-format details.
+
+        The thread is appended to ``self._keyboards`` so the existing
+        cleanup in ``_cleanup_with_grace`` stops it alongside any other
+        keyboard threads (all share the ``.stop()`` / ``.join()`` /
+        ``.name`` / ``.is_alive()`` interface).
+
+        Failures (smbus2 missing, /dev/i2c-N not openable, ImportError)
+        log and return without raising -- the daemon keeps running. In
+        auto-mode this is expected on rigs without a CardKB attached
+        (the USB / UART backends handle input); in explicit "i2c" mode
+        it means the operator needs to fix the underlying cause and
+        ``systemctl restart microjs8``.
+
+        Common failure modes (each surfaced with an actionable log):
+          - smbus2 not installed: the postinst pip-installs it on
+            fresh installs; on dev hosts run
+            ``pip install --break-system-packages smbus2``.
+          - /dev/i2c-N missing: I2C not enabled in
+            /boot/firmware/config.txt (``dtparam=i2c_arm=on``) or
+            i2c-dev not loaded (``i2c-dev`` missing from
+            /etc/modules). Postinst handles both on fresh installs.
+          - 0x5F not responding: CardKB not wired, or wired to the
+            wrong pins (must be physical pin 2 / 3 / 5 / 6 for
+            5V / SDA / SCL / GND).
+        """
+        assert self._router is not None
+        try:
+            # Lazy import so hosts without smbus2 can still import the
+            # app module for headless / CI use. smbus2 is only actually
+            # required if the auto/i2c path is exercised.
+            from microjs8.input.i2c_keyboard import I2cKeyboardThread
+        except ImportError:
+            _log.exception(
+                "could not import I2cKeyboardThread -- I2C path skipped"
+            )
+            return
+
+        bus = self._config.hmi.i2c_bus
+        address = self._config.hmi.i2c_address
+        router_handle = self._router.handle
+
+        def _on_event(event: KeyEvent) -> None:
+            # Marshal from the keyboard thread back to the asyncio
+            # event loop where the router lives. Mirrors the same
+            # call_soon_threadsafe pattern UartKeyboardThread uses
+            # (both are loop-agnostic; the App wraps here).
+            loop.call_soon_threadsafe(router_handle, event)
+
+        try:
+            kbd = I2cKeyboardThread(
+                bus=bus,
+                address=address,
+                on_event=_on_event,
+            )
+            kbd.start()
+            self._keyboards.append(kbd)
+            _log.info(
+                "i2c keyboard thread started: bus=/dev/i2c-%d "
+                "address=0x%02x",
+                bus, address,
+            )
+        except Exception:
+            _log.exception(
+                "could not start I2C keyboard thread -- I2C path skipped"
             )
 
     def _start_gps_reader_best_effort(self, loop: asyncio.AbstractEventLoop) -> None:

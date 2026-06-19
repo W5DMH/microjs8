@@ -95,7 +95,7 @@ UNCONFIGURED_CALLSIGN = "N0CALL"
 #
 # Pre-v0.0.13 configs default to "usb" if absent. v0.0.13+ shipped
 # configs and the dataclass default both flip to "auto".
-_HMI_KEYBOARD_CHOICES: frozenset[str] = frozenset({"auto", "usb", "uart"})
+_HMI_KEYBOARD_CHOICES: frozenset[str] = frozenset({"auto", "usb", "uart", "i2c"})
 
 # Common UART baud rates. We don't reject uncommon rates outright
 # (someone might want a custom rate for a specific keyboard) but we
@@ -167,6 +167,12 @@ class HmiConfig:
     keyboard: str = "auto"
     uart_device: str = "/dev/serial0"
     uart_baud: int = 115200
+    # v0.0.16: I2C keyboard backend (M5Stack CardKB v1.1 at 0x5F by
+    # default). i2c_bus selects /dev/i2c-N; i2c_address is the 7-bit
+    # device address. Both have sane defaults so most operators never
+    # touch these in config.toml.
+    i2c_bus: int = 1
+    i2c_address: int = 0x5F
 
 
 @dataclass(frozen=True)
@@ -380,6 +386,66 @@ def _validate_uart_baud(value: Any) -> int:
     return value
 
 
+def _validate_i2c_bus(value: Any) -> int:
+    """Validate the [hmi] i2c_bus number (v0.0.16).
+
+    The Pi exposes /dev/i2c-N character devices where N is the bus
+    number. /dev/i2c-1 (the default) is the standard userspace bus
+    on GPIO 2/3. /dev/i2c-2 exists on some Pi variants (Bookworm
+    Pi Zero 2W shows both bus 1 and bus 2 -- bus 2 is the ID-EEPROM
+    bus on GPIO 0/1 and is usually NOT what the operator wants).
+
+    We don't stat() /dev/i2c-N because the device may not exist at
+    config-load time (I2C not yet enabled in /boot/firmware/config.txt
+    or i2c-dev not loaded). The keyboard thread handles a missing
+    device gracefully at start.
+    """
+    # Reject bool first since bool is a subclass of int.
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ConfigError(
+            f"[hmi] i2c_bus must be an integer, "
+            f"got {type(value).__name__}"
+        )
+    if value < 0:
+        raise ConfigError(
+            f"[hmi] i2c_bus must be non-negative, got {value}"
+        )
+    if value > 99:
+        # Sanity ceiling -- no real system has dozens of I2C buses.
+        # Likely a typo; reject rather than silently misopen.
+        raise ConfigError(
+            f"[hmi] i2c_bus={value} is implausible; expected 0-99"
+        )
+    return value
+
+
+def _validate_i2c_address(value: Any) -> int:
+    """Validate the [hmi] i2c_address (v0.0.16).
+
+    Must be a 7-bit I2C address (0x00-0x7F). The reserved ranges
+    (0x00-0x07 and 0x78-0x7F) are flagged as suspicious but not
+    rejected outright -- some odd devices live in those ranges and
+    we don't want to second-guess operators who actually have one.
+    """
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ConfigError(
+            f"[hmi] i2c_address must be an integer, "
+            f"got {type(value).__name__}"
+        )
+    if value < 0x00 or value > 0x7F:
+        raise ConfigError(
+            f"[hmi] i2c_address must be in range 0x00-0x7F "
+            f"(7-bit I2C address), got 0x{value:02X}"
+        )
+    if 0x00 <= value <= 0x07 or 0x78 <= value <= 0x7F:
+        _log.warning(
+            "[hmi] i2c_address=0x%02X is in a reserved I2C range; "
+            "this is unusual -- M5Stack CardKB v1.1 default is 0x5F",
+            value,
+        )
+    return value
+
+
 def _from_dict(data: dict[str, Any], source_path: Path) -> Config:
     """Build a Config from a parsed TOML dict, validating each field."""
     station_data = data.get("station", {})
@@ -417,6 +483,8 @@ def _from_dict(data: dict[str, Any], source_path: Path) -> Config:
         keyboard=_validate_hmi_keyboard(hmi_data.get("keyboard", "auto")),
         uart_device=_validate_uart_device(hmi_data.get("uart_device", "/dev/serial0")),
         uart_baud=_validate_uart_baud(hmi_data.get("uart_baud", 115200)),
+        i2c_bus=_validate_i2c_bus(hmi_data.get("i2c_bus", 1)),
+        i2c_address=_validate_i2c_address(hmi_data.get("i2c_address", 0x5F)),
     )
 
     return Config(
@@ -580,6 +648,8 @@ def save_atomic(
         keyboard=_validate_hmi_keyboard(hmi.keyboard),
         uart_device=_validate_uart_device(hmi.uart_device),
         uart_baud=_validate_uart_baud(hmi.uart_baud),
+        i2c_bus=_validate_i2c_bus(hmi.i2c_bus),
+        i2c_address=_validate_i2c_address(hmi.i2c_address),
     )
 
     live = paths.config_path()
@@ -605,6 +675,8 @@ def save_atomic(
             f'keyboard = "{hmi.keyboard}"\n'
             f'uart_device = "{hmi.uart_device}"\n'
             f"uart_baud = {hmi.uart_baud}\n"
+            f"i2c_bus = {hmi.i2c_bus}\n"
+            f"i2c_address = 0x{hmi.i2c_address:02X}\n"
         )
 
     body = (

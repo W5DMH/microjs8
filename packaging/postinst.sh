@@ -227,6 +227,118 @@ WRAPEOF
         done
 
 
+        # -- 7.4b. I2C bus auto-enable (v0.0.16) ---------------------
+        # The v0.0.16 I2C keyboard backend (M5Stack CardKB at 0x5F)
+        # needs /dev/i2c-1 which only appears when both:
+        #   (a) ``dtparam=i2c_arm=on`` is set in the Pi's boot config
+        #   (b) ``i2c-dev`` kernel module is loaded
+        # On a fresh Bookworm Lite install neither is true by default,
+        # so v0.0.15 .deb installs would produce a working USB / UART
+        # keyboard path but the CardKB would never enumerate -- the
+        # operator would discover this only after wiring up the keyboard
+        # and seeing nothing at /dev/i2c-1.
+        #
+        # We detect both gaps at install time and fix them. The
+        # dtparam change requires a reboot to take effect (kernel
+        # rereads device-tree overlays at boot only). The i2c-dev
+        # change in /etc/modules also takes effect at next boot, but
+        # we also modprobe it immediately so a "service restart"
+        # without a full reboot works on already-up systems.
+        #
+        # We only touch the boot config when:
+        #   (a) the file is writable (we're on a Pi)
+        #   (b) I2C isn't already enabled
+        #   (c) the operator hasn't EXPLICITLY commented it out
+        #       (``#dtparam=i2c_arm=on`` -- they made a decision)
+        for cfg in /boot/firmware/config.txt /boot/config.txt; do
+            if [ ! -w "$cfg" ]; then
+                continue
+            fi
+            if grep -qE '^[[:space:]]*dtparam=i2c_arm=on' "$cfg"; then
+                # Already enabled -- nothing to do for this file.
+                continue
+            fi
+            if grep -qE '^[[:space:]]*#[[:space:]]*dtparam=i2c_arm=on' "$cfg"; then
+                # Operator explicitly disabled it via comment -- leave alone.
+                echo "microjs8: I2C is commented out in $cfg; leaving as-is (operator preference)"
+                continue
+            fi
+            # Append the line. Same pattern as the SPI block above.
+            ts="$(date +%Y%m%d-%H%M%S)"
+            cp "$cfg" "${cfg}.pre-microjs8-${ts}"
+            if grep -q '^\[all\]' "$cfg"; then
+                # Insert just after [all] so it applies to all Pi models.
+                awk '/^\[all\]/{print; print "dtparam=i2c_arm=on  # added by microjs8 (v0.0.16) for CardKB"; next}1' \
+                    "$cfg" > "${cfg}.tmp" && mv "${cfg}.tmp" "$cfg"
+            else
+                echo "" >> "$cfg"
+                echo "# Added by microjs8 (v0.0.16) -- required for the I2C keyboard backend." >> "$cfg"
+                echo "dtparam=i2c_arm=on" >> "$cfg"
+            fi
+            echo "microjs8: enabled I2C in $cfg (backup: ${cfg}.pre-microjs8-${ts}) -- REBOOT REQUIRED for /dev/i2c-1"
+            break
+        done
+
+        # Add i2c-dev to /etc/modules so it auto-loads on every boot.
+        # The kernel module i2c_bcm2835 (which we already have) is the
+        # hardware controller; i2c-dev is the userspace interface that
+        # creates /dev/i2c-1 as a character device. Without it, even
+        # with the dtparam enabled, the bus is invisible to userspace.
+        if [ -w /etc/modules ]; then
+            if ! grep -qE '^[[:space:]]*i2c-dev[[:space:]]*$' /etc/modules; then
+                echo "i2c-dev" >> /etc/modules
+                echo "microjs8: added i2c-dev to /etc/modules"
+            fi
+            # Also load now so a restart without reboot works on
+            # already-up systems where dtparam was previously enabled.
+            modprobe i2c-dev 2>/dev/null || true
+        fi
+
+        # -- 7.4c. smbus2 pip install (v0.0.16) ----------------------
+        # smbus2 is the Python library the I2C backend uses. Bookworm
+        # may ship python3-smbus2 in some repos but it's not reliably
+        # available, so we pip-install the same way we handle
+        # sounddevice above. --break-system-packages is required by
+        # Bookworm's PEP 668 protection -- we ARE the system package.
+        # Same 3-retry + verify pattern as sounddevice for resilience
+        # against the May 2026 pip-TLS-during-apt-install issue.
+        if ! python3 -c "import smbus2" >/dev/null 2>&1; then
+            echo "microjs8: pip-installing smbus2 (Python I2C library)..."
+            installed=0
+            for attempt in 1 2 3; do
+                if pip install --quiet --break-system-packages smbus2 2>/dev/null; then
+                    if python3 -c "import smbus2" >/dev/null 2>&1; then
+                        echo "microjs8: smbus2 installed and import verified"
+                        installed=1
+                        break
+                    fi
+                fi
+                if [ "$attempt" -lt 3 ]; then
+                    echo "microjs8: smbus2 install attempt ${attempt} failed; retrying in $((attempt * 2))s..."
+                    sleep $((attempt * 2))
+                fi
+            done
+            if [ "$installed" = "0" ]; then
+                echo "" >&2
+                echo "  ============================================================" >&2
+                echo "  microjs8: WARNING -- smbus2 install FAILED after 3 retries" >&2
+                echo "  ============================================================" >&2
+                echo "  The microjs8 daemon's I2C keyboard backend (CardKB) WILL" >&2
+                echo "  NOT WORK until you run:" >&2
+                echo "" >&2
+                echo "    sudo pip install --break-system-packages smbus2" >&2
+                echo "" >&2
+                echo "  Then restart the daemon:" >&2
+                echo "    sudo systemctl restart microjs8.service" >&2
+                echo "" >&2
+                echo "  USB and UART keyboards continue to work without this." >&2
+                echo "  ============================================================" >&2
+                echo "" >&2
+                # Don't fail the install -- USB / UART paths still work
+                # and the operator can complete the smbus2 install later.
+            fi
+        fi
+
         # ── 7.5. gpsd configuration (Phase 18.3) ────────────────────
         # If gpsd is installed (it's in Recommends, so usually is),
         # ensure it's NOT configured to auto-grab USB serial devices.
