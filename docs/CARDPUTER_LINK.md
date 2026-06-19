@@ -144,8 +144,25 @@ groups | tr ' ' '\n' | grep dialout    # microjs8 user already added by postinst
 
 ### 3. Switch the HMI config
 
-Edit `/etc/microjs8/config.toml` and add (or update) the `[hmi]`
+Important: there are TWO config files. Make sure you edit the right one.
+
+| Path | Role | Edit it? |
+|---|---|---|
+| `/etc/microjs8/config.toml` | Shipped default — copied to the live config on first install only; never re-read after that | NO |
+| `/var/lib/microjs8/config.toml` | Live config — what the daemon actually reads at every restart | **YES** |
+
+If you edit the file in `/etc/`, the daemon won't see your changes — it
+already populated `/var/lib/microjs8/config.toml` from the default on
+first install. From then on the live file is what matters.
+
+Edit the LIVE config and add (or update) the `[hmi]`
 section:
+
+```bash
+sudo nano /var/lib/microjs8/config.toml
+```
+
+Add:
 
 ```toml
 [hmi]
@@ -155,6 +172,10 @@ uart_baud = 115200
 ```
 
 Defaults if you omit fields: `device="/dev/serial0"`, `baud=115200`.
+
+Tip: in v0.0.13+ the default is `keyboard = "auto"` (plug-and-play
+between USB and UART). You only need an explicit `"uart"` here if
+you specifically want to suppress the USB discovery path.
 
 ### 4. Start MicroJS8
 
@@ -220,7 +241,7 @@ With a 10000 mAh USB-C bank, expect 30+ hours continuous.
 1. Confirm the Pi UART path: `sudo systemctl stop microjs8.service; cat /dev/serial0` and type on Cardputer. If chars appear → daemon-side issue (skip to next section). If nothing appears → wiring or firmware issue (see [microjs8-cardputer-link README](https://github.com/W5DMH/microjs8-cardputer-link)).
 2. Confirm `/dev/serial0` exists: `ls -la /dev/serial0` (must symlink to ttyAMA0).
 3. Confirm the microjs8 user is in `dialout`: `groups microjs8` (should list dialout).
-4. Confirm `[hmi] keyboard = "uart"` in `/etc/microjs8/config.toml`.
+4. Confirm `[hmi] keyboard = "uart"` in `/var/lib/microjs8/config.toml` (the LIVE config — not `/etc/microjs8/config.toml`, that's the shipped default).
 
 **`pyserial not installed` in the journal**
 
@@ -247,7 +268,7 @@ load is around 0.5-1% / minute.
 
 **Want to switch back to USB keyboard**
 
-Just edit `/etc/microjs8/config.toml`:
+Just edit `/var/lib/microjs8/config.toml` (the LIVE config):
 
 ```toml
 [hmi]

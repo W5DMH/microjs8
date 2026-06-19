@@ -1,37 +1,52 @@
-// MicroJS8 — power-off / reboot polkit rule
-// =========================================
-//
-// systemd-logind requires polkit authorization for shutdown and reboot.
-// The microjs8 service user is non-interactive (no console session, no
-// D-Bus user session), so the default "auth_admin_keep" rule rejects
-// it with "Interactive authentication required."
-//
-// This rule allows the `microjs8` user (and only that user) to invoke
-// the standard logind power actions without being prompted. The MicroJS8
-// daemon only fires these in response to the operator pressing both
-// TFT buttons for the full 5-second countdown — i.e. an explicit,
-// physical, deliberate gesture — so granting the daemon this authority
-// matches the operator's intent.
-//
-// Actions covered:
-//   org.freedesktop.login1.power-off                  — `systemctl poweroff`
-//   org.freedesktop.login1.power-off-multiple-sessions — same, with other users logged in
-//   org.freedesktop.login1.reboot                      — `systemctl reboot`
-//   org.freedesktop.login1.reboot-multiple-sessions    — same, multi-user
-//
-// Installation: place at /etc/polkit-1/rules.d/50-microjs8-poweroff.rules.
-// File MUST end in .rules, MUST be in /etc/polkit-1/rules.d/, and MUST
-// be owned root:root with 0644 permissions.
-
+/*
+ * /etc/polkit-1/rules.d/50-microjs8-poweroff.rules
+ *
+ * Authorize the microjs8 systemd service user to invoke
+ * systemctl poweroff / reboot / halt, including with --ignore-inhibitors.
+ *
+ * Background: the microjs8 service runs as the 'microjs8' system user
+ * (created in postinst). When the operator presses the HOME EXIT
+ * button, the daemon calls request_poweroff() which schedules
+ * systemctl_poweroff() (from microjs8.input.shutdown_gesture). That
+ * helper invokes:
+ *
+ *   systemctl poweroff --ignore-inhibitors
+ *
+ * The --ignore-inhibitors flag overrides session inhibitor locks
+ * (e.g. an SSH session left open during development). systemd-logind
+ * consults polkit for the appropriate action:
+ *
+ *   - power-off                for the basic shutdown request
+ *   - power-off-ignore-inhibit when --ignore-inhibitors is set
+ *
+ * Without this rule, polkit denies both actions because the microjs8
+ * user is not running in an active interactive session. The reboot
+ * and halt variants are included for the Fn+Q gesture path which can
+ * also invoke them depending on operator configuration.
+ *
+ * History:
+ *   v0.0.13 - introduced as a manual install step in
+ *             docs/CARDPUTER_LINK.md.
+ *   v0.0.14 - confirmed --ignore-inhibitors path requires the
+ *             additional power-off-ignore-inhibit polkit action.
+ *   v0.0.15 - shipped automatically by the .deb (this file lives
+ *             at /etc/polkit-1/rules.d/ after install). Operators
+ *             who previously placed this file by hand can safely
+ *             leave it where it was; dpkg will overwrite with this
+ *             canonical content on the next package install.
+ */
 polkit.addRule(function(action, subject) {
-    if (subject.user !== "microjs8") {
-        return polkit.Result.NOT_HANDLED;
-    }
-    if (action.id === "org.freedesktop.login1.power-off" ||
+    if (subject.user === "microjs8" && (
+        action.id === "org.freedesktop.login1.power-off" ||
         action.id === "org.freedesktop.login1.power-off-multiple-sessions" ||
+        action.id === "org.freedesktop.login1.power-off-ignore-inhibit" ||
         action.id === "org.freedesktop.login1.reboot" ||
-        action.id === "org.freedesktop.login1.reboot-multiple-sessions") {
+        action.id === "org.freedesktop.login1.reboot-multiple-sessions" ||
+        action.id === "org.freedesktop.login1.reboot-ignore-inhibit" ||
+        action.id === "org.freedesktop.login1.halt" ||
+        action.id === "org.freedesktop.login1.halt-multiple-sessions" ||
+        action.id === "org.freedesktop.login1.halt-ignore-inhibit"
+    )) {
         return polkit.Result.YES;
     }
-    return polkit.Result.NOT_HANDLED;
 });

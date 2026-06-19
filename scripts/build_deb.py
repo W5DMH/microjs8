@@ -61,9 +61,12 @@ APP_PATH = f"{INSTALL_PREFIX}/applications"
 SERVICE_PATH = "lib/systemd/system"
 ETC_PATH = "etc/microjs8"
 
-# Phase 18.3 — additional install paths for udev rules, rigctld helpers,
+# Phase 18.3 - additional install paths for udev rules, rigctld helpers,
 # and the gfsk8 binary extension.
 UDEV_RULES_PATH = "lib/udev/rules.d"
+# v0.0.15 - polkit rule install path so the microjs8 user can invoke
+# systemctl poweroff/reboot/halt without an interactive session.
+POLKIT_RULES_PATH = "etc/polkit-1/rules.d"
 LOCAL_BIN_PATH = "usr/local/bin"
 # Where the system python looks for native extensions on Bookworm.
 # Matches the path used by Debian's python3-* packages.
@@ -358,6 +361,33 @@ def build_deb(
             "no udev rule at %s — install will not auto-create "
             "/dev/digirig (operators must install it manually)",
             udev_src,
+        )
+
+    # -- 6.5b. polkit rule for systemctl_poweroff (v0.0.15) ----------
+    # Authorizes the microjs8 user to invoke systemctl poweroff
+    # --ignore-inhibitors via logind. Without this rule, the HOME EXIT
+    # button (which calls request_poweroff -> systemctl_poweroff) is
+    # silently denied by polkit because the microjs8 systemd service
+    # user is not running in an active interactive session, so the
+    # default allow-active rule does not apply.
+    #
+    # Pre-v0.0.15 the rule was a manual operator install per the
+    # docs/CARDPUTER_LINK.md procedure. Shipping it inside the .deb
+    # makes a fresh apt install produce a working EXIT button with
+    # zero manual steps. polkitd watches /etc/polkit-1/rules.d/ via
+    # inotify so the rule takes effect at install time; postinst
+    # also issues a defensive reload as belt-and-suspenders.
+    polkit_src = root / "polkit" / "50-microjs8-poweroff.rules"
+    if polkit_src.exists():
+        polkit_dst = staging / POLKIT_RULES_PATH / "50-microjs8-poweroff.rules"
+        write_with_mode(polkit_dst, polkit_src.read_text(), 0o644)
+        _log.info("installed polkit rule: %s", polkit_dst)
+    else:
+        _log.warning(
+            "no polkit rule at %s -- install will not authorize the "
+            "daemon to call systemctl poweroff; HOME EXIT button will "
+            "silently fail until the rule is installed manually",
+            polkit_src,
         )
 
     # ── 6.6. rigctld.service + launcher (Phase 18.3) ────────────────
