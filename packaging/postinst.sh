@@ -339,6 +339,87 @@ WRAPEOF
             fi
         fi
 
+        # -- 7.4d. uConsole detection + graphical target switch (v0.0.17) -----
+        # The v0.0.17 uConsole display backend writes directly to
+        # /dev/fb0. On the uConsole's standard ClockworkOS install
+        # (and on bare RPi OS with raspi-config defaults) the system
+        # boots into graphical.target, where X11 owns the framebuffer
+        # and our writes compete with the desktop -- producing flicker
+        # at best, blank screen at worst.
+        #
+        # On uConsole installs we switch the default systemd target
+        # to multi-user.target. The microjs8 daemon (via APPLaunch
+        # tile or systemctl start) then owns the framebuffer cleanly.
+        #
+        # We detect uConsole by the framebuffer signature:
+        #   /sys/class/graphics/fb0/name         == "vc4drmfb"
+        #   /sys/class/graphics/fb0/virtual_size == "720,1280"
+        #   /sys/class/graphics/fb0/bits_per_pixel == "16"
+        #
+        # The same signature check is duplicated in
+        # microjs8.ui.display_uconsole.is_uconsole_present(). Keep
+        # the two in sync if you ever extend the criteria.
+        #
+        # We only switch the target when:
+        #   (a) the uConsole signature matches
+        #   (b) the current default IS graphical.target (we don't
+        #       gratuitously rewrite if the operator has already
+        #       switched to multi-user.target manually)
+        #
+        # The change takes effect at next reboot. We log a clear
+        # notice telling the operator what happened and how to revert.
+
+        is_uconsole=0
+        if [ -r /sys/class/graphics/fb0/name ] \
+           && [ -r /sys/class/graphics/fb0/virtual_size ] \
+           && [ -r /sys/class/graphics/fb0/bits_per_pixel ]; then
+            fb_name="$(cat /sys/class/graphics/fb0/name 2>/dev/null)"
+            fb_vsize="$(cat /sys/class/graphics/fb0/virtual_size 2>/dev/null)"
+            fb_bpp="$(cat /sys/class/graphics/fb0/bits_per_pixel 2>/dev/null)"
+            if [ "$fb_name" = "vc4drmfb" ] \
+               && [ "$fb_vsize" = "720,1280" ] \
+               && [ "$fb_bpp" = "16" ]; then
+                is_uconsole=1
+            fi
+        fi
+
+        if [ "$is_uconsole" = "1" ]; then
+            echo "microjs8: detected uConsole-style framebuffer signature"
+            echo "  (vc4drmfb 720x1280 16bpp). The v0.0.17+ uConsole"
+            echo "  display backend will be used."
+
+            if [ -d /run/systemd/system ]; then
+                current_target="$(systemctl get-default 2>/dev/null || echo "unknown")"
+                if [ "$current_target" = "graphical.target" ]; then
+                    systemctl set-default multi-user.target >/dev/null 2>&1 || true
+                    echo ""
+                    echo "  ============================================================"
+                    echo "  microjs8: switched default systemd target"
+                    echo "  ============================================================"
+                    echo "  Was:  graphical.target  (X11 / desktop boots automatically)"
+                    echo "  Now:  multi-user.target (text console; MicroJS8 owns the FB)"
+                    echo ""
+                    echo "  This change takes effect at next reboot. The MicroJS8 UI"
+                    echo "  will then render natively on the uConsole's 5\" panel."
+                    echo ""
+                    echo "  To revert (restore the desktop environment):"
+                    echo "    sudo systemctl set-default graphical.target"
+                    echo "    sudo reboot"
+                    echo ""
+                    echo "  REBOOT REQUIRED for the change to take effect."
+                    echo "  ============================================================"
+                    echo ""
+                elif [ "$current_target" = "multi-user.target" ]; then
+                    echo "  Default systemd target is already multi-user.target;"
+                    echo "  no change needed."
+                else
+                    echo "  Default systemd target is '$current_target' (not graphical);"
+                    echo "  leaving as-is. If MicroJS8 doesn't render on the panel,"
+                    echo "  consider 'sudo systemctl set-default multi-user.target'."
+                fi
+            fi
+        fi
+
         # ── 7.5. gpsd configuration (Phase 18.3) ────────────────────
         # If gpsd is installed (it's in Recommends, so usually is),
         # ensure it's NOT configured to auto-grab USB serial devices.

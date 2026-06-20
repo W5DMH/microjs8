@@ -434,27 +434,75 @@ def open_display(
     """Discover and open the best available display backend.
 
     Phase 18: tries the kernel framebuffer first (CardputerZero
-    behaviour — preserves the existing path) and falls back to the
+    behaviour -- preserves the existing path) and falls back to the
     userspace SPI driver if the framebuffer isn't present.
 
+    v0.0.17 (this version): inserts a uConsole detection branch
+    BEFORE the CardputerZero fbdev path. The uConsole presents a
+    distinctive framebuffer signature (vc4drmfb name, 720x1280
+    geometry, 16 bpp) which is checked non-destructively before
+    any fd is opened. If detected, dispatch goes to
+    ``UConsoleFramebufferDevice``; otherwise the existing
+    Phase 18 logic runs unchanged.
+
     Discovery order:
-      1. fbdev named ``fb_st7789v`` in /proc/fb  →  ``DisplayDevice``
-      2. spidev node at /dev/spidev0.0           →  ``SpiDisplayDevice``
-      3. nothing usable                          →  raise RuntimeError
+      1. uConsole signature in /proc/fb           ->  UConsoleFramebufferDevice
+      2. fbdev named ``fb_st7789v`` in /proc/fb   ->  DisplayDevice (CardputerZero)
+      3. spidev node at /dev/spidev0.0            ->  SpiDisplayDevice (Waveshare)
+      4. nothing usable                           ->  raise RuntimeError
 
-    Either returned object exposes the ``show(image) → None`` and
-    ``close() → None`` interface that ``RenderThread`` uses, so the
-    caller can be backend-agnostic.
+    All returned objects expose the same ``show(image) -> None`` and
+    ``close() -> None`` interface, so RenderThread is backend-agnostic.
 
-    The reason we ALWAYS try fbdev first — even on a bare Pi where we
-    "know" it'll fail — is that the operator may have wired up an
-    alternative kernel framebuffer driver (newer panel-mipi-dbi-spi,
-    or a custom .dtbo), and we don't want to silently bypass it.
-    A failing fbdev probe is cheap (~1 ms reading /proc/fb).
+    Each probe is cheap (~1 ms per sysfs/proc read), so we always try
+    every detection path even if we "know" one will fail -- this lets
+    operators wire up alternative framebuffer drivers or custom DTBOs
+    without us silently bypassing them.
     """
-    # Try fbdev first. RuntimeError if name not in /proc/fb; OSError
-    # if open(2) or mmap(2) fails. Either way, log at INFO and try
-    # the SPI fallback — neither is fatal at this point.
+    # v0.0.17: uConsole detection. Lazy import keeps the existing
+    # CardputerZero/Waveshare hot paths free of the new module unless
+    # we're actually on a uConsole.
+    try:
+        from microjs8.ui.display_uconsole import (
+            UConsoleFramebufferDevice,
+            is_uconsole_present,
+        )
+        if is_uconsole_present(proc_fb=proc_fb, sysfs_root=sysfs_root):
+            try:
+                device = UConsoleFramebufferDevice.open(
+                    proc_fb=proc_fb, sysfs_root=sysfs_root,
+                )
+                _log.info(
+                    "open_display: uConsole signature detected, "
+                    "using UConsoleFramebufferDevice (fb%d %s)",
+                    device.info.index, device.info.name,
+                )
+                return device
+            except (RuntimeError, OSError, ValueError) as exc:
+                # Detection said yes but open failed -- log and
+                # fall through to the next backend. Most likely cause
+                # is a partial bring-up (KMS driver loaded but not
+                # finished probing); the existing fallbacks handle
+                # the case where the panel just isn't there.
+                _log.warning(
+                    "open_display: uConsole signature matched but "
+                    "open failed (%s); falling through to next backend",
+                    exc,
+                )
+    except ImportError as exc:
+        # display_uconsole import failed -- treat as if uConsole isn't
+        # supported on this install. Should never happen post-install,
+        # but defensive for dev environments where the new module
+        # might be absent (e.g. partial sync).
+        _log.debug(
+            "open_display: uConsole backend module not importable "
+            "(%s); skipping uConsole detection",
+            exc,
+        )
+
+    # Try CardputerZero fbdev. RuntimeError if name not in /proc/fb;
+    # OSError if open(2) or mmap(2) fails. Either way, log at INFO
+    # and try the SPI fallback -- neither is fatal at this point.
     try:
         device = DisplayDevice.open(
             name=fb_name, proc_fb=proc_fb, sysfs_root=sysfs_root,
@@ -477,7 +525,8 @@ def open_display(
             f"open_display: no kernel framebuffer named {fb_name!r} AND "
             f"no SPI device at {spi_device_path}. Either:\n"
             f"  - install the fbtft kernel driver and add an overlay (CardputerZero), OR\n"
-            f"  - enable SPI via `sudo microjs8-enable-display` and wire the panel."
+            f"  - enable SPI via `sudo microjs8-enable-display` and wire the panel, OR\n"
+            f"  - boot on a uConsole CM4 with KMS-DRM enabled."
         )
 
     from microjs8.ui.display_spi import SpiDisplayDevice
