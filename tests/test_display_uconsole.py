@@ -232,8 +232,10 @@ class TestShowPipeline:
     def test_rotation_direction_is_documented(self) -> None:
         # Pin the rotation direction so a future "fix" to PIL's
         # rotate semantics doesn't silently flip the panel.
-        # 90 degrees = CCW (per PIL convention).
-        assert ROTATION_DEGREES == 90
+        # v0.0.18: -90 (CW) is the hardware-verified value, replacing
+        # the v0.0.17 default of +90 (CCW) which rendered upside-down
+        # on the real uConsole panel mount orientation.
+        assert ROTATION_DEGREES == -90
 
 
 # -- Lifecycle --------------------------------------------------------

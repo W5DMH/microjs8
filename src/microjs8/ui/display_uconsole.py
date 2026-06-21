@@ -109,16 +109,16 @@ _OFFSET_Y = (UCONSOLE_PANEL_HEIGHT - _SCALED_H) // 2     # 0
 # framebuffer); the operator holds the device with the keyboard at
 # the bottom, viewing it in landscape (long axis horizontal).
 #
-# Empirically determined on PI-2W-TEST sister bring-up: rotate +90
-# (CCW) puts the operator's "top" of the MicroJS8 UI at the panel's
-# left edge, which appears as the top of the user-visible landscape
-# view when held normally.
+# v0.0.18: changed from +90 (CCW) to -90 (CW) based on hardware
+# verification on a real uConsole CM4 (W5DMH, 2026-06-20). The
+# v0.0.17 default of +90 rendered the UI upside-down on the actual
+# panel mount orientation; -90 produces the correct right-side-up
+# view when the device is held normally (keyboard at the bottom).
 #
-# If a future uConsole variant has the panel mounted with reversed
-# orientation, change ROTATION_DEGREES to -90 (CW). The rest of the
-# math is symmetric.
+# If a future uConsole variant has a different panel mount, this
+# constant is the single point of change.
 
-ROTATION_DEGREES = 90
+ROTATION_DEGREES = -90
 
 
 # -- The device class -------------------------------------------------

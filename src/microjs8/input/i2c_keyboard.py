@@ -228,6 +228,39 @@ class I2cKeyboardThread(threading.Thread):
             )
             return
 
+        # v0.0.18: probe for device presence with a single read before
+        # entering the poll loop. The CardKB returns 0x00 when idle so
+        # a successful read confirms the device is on the bus. If the
+        # read raises (no device at the address, no ack), log once at
+        # INFO and exit cleanly -- on hosts running auto-mode without
+        # a CardKB attached (e.g. uConsole with only the built-in USB
+        # keyboard), this avoids the per-poll OSError flood that the
+        # v0.0.16/v0.0.17 implementation produced (33 Hz tracebacks in
+        # the journal indefinitely).
+        #
+        # We do not retry the probe: if the bus is up but nothing
+        # answers at 0x5F at startup, plugging a CardKB in later still
+        # works because the operator can restart microjs8 to re-probe.
+        # The alternative (keep retrying forever) was the v0.0.17
+        # behavior and was the source of the journal flood.
+        try:
+            self._bus.read_byte(self._address)
+        except Exception as exc:
+            _log.info(
+                "i2c_keyboard: no device responds at 0x%02x on "
+                "/dev/i2c-%d (%s); i2c keyboard backend disabled. "
+                "USB and UART keyboard backends remain active. "
+                "Restart microjs8 after plugging in a CardKB to "
+                "re-enable.",
+                self._address, self._bus_num, exc,
+            )
+            try:
+                self._bus.close()
+            except Exception:
+                pass
+            self._bus = None
+            return
+
         _log.info(
             "i2c keyboard thread started: bus=/dev/i2c-%d "
             "address=0x%02x poll=%dms",

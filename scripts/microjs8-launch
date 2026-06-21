@@ -1,0 +1,358 @@
+#!/bin/bash
+#
+# microjs8-launch -- run MicroJS8 from the uConsole desktop or SSH
+#
+# v4 (2026-06-21): systemd-run detach.
+#
+#   v3 used setsid + exec to detach from LXTerminal. That didn't
+#   reliably break the controlling-terminal link -- when lightdm
+#   stopped, SIGHUP propagated to the detached child anyway,
+#   firing the cleanup trap twice and never reaching the
+#   microjs8 start step.
+#
+#   v4 uses systemd-run --scope (no, --unit -- transient service)
+#   to spawn the actual work in a brand-new systemd-managed unit.
+#   systemd handles session, process group, terminal independence,
+#   stdio redirection, and signal isolation natively. The
+#   foreground process exits immediately after the systemd unit
+#   is queued, so killing LXTerminal can't propagate anywhere.
+#
+# Workflow (field use):
+#   1. Boot into desktop normally
+#   2. Open LXTerminal
+#   3. Type: sudo microjs8-launch
+#   4. Press Enter
+#   5. Foreground process exits in ~1 sec; LXTerminal returns to prompt
+#      (operator can close it or leave it)
+#   6. Within ~3 seconds: desktop disappears, MicroJS8 UI on panel
+#   7. Operate JS8
+#   8. Press HOME EXIT -> uConsole powers off
+#   9. Next boot: desktop returns
+#
+# Workflow (SSH debug):
+#   1. SSH to uConsole
+#   2. sudo microjs8-launch --foreground
+#      (--foreground keeps the script attached so SSH session
+#       sees output and Ctrl+C still works for recovery)
+#   3. Same as above; Ctrl+C in SSH restarts the desktop cleanly.
+#
+#   Without --foreground over SSH: same detach behavior as desktop.
+#   The SSH session prompt returns immediately; the work happens
+#   in the systemd transient unit. Recovery via:
+#     sudo systemctl stop microjs8-runtime.service
+#     sudo systemctl start lightdm
+#
+# Logs:
+#   /var/log/microjs8/launch.log         -- launcher script output
+#   journalctl -u microjs8-runtime       -- systemd unit (detached path)
+#   journalctl -u microjs8               -- daemon itself
+#
+# uConsole-only.
+#
+# Author: W5DMH (microjs8 v0.0.17 era; will ship in v0.0.18+).
+# License: GPL-3.0.
+
+set -euo pipefail
+
+LOG_PREFIX="microjs8-launch:"
+DM_UNIT="lightdm.service"
+MICROJS8_UNIT="microjs8.service"
+RUNTIME_UNIT="microjs8-runtime"  # transient unit name
+TEXT_VT="1"
+X11_VT="7"
+POLL_INTERVAL_S=1
+
+LOG_DIR="/var/log/microjs8"
+LOG_FILE="$LOG_DIR/launch.log"
+
+log()  {
+    local msg="${LOG_PREFIX} $*"
+    echo "$msg"
+    echo "$(date '+%Y-%m-%d %H:%M:%S') $msg" >> "$LOG_FILE" 2>/dev/null || true
+}
+warn() {
+    local msg="${LOG_PREFIX} WARNING: $*"
+    echo "$msg" >&2
+    echo "$(date '+%Y-%m-%d %H:%M:%S') $msg" >> "$LOG_FILE" 2>/dev/null || true
+}
+err()  {
+    local msg="${LOG_PREFIX} ERROR: $*"
+    echo "$msg" >&2
+    echo "$(date '+%Y-%m-%d %H:%M:%S') $msg" >> "$LOG_FILE" 2>/dev/null || true
+}
+
+ensure_log_dir() {
+    if [ -d "$LOG_DIR" ]; then
+        return 0
+    fi
+    if [ "$(id -u)" -eq 0 ]; then
+        mkdir -p "$LOG_DIR" 2>/dev/null || true
+        chmod 0755 "$LOG_DIR" 2>/dev/null || true
+    fi
+}
+
+# -- 1. Hardware sanity check -----------------------------------------
+check_uconsole_signature() {
+    if [ ! -r /sys/class/graphics/fb0/name ] \
+       || [ ! -r /sys/class/graphics/fb0/virtual_size ] \
+       || [ ! -r /sys/class/graphics/fb0/bits_per_pixel ]; then
+        err "no readable framebuffer at /sys/class/graphics/fb0"
+        err "this launcher is uConsole-specific and refuses to run."
+        err "for non-uConsole rigs use: sudo systemctl start microjs8"
+        return 1
+    fi
+    local fb_name fb_vsize fb_bpp
+    fb_name=$(cat /sys/class/graphics/fb0/name)
+    fb_vsize=$(cat /sys/class/graphics/fb0/virtual_size)
+    fb_bpp=$(cat /sys/class/graphics/fb0/bits_per_pixel)
+    if [ "$fb_name" != "vc4drmfb" ] \
+       || [ "$fb_vsize" != "720,1280" ] \
+       || [ "$fb_bpp" != "16" ]; then
+        err "framebuffer signature does not match uConsole CM4:"
+        err "  fb0/name           = '$fb_name'"
+        err "  fb0/virtual_size   = '$fb_vsize'"
+        err "  fb0/bits_per_pixel = '$fb_bpp'"
+        err "(expected: vc4drmfb / 720,1280 / 16)"
+        return 1
+    fi
+    return 0
+}
+
+# -- 2. Privilege check -----------------------------------------------
+check_privileges() {
+    if [ "$(id -u)" -eq 0 ]; then
+        return 0
+    fi
+    if ! command -v sudo >/dev/null 2>&1; then
+        err "must be run as root or have 'sudo' available"
+        return 1
+    fi
+    if ! sudo -n true 2>/dev/null; then
+        log "this launcher needs sudo; you may be prompted for your password."
+    fi
+    return 0
+}
+
+run_priv() {
+    if [ "$(id -u)" -eq 0 ]; then
+        "$@"
+    else
+        sudo "$@"
+    fi
+}
+
+# -- 3. Foreground worker -- the actual work --------------------------
+# Called either:
+#   (a) directly from main() when --foreground is passed (SSH workflow)
+#   (b) indirectly via systemd-run --unit=$RUNTIME_UNIT (default workflow)
+# The worker has NO trap registered for the desktop path because
+# the systemd unit owns the lifecycle -- if the operator wants to
+# bail, they 'systemctl stop microjs8-runtime' which sends SIGTERM
+# and the worker's signal handler does the cleanup.
+
+dm_was_running=0
+vt_was_switched=0
+
+worker_cleanup() {
+    local rc=$?
+    if systemctl is-active --quiet shutdown.target 2>/dev/null \
+       || [ -e /run/systemd/shutdown/scheduled ]; then
+        log "system shutdown in progress; skipping cleanup"
+        return $rc
+    fi
+    if systemctl list-jobs --no-pager 2>/dev/null | \
+           grep -qE 'poweroff|reboot|halt'; then
+        log "shutdown/reboot/halt queued; skipping cleanup"
+        return $rc
+    fi
+    if [ "$vt_was_switched" = "1" ]; then
+        log "restoring active VT to tty$X11_VT"
+        run_priv chvt "$X11_VT" 2>/dev/null \
+            || warn "chvt $X11_VT failed"
+    fi
+    if [ "$dm_was_running" = "1" ]; then
+        log "restarting display manager ($DM_UNIT)"
+        run_priv systemctl start "$DM_UNIT" \
+            || warn "failed to restart $DM_UNIT"
+    fi
+    return $rc
+}
+
+worker() {
+    trap worker_cleanup EXIT INT TERM
+
+    if ! command -v chvt >/dev/null 2>&1; then
+        err "chvt not found -- install with: sudo apt install -y kbd"
+        exit 1
+    fi
+
+    if systemctl is-active --quiet "$DM_UNIT"; then
+        dm_was_running=1
+    fi
+
+    log "worker: switching active VT to tty$TEXT_VT"
+    run_priv chvt "$TEXT_VT"
+    vt_was_switched=1
+    sleep 1
+
+    if [ "$dm_was_running" = "1" ]; then
+        log "worker: stopping display manager ($DM_UNIT)"
+        run_priv systemctl stop "$DM_UNIT"
+        sleep 1
+    fi
+
+    log "worker: starting microjs8 daemon ($MICROJS8_UNIT)"
+    if ! run_priv systemctl start "$MICROJS8_UNIT"; then
+        err "$MICROJS8_UNIT failed to start"
+        err "diagnose: sudo journalctl -u microjs8 -n 50 --no-pager"
+        exit 2
+    fi
+
+    sleep 2
+    if ! systemctl is-active --quiet "$MICROJS8_UNIT"; then
+        err "$MICROJS8_UNIT exited within 2 seconds of starting"
+        err "diagnose: sudo journalctl -u microjs8 -n 50 --no-pager"
+        exit 3
+    fi
+
+    log "worker: microjs8 is running; HOME EXIT on panel powers off uConsole"
+    log "worker: to abort externally: sudo systemctl stop $RUNTIME_UNIT.service"
+
+    while systemctl is-active --quiet "$MICROJS8_UNIT"; do
+        sleep "$POLL_INTERVAL_S"
+    done
+
+    log "worker: microjs8 has stopped"
+}
+
+# -- 4. Detection: SSH vs desktop ------------------------------------
+detect_context() {
+    if [ "${MICROJS8_LAUNCH_WORKER:-0}" = "1" ]; then
+        echo "worker"
+        return
+    fi
+
+    local my_tty
+    my_tty=$(tty 2>/dev/null || echo "")
+
+    case "$my_tty" in
+        /dev/tty[0-9]*)
+            echo "vt"
+            return
+            ;;
+    esac
+
+    if [ -n "${SSH_TTY:-}" ] || [ -n "${SSH_CONNECTION:-}" ]; then
+        echo "ssh"
+        return
+    fi
+
+    # sudo strips SSH_*; walk parents for sshd.
+    local pid=$PPID
+    local depth=0
+    while [ "$pid" != "1" ] && [ "$depth" -lt 10 ]; do
+        local comm
+        comm=$(cat "/proc/$pid/comm" 2>/dev/null || echo "")
+        case "$comm" in
+            sshd|sshd-session)
+                echo "ssh"
+                return
+                ;;
+        esac
+        pid=$(awk '{print $4}' "/proc/$pid/stat" 2>/dev/null || echo "1")
+        depth=$((depth + 1))
+    done
+
+    echo "desktop"
+}
+
+# -- 5. Main dispatcher -----------------------------------------------
+main() {
+    ensure_log_dir
+
+    # If invoked with --foreground, run worker in this process even
+    # from SSH. Useful for debugging.
+    local force_fg=0
+    for arg in "$@"; do
+        case "$arg" in
+            --foreground|-f) force_fg=1 ;;
+            --help|-h)
+                echo "Usage: $0 [--foreground|-f]"
+                echo
+                echo "Without --foreground (default): detach via systemd-run,"
+                echo "  return to shell immediately, work continues in"
+                echo "  $RUNTIME_UNIT.service. Required for LXTerminal."
+                echo
+                echo "With --foreground: run worker in this process. Useful"
+                echo "  over SSH where you want Ctrl+C recovery."
+                exit 0
+                ;;
+        esac
+    done
+
+    log "starting (v4)"
+
+    check_uconsole_signature || exit 1
+    check_privileges || exit 1
+
+    local context
+    context=$(detect_context)
+    log "invocation context: $context"
+
+    case "$context" in
+        worker)
+            # We are the worker running inside the systemd unit.
+            worker
+            ;;
+        ssh|vt)
+            if [ "$force_fg" = "1" ]; then
+                log "running worker in foreground (--foreground)"
+                worker
+            else
+                # Default for SSH: also detach so SSH session can
+                # close cleanly. Same path as desktop.
+                detach_and_exit
+            fi
+            ;;
+        desktop)
+            detach_and_exit
+            ;;
+    esac
+}
+
+# -- 6. Detach via systemd-run ----------------------------------------
+# Spawn a transient systemd unit running the worker. systemd handles
+# all the detaching, signal isolation, terminal independence, and
+# stdio redirection natively. The current process exits immediately
+# after queuing.
+
+detach_and_exit() {
+    # Stop any leftover instance from a previous attempt.
+    if systemctl is-active --quiet "$RUNTIME_UNIT.service" 2>/dev/null; then
+        log "stopping previous $RUNTIME_UNIT.service before relaunching"
+        run_priv systemctl stop "$RUNTIME_UNIT.service" || true
+        sleep 1
+    fi
+
+    log "detaching via systemd-run as $RUNTIME_UNIT.service"
+    # --unit gives it a stable name we can stop later.
+    # --collect lets systemd garbage-collect on exit.
+    # --setenv passes our marker so the worker re-recognizes itself.
+    # PassEnvironment is not strictly needed; we use --setenv inline.
+    if ! run_priv systemd-run \
+            --unit="$RUNTIME_UNIT" \
+            --collect \
+            --setenv=MICROJS8_LAUNCH_WORKER=1 \
+            --description="MicroJS8 launcher runtime (transient)" \
+            "$0"; then
+        err "systemd-run failed to start $RUNTIME_UNIT.service"
+        exit 4
+    fi
+
+    log "$RUNTIME_UNIT.service queued; this terminal can close."
+    log "follow with: sudo journalctl -u $RUNTIME_UNIT -f"
+    log "stop with:   sudo systemctl stop $RUNTIME_UNIT"
+    exit 0
+}
+
+main "$@"

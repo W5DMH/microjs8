@@ -1,28 +1,36 @@
 # Running MicroJS8 on the ClockworkPi uConsole CM4
 
-v0.0.17+ supports the ClockworkPi uConsole CM4 (and CM4 Lite) as a
+v0.0.18+ supports the ClockworkPi uConsole CM4 (and CM4 Lite) as a
 deployment platform. MicroJS8 renders its UI on the uConsole's 5-inch
 720p IPS panel via the kernel's vc4drmfb framebuffer compatibility
 shim, using the built-in QWERTY keyboard for input.
+
+The v0.0.18 workflow:
+  1. Boot the uConsole into its normal desktop
+  2. Open LXTerminal
+  3. Run: `sudo microjs8-launch`
+  4. The desktop disappears, MicroJS8 UI appears on the panel
+  5. Operate JS8 (TX, RX, decode, beacon)
+  6. Press HOME EXIT on the panel -> uConsole powers off
+  7. Next boot returns to the desktop
+
+This is different from v0.0.17, which auto-switched the default
+systemd target to text-console-only. The v0.0.18 model keeps the
+desktop intact and uses MicroJS8 as a launchable application.
 
 Hardware requirements:
   - ClockworkPi uConsole with RPI-CM4 or CM4-Lite compute module
   - microSD card with Raspberry Pi OS Bookworm (or ClockworkOS)
   - QDX / G90 / DigiRig / similar radio + USB audio interface
     (connected via the external USB 2.0 port)
-
-This document covers:
-  - First-time install
-  - How MicroJS8 looks on the uConsole's screen
-  - Operator workflow
-  - Troubleshooting
+  - Optional: u-Blox 7 (or similar) USB GPS for time/position sync
 
 ## What you'll see
 
 MicroJS8's UI is designed for a 320 x 170 panel (the Waveshare and
 M5Stack CardputerZero rigs). On the uConsole the same UI is rotated
-90 degrees, scaled 4x with nearest-neighbor (crisp pixels, no
-smoothing), and centered on the 720 x 1280 panel:
+90 degrees clockwise, scaled 4x with nearest-neighbor (crisp pixels,
+no smoothing), and centered on the 720 x 1280 panel:
 
     +--------- 720 x 1280 panel ---------+
     |                                    |
@@ -30,7 +38,7 @@ smoothing), and centered on the 720 x 1280 panel:
     |                                    |
     |  +--- 680 x 1280 MicroJS8 UI ---+  |
     |  |                              |  |
-    |  |  (4x scaled, rotated 90deg)  |  |
+    |  |  (4x scaled, rotated -90)    |  |
     |  |                              |  |
     |  |  HEADER bar (large)          |  |
     |  |  BODY area                   |  |
@@ -43,92 +51,98 @@ smoothing), and centered on the 720 x 1280 panel:
     +------------------------------------+
 
 The 4x scale produces a deliberately chunky, retro-pixel-art look.
-This is the Path A "quick-and-dirty pixel double" port -- a future
-release (v0.0.18+) may add a native 1280x720 layout with denser
-information and proportional fonts sized for the panel. For now,
-operators get a working MicroJS8 station on the uConsole with zero
-manual configuration.
 
 ## Install
 
 1. Boot the uConsole into Raspberry Pi OS Bookworm (or ClockworkOS).
-   Either an SSH session from another machine or a local terminal
-   works for the install.
 
 2. SCP the .deb to the uConsole:
 
-       scp microjs8_0.0.17-1_all.deb dan@<uconsole-ip>:/tmp/
+       scp microjs8_0.0.18-1_all.deb dan@<uconsole-ip>:/tmp/
 
 3. Install:
 
-       sudo apt install -y /tmp/microjs8_0.0.17-1_all.deb
+       sudo apt install -y /tmp/microjs8_0.0.18-1_all.deb
 
-4. Watch the install transcript. On a uConsole the postinst should
+4. Watch the install transcript. On a uConsole, the postinst should
    print:
 
-       microjs8: detected uConsole-style framebuffer signature
-         (vc4drmfb 720x1280 16bpp). The v0.0.17+ uConsole
-         display backend will be used.
-       microjs8: switched default systemd target
-         Was:  graphical.target  (X11 / desktop boots automatically)
-         Now:  multi-user.target (text console; MicroJS8 owns the FB)
-         ...
-       REBOOT REQUIRED for the change to take effect.
+       ============================================================
+       microjs8 v0.0.18: uConsole detected
+       ============================================================
 
-5. Reboot:
+       Run MicroJS8 from a desktop terminal (LXTerminal) with:
 
-       sudo reboot
+           sudo microjs8-launch
+       ...
 
-6. After reboot the uConsole comes up to a text console. SSH back in
-   (or use the local console) and start the daemon:
-
-       sudo systemctl start microjs8
-
-   MicroJS8's UI should appear on the panel within a couple seconds.
+5. No reboot needed. Open LXTerminal and run `sudo microjs8-launch`.
 
 ## Operator workflow
 
-The MicroJS8 daemon runs as a systemd service named `microjs8`. The
-HOME EXIT button (since v0.0.13) gracefully powers off the Pi via
-`systemctl poweroff --ignore-inhibitors`.
+### Launching from the desktop (primary)
 
-To run MicroJS8 as your primary station-on-power-up workflow:
+```
+Open LXTerminal
+sudo microjs8-launch
+```
 
-    sudo systemctl enable microjs8
+You will see:
 
-The daemon then starts automatically every boot. Since the default
-target is multi-user.target (set by v0.0.17 install on uConsole),
-there's no desktop competing for the framebuffer.
+```
+microjs8-launch: starting (v4)
+microjs8-launch: invocation context: desktop
+microjs8-launch: detaching via systemd-run as microjs8-runtime.service
+microjs8-launch: microjs8-runtime.service queued; this terminal can close.
+```
 
-The built-in QWERTY keyboard is recognized automatically by the USB
-keyboard backend -- no config edits needed. Arrow keys navigate
-screens; Enter selects; the alphanumeric keys type messages.
+LXTerminal returns to a prompt. Within ~3 seconds:
+  - Desktop disappears
+  - Panel lights up with MicroJS8 UI
 
-The uConsole's trackball, gamepad, and mouse are NOT used by MicroJS8
-in v0.0.17 (the UI was designed for keyboard-only operation).
+You can close LXTerminal at any time. The launcher continues running
+inside the systemd unit `microjs8-runtime.service`.
 
-### Returning to the desktop temporarily
+### Powering off
 
-If you need to use the uConsole as a normal computer (web browsing,
-file management, etc.):
+Press HOME EXIT on the panel. The uConsole powers off gracefully.
+Next boot returns to the desktop.
 
-    sudo systemctl stop microjs8
-    sudo systemctl isolate graphical.target
+### Aborting without powering off (rare)
 
-You can then run X11 / desktop normally. To return to MicroJS8 mode:
+If you need to return to the desktop without powering off:
 
-    sudo systemctl isolate multi-user.target
-    sudo systemctl start microjs8
+```
+sudo systemctl stop microjs8-runtime
+```
 
-### Permanently reverting (uninstall or roll back)
+The cleanup trap restarts lightdm and the desktop returns.
 
-To fully revert the uConsole to graphical-target boot:
+### Following the launcher's progress
 
-    sudo systemctl set-default graphical.target
-    sudo reboot
+```
+sudo journalctl -u microjs8-runtime -f
+```
 
-(This change is independent of installing/removing the microjs8
-package -- removing the .deb does NOT restore graphical.target.)
+Or check the persistent log:
+
+```
+sudo tail -50 /var/log/microjs8/launch.log
+```
+
+### Over SSH (debug)
+
+For debugging from another machine over SSH:
+
+```
+ssh dan@<uconsole-ip>
+sudo microjs8-launch --foreground
+```
+
+The `--foreground` flag keeps the script attached to your SSH session
+so you see all output and can Ctrl+C to abort (which restarts lightdm
+to return to the desktop). Without `--foreground`, SSH gets the same
+detach behavior as LXTerminal.
 
 ## Audio + radio peripherals
 
@@ -138,58 +152,67 @@ plug your radio's USB audio device (DigiRig, QDX with built-in audio,
 etc.) into the external USB 2.0 port.
 
 The uConsole's internal stereo speakers are not used by MicroJS8
-audio in v0.0.17. They remain available to other applications.
+audio in v0.0.18. They remain available to other applications.
 
-To verify the radio's audio device is discovered:
+## GPS coexistence
 
-    aplay -L | head
-    arecord -L | head
-
-The daemon's auto-config picks up the first USB audio device. See
-the standard MicroJS8 docs for radio-specific configuration.
+If you also use a USB GPS receiver (u-Blox 7, etc.) for time and
+position, see `docs/GPSD_COEXIST.md` for the recommended gpsd
+configuration. The postinst auto-detects the common conflict
+condition (gpsd + DigiRig + USBAUTO=true) and applies a fix, but
+operators with non-default GPS setups may need to verify the
+configuration manually.
 
 ## Troubleshooting
 
-### Screen stays black after `systemctl start microjs8`
+### Launcher refuses with "framebuffer signature does not match uConsole"
 
-1. Check the daemon's journal for the display detection log line:
+The launcher has a hardware-signature check at the top to refuse
+running on non-uConsole hardware. If you see this on an actual
+uConsole, check:
 
-       sudo journalctl -u microjs8 --since "1 min ago" | grep -i display
+    cat /sys/class/graphics/fb0/name           # expect vc4drmfb
+    cat /sys/class/graphics/fb0/virtual_size   # expect 720,1280
+    cat /sys/class/graphics/fb0/bits_per_pixel # expect 16
 
-   Expected:
+Common cause: a kernel update changed the framebuffer driver name
+or geometry. Report to the GitHub issue tracker with the actual
+values seen.
 
-       open_display: uConsole signature detected, using
-       UConsoleFramebufferDevice (fb0 vc4drmfb)
+### Launcher returned to prompt but panel stays black
 
-   If you see "uConsole signature matched but open failed" or the
-   line is missing entirely, the framebuffer signature doesn't
-   match exactly. Check the sysfs values manually:
+Check the launcher log:
 
-       cat /sys/class/graphics/fb0/name           # expect vc4drmfb
-       cat /sys/class/graphics/fb0/virtual_size   # expect 720,1280
-       cat /sys/class/graphics/fb0/bits_per_pixel # expect 16
+    sudo tail -20 /var/log/microjs8/launch.log
 
-2. Verify the multi-user target is active:
+And the runtime journal:
 
-       systemctl get-default          # expect multi-user.target
-       systemctl is-active graphical  # expect inactive (not running)
+    sudo journalctl -u microjs8-runtime -n 30 --no-pager
+    sudo journalctl -u microjs8 -n 30 --no-pager
 
-3. If X11 or another display server is running, it owns the
-   framebuffer. Stop it:
+Common causes:
+  - lightdm didn't fully release the framebuffer in 1 second (rare,
+    usually a one-time install-time blip; retry)
+  - microjs8 crashed during startup (look in the microjs8 journal)
+  - audio device contention (the audio backend may have crashed if
+    no USB audio device is plugged in)
 
-       sudo systemctl stop lightdm gdm sddm 2>/dev/null
-       sudo systemctl isolate multi-user.target
+To recover the desktop:
 
-### Image appears upside down or rotated
+    sudo systemctl stop microjs8-runtime
+    sudo systemctl start lightdm
 
-The default rotation is 90 degrees CCW. If the orientation looks
-wrong on your specific uConsole hardware revision, edit the
-ROTATION_DEGREES constant in
-/usr/share/APPLaunch/lib/microjs8/microjs8/ui/display_uconsole.py
-from 90 to -90 (or 180), then restart the daemon. Note: this edit
-is overwritten on the next package install; if -90 works for your
-hardware, please open a GitHub issue with the uConsole revision
-number so we can fix the default upstream.
+### Image appears upside down
+
+v0.0.18 sets the rotation default to -90 (CW), verified on real
+hardware. If your specific uConsole revision needs a different
+rotation, edit `/usr/share/APPLaunch/lib/microjs8/microjs8/ui/display_uconsole.py`
+and change `ROTATION_DEGREES` to one of: `-90`, `90`, `180`. Restart
+microjs8 (`sudo systemctl restart microjs8` or `sudo systemctl restart microjs8-runtime`).
+
+If a different value works on your hardware, please open a GitHub
+issue with the uConsole revision number so we can investigate the
+default upstream.
 
 ### Built-in keyboard not responding
 
@@ -203,15 +226,36 @@ The MicroJS8 USB keyboard backend discovers any device matching
 udev rules may not be loaded -- try:
 
     sudo udevadm trigger
-    sudo systemctl restart microjs8
+    sudo systemctl restart microjs8-runtime
 
-### Display flickers or partially overdraws
+### Radio stays in TX after launching
 
-This typically means X11 (or another display server) is still
-running alongside the MicroJS8 daemon. Both are writing to the
-framebuffer and fighting each other. Verify with:
+This usually means gpsd has the DigiRig open with RTS asserted.
+See `docs/GPSD_COEXIST.md` for the fix.
 
-    pgrep -a X xinit lightdm gdm
-    # If anything is listed, that's your culprit
+Quick check: `sudo lsof /dev/digirig`. If `gpsd` is listed, run the
+gpsd config fix from GPSD_COEXIST.md.
 
-Stop the offending service and restart microjs8.
+### Reverting to v0.0.17 desktop-disabled boot
+
+If you specifically want the v0.0.17 behavior (boot to text console,
+microjs8 service starts at boot):
+
+    sudo systemctl set-default multi-user.target
+    sudo systemctl enable microjs8
+    sudo reboot
+
+To go back to v0.0.18 (desktop boot + launcher):
+
+    sudo systemctl set-default graphical.target
+    sudo systemctl disable microjs8
+    sudo reboot
+
+## Related docs
+
+  - `docs/I2C_KEYBOARD.md` -- using a CardKB v1.1 via I2C (not
+    applicable to the uConsole's built-in keyboard, but documents
+    the I2C backend in case operators add a CardKB)
+  - `docs/GPSD_COEXIST.md` -- coexisting with a USB GPS receiver
+  - `docs/CARDPUTER_LINK.md` -- the predecessor M5Stack rig (for
+    historical reference; uConsole uses different hardware)

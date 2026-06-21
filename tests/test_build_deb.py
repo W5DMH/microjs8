@@ -736,7 +736,7 @@ def test_udev_rule_is_installed_to_lib_udev(tmp_path: Path):
     the device alone."""
     deb = _run_packager(tmp_path)
     contents = _dpkg_deb("-c", str(deb))
-    assert "./lib/udev/rules.d/99-microjs8-digirig.rules" in contents
+    assert "./lib/udev/rules.d/50-microjs8-digirig.rules" in contents
 
 
 def test_udev_rule_has_gpsd_and_mm_ignore_flags(tmp_path: Path):
@@ -750,7 +750,7 @@ def test_udev_rule_has_gpsd_and_mm_ignore_flags(tmp_path: Path):
         ["dpkg-deb", "-x", str(deb), str(extract_dir)],
         check=True, capture_output=True,
     )
-    rule_path = extract_dir / "lib" / "udev" / "rules.d" / "99-microjs8-digirig.rules"
+    rule_path = extract_dir / "lib" / "udev" / "rules.d" / "50-microjs8-digirig.rules"
     rule_text = rule_path.read_text()
     assert "ID_GPSD_IGNORE" in rule_text, (
         "udev rule missing ID_GPSD_IGNORE — gpsd will grab the Digirig"

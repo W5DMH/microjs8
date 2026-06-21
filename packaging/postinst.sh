@@ -339,35 +339,29 @@ WRAPEOF
             fi
         fi
 
-        # -- 7.4d. uConsole detection + graphical target switch (v0.0.17) -----
-        # The v0.0.17 uConsole display backend writes directly to
-        # /dev/fb0. On the uConsole's standard ClockworkOS install
-        # (and on bare RPi OS with raspi-config defaults) the system
-        # boots into graphical.target, where X11 owns the framebuffer
-        # and our writes compete with the desktop -- producing flicker
-        # at best, blank screen at worst.
+        # -- 7.4d. uConsole launcher notice (v0.0.18) ----------------
+        # v0.0.17 forced a switch from graphical.target to multi-user.target
+        # on uConsole installs so MicroJS8 could own the framebuffer.
+        # Operator feedback (W5DMH, 2026-06-21): this disabled the
+        # uConsole desktop entirely, which broke the field workflow
+        # where operators want to launch MicroJS8 on demand from
+        # a normal desktop.
         #
-        # On uConsole installs we switch the default systemd target
-        # to multi-user.target. The microjs8 daemon (via APPLaunch
-        # tile or systemctl start) then owns the framebuffer cleanly.
+        # v0.0.18 instead installs microjs8-launch to /usr/local/bin
+        # (handled by build_deb's 6.5c block) and leaves the default
+        # systemd target alone. The launcher itself handles the
+        # framebuffer transition: stop lightdm, switch to text VT,
+        # start microjs8.service, wait for HOME EXIT, restart
+        # lightdm on abnormal exit.
         #
-        # We detect uConsole by the framebuffer signature:
+        # We detect uConsole here purely to print a one-time install
+        # advisory pointing the operator at the launcher. No system
+        # changes -- no target switch, no service auto-enable.
+        #
+        # uConsole detection signature (matches display_uconsole.py):
         #   /sys/class/graphics/fb0/name         == "vc4drmfb"
         #   /sys/class/graphics/fb0/virtual_size == "720,1280"
         #   /sys/class/graphics/fb0/bits_per_pixel == "16"
-        #
-        # The same signature check is duplicated in
-        # microjs8.ui.display_uconsole.is_uconsole_present(). Keep
-        # the two in sync if you ever extend the criteria.
-        #
-        # We only switch the target when:
-        #   (a) the uConsole signature matches
-        #   (b) the current default IS graphical.target (we don't
-        #       gratuitously rewrite if the operator has already
-        #       switched to multi-user.target manually)
-        #
-        # The change takes effect at next reboot. We log a clear
-        # notice telling the operator what happened and how to revert.
 
         is_uconsole=0
         if [ -r /sys/class/graphics/fb0/name ] \
@@ -384,38 +378,46 @@ WRAPEOF
         fi
 
         if [ "$is_uconsole" = "1" ]; then
-            echo "microjs8: detected uConsole-style framebuffer signature"
-            echo "  (vc4drmfb 720x1280 16bpp). The v0.0.17+ uConsole"
-            echo "  display backend will be used."
+            echo ""
+            echo "  ============================================================"
+            echo "  microjs8 v0.0.18: uConsole detected"
+            echo "  ============================================================"
+            echo ""
+            echo "  Run MicroJS8 from a desktop terminal (LXTerminal) with:"
+            echo ""
+            echo "      sudo microjs8-launch"
+            echo ""
+            echo "  This will:"
+            echo "    - Switch from the desktop to text console"
+            echo "    - Start the MicroJS8 daemon on the 5\" panel"
+            echo "    - Wait for HOME EXIT to gracefully power off"
+            echo ""
+            echo "  After power-off, the next boot returns to the desktop"
+            echo "  normally. No system configuration changes have been made."
+            echo ""
+            echo "  Over SSH: 'sudo microjs8-launch --foreground' keeps"
+            echo "  output visible in your SSH session for debugging."
+            echo ""
+            echo "  See: /usr/share/doc/microjs8/UCONSOLE.md"
+            echo "  ============================================================"
+            echo ""
 
+            # v0.0.17 left some uConsole installs with default.target
+            # set to multi-user.target (the old auto-switch behavior).
+            # On upgrade to v0.0.18, restore graphical.target ONLY if
+            # the current default is multi-user.target AND lightdm is
+            # installed -- otherwise the operator may have chosen
+            # multi-user deliberately and we shouldn't override.
             if [ -d /run/systemd/system ]; then
-                current_target="$(systemctl get-default 2>/dev/null || echo "unknown")"
-                if [ "$current_target" = "graphical.target" ]; then
-                    systemctl set-default multi-user.target >/dev/null 2>&1 || true
+                current_target="$(systemctl get-default 2>/dev/null || echo unknown)"
+                if [ "$current_target" = "multi-user.target" ] \
+                   && [ -f /lib/systemd/system/lightdm.service ]; then
+                    echo "  microjs8 v0.0.18 upgrade: restoring graphical.target"
+                    echo "  (was switched to multi-user.target by v0.0.17 postinst)"
                     echo ""
-                    echo "  ============================================================"
-                    echo "  microjs8: switched default systemd target"
-                    echo "  ============================================================"
-                    echo "  Was:  graphical.target  (X11 / desktop boots automatically)"
-                    echo "  Now:  multi-user.target (text console; MicroJS8 owns the FB)"
+                    systemctl set-default graphical.target >/dev/null 2>&1 || true
+                    echo "  REBOOT REQUIRED for desktop to return."
                     echo ""
-                    echo "  This change takes effect at next reboot. The MicroJS8 UI"
-                    echo "  will then render natively on the uConsole's 5\" panel."
-                    echo ""
-                    echo "  To revert (restore the desktop environment):"
-                    echo "    sudo systemctl set-default graphical.target"
-                    echo "    sudo reboot"
-                    echo ""
-                    echo "  REBOOT REQUIRED for the change to take effect."
-                    echo "  ============================================================"
-                    echo ""
-                elif [ "$current_target" = "multi-user.target" ]; then
-                    echo "  Default systemd target is already multi-user.target;"
-                    echo "  no change needed."
-                else
-                    echo "  Default systemd target is '$current_target' (not graphical);"
-                    echo "  leaving as-is. If MicroJS8 doesn't render on the panel,"
-                    echo "  consider 'sudo systemctl set-default multi-user.target'."
                 fi
             fi
         fi

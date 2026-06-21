@@ -259,6 +259,73 @@ class TestI2cKeyboardThreadRunErrors:
             thread.run()
         assert thread._bus is None
 
+    def test_probe_failure_returns_cleanly_without_polling(self) -> None:
+        # v0.0.18: if the bus opens but the device doesn't respond at
+        # the probe address, run() must log INFO once and exit cleanly
+        # without entering the poll loop. Otherwise we get the
+        # v0.0.17 journal-flood behavior (33 Hz OSError tracebacks
+        # indefinitely) on hosts running auto-mode without a CardKB.
+        thread = I2cKeyboardThread()
+        fake_bus = MagicMock()
+        # SMBus(bus_num) succeeds, but read_byte raises on probe.
+        fake_bus.read_byte.side_effect = OSError(
+            "[Errno 5] Input/output error"
+        )
+        fake_smbus2 = MagicMock()
+        fake_smbus2.SMBus.return_value = fake_bus
+
+        with patch.dict(sys.modules, {"smbus2": fake_smbus2}):
+            thread.run()
+
+        # Bus was opened, probed once, then closed and nulled.
+        assert thread._bus is None
+        # Probe was attempted exactly once (no retry, no poll loop).
+        assert fake_bus.read_byte.call_count == 1
+        # Bus was closed before return.
+        fake_bus.close.assert_called_once()
+
+    def test_present_device_enters_poll_loop(self) -> None:
+        # v0.0.18 inverse case: if probe SUCCEEDS, run() must enter
+        # the poll loop normally. This confirms the new probe doesn't
+        # break the CardKB-attached path.
+        events_received: list[KeyEvent] = []
+        stop_after_first = threading.Event()
+
+        def on_event(event: KeyEvent) -> None:
+            events_received.append(event)
+            stop_after_first.set()
+
+        thread = I2cKeyboardThread(
+            poll_interval=0.001,
+            on_event=on_event,
+        )
+
+        fake_bus = MagicMock()
+        # Probe (call 1) returns idle 0x00 -- succeeds, no event.
+        # Poll (call 2) returns 'a' (0x61) -- generates event.
+        # Subsequent polls return 0x00 (idle) until stop fires.
+        fake_bus.read_byte.side_effect = [0x00, 0x61, 0x00, 0x00, 0x00]
+        fake_smbus2 = MagicMock()
+        fake_smbus2.SMBus.return_value = fake_bus
+
+        original_wait = thread._stop_event.wait
+
+        def gated_wait(timeout: float) -> bool:
+            if stop_after_first.is_set():
+                return True
+            return original_wait(timeout)
+
+        with patch.dict(sys.modules, {"smbus2": fake_smbus2}):
+            thread._stop_event.wait = gated_wait  # type: ignore[assignment]
+            thread.run()
+
+        # The probe succeeded, so we entered the poll loop and
+        # received the 'a' event.
+        assert len(events_received) >= 1
+        assert events_received[0].char == "a"
+        # read_byte called at least twice: probe + at least one poll.
+        assert fake_bus.read_byte.call_count >= 2
+
 
 class TestI2cKeyboardThreadEventDispatch:
     """End-to-end: bytes from a mocked bus produce KeyEvents."""

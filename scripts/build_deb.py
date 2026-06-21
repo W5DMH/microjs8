@@ -341,24 +341,30 @@ def build_deb(
     else:
         _log.warning("no icon at %s — APPLaunch tile will be blank", icon_src)
 
-    # ── 6.5. udev rule for Digirig (Phase 18.3) ─────────────────────
-    # Creates /dev/digirig symlink and tags the device so gpsd and
-    # ModemManager leave it alone. Without this:
+    # -- 6.5. udev rule for DigiRig (Phase 18.3, renamed in v0.0.18) --
+    # v0.0.18: file renamed from 99-microjs8-digirig.rules to
+    # 50-microjs8-digirig.rules so the rule sorts BEFORE 60-gpsd.rules
+    # and our ENV{ID_GPSD_IGNORE}=1 takes effect before gpsd's
+    # hotplug evaluates it. The 50- prefix is the reliable defense;
+    # 99- was racy on some gpsd versions.
+    #
+    # Creates /dev/digirig symlink and tags the device so gpsd,
+    # ModemManager, and BRLTTY leave it alone. Without this:
     #   - gpsd would auto-grab any CP210x and assert RTS at open
     #     time, keying the radio's PTT permanently (chip-latches)
     #   - ModemManager would probe with AT commands, briefly opening
     #     the port and asserting RTS
-    # Both failure modes were observed during PI-2W-TEST bring-up
-    # (May 20, 2026); the rule shipped here prevents either from
-    # happening on a fresh install.
-    udev_src = root / "udev" / "99-microjs8-digirig.rules"
+    #   - BRLTTY would probe looking for refreshable braille displays
+    # All three failure modes were observed in field testing; the
+    # rule shipped here prevents any of them on a fresh install.
+    udev_src = root / "udev" / "50-microjs8-digirig.rules"
     if udev_src.exists():
-        udev_dst = staging / UDEV_RULES_PATH / "99-microjs8-digirig.rules"
+        udev_dst = staging / UDEV_RULES_PATH / "50-microjs8-digirig.rules"
         write_with_mode(udev_dst, udev_src.read_text(), 0o644)
         _log.info("installed udev rule: %s", udev_dst)
     else:
         _log.warning(
-            "no udev rule at %s — install will not auto-create "
+            "no udev rule at %s -- install will not auto-create "
             "/dev/digirig (operators must install it manually)",
             udev_src,
         )
@@ -388,6 +394,37 @@ def build_deb(
             "daemon to call systemctl poweroff; HOME EXIT button will "
             "silently fail until the rule is installed manually",
             polkit_src,
+        )
+
+    # -- 6.5c. uConsole launcher (v0.0.18) -------------------------
+    # Installs microjs8-launch to /usr/local/bin so operators on
+    # uConsole can run MicroJS8 from a desktop LXTerminal:
+    #
+    #     sudo microjs8-launch
+    #
+    # The launcher detects invocation context (LXTerminal vs SSH vs
+    # text VT), switches active VT to text mode, stops lightdm,
+    # starts microjs8.service, waits for exit. On HOME EXIT, the
+    # daemon powers off the uConsole; on Ctrl+C or abnormal exit,
+    # lightdm is restarted so the desktop returns.
+    #
+    # The launcher has a uConsole hardware-signature check at the
+    # top -- it refuses to run on non-uConsole hosts. Pi Zero 2W
+    # and CardputerZero rigs use systemctl start microjs8 directly
+    # (their existing boot-time path). Installing the launcher on
+    # those hosts is harmless because the signature check refuses
+    # to execute.
+    launcher_src = root / "scripts" / "microjs8-launch"
+    if launcher_src.exists():
+        launcher_dst = staging / LOCAL_BIN_PATH / "microjs8-launch"
+        write_with_mode(launcher_dst, launcher_src.read_text(), 0o755)
+        _log.info("installed uConsole launcher: %s", launcher_dst)
+    else:
+        _log.warning(
+            "no uConsole launcher at %s -- uConsole operators will "
+            "need to install microjs8-launch manually; non-uConsole "
+            "rigs are unaffected",
+            launcher_src,
         )
 
     # ── 6.6. rigctld.service + launcher (Phase 18.3) ────────────────
