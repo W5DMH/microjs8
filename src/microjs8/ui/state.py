@@ -573,6 +573,11 @@ class UISnapshot:
     compose_focused_field: Optional[str] = None
     compose_to_heard_index: Optional[int] = None
     compose_for_heard_index: Optional[int] = None
+    # v0.0.19: set when the operator cycled to MYLOC but no GPS fix
+    # was available. Renderer surfaces "NO GPS FIX PLEASE WAIT" in
+    # the TX warning band. Cleared when the operator cycles to any
+    # other CMD value.
+    compose_myloc_no_fix: bool = False
 
     # Phase 6: battery snapshot from the BQ27220 fuel gauge. None
     # when the reader hasn't run yet (or when discovery has failed
@@ -694,11 +699,16 @@ class UIState:
         self._compose_to: str = ""
         self._compose_cmd: ComposeCmd = ComposeCmd.FREE
         self._compose_text: str = ""
-        # FOR callsign — used only when CMD is MSG_TO. The wire is
+        # FOR callsign -- used only when CMD is MSG_TO. The wire is
         # "<TO> MSG TO:<FOR> <TEXT>", asking TO to hold the body for
         # FOR. The field is rendered conditionally and the field
         # cycle (Tab order) skips it when CMD is anything else.
         self._compose_for: str = ""
+        # v0.0.19: set when the operator cycled to MYLOC but no GPS
+        # fix was available. Renderer surfaces "NO GPS FIX PLEASE
+        # WAIT". Cleared when the operator cycles to another CMD or
+        # when a fix arrives and they re-select MYLOC.
+        self._compose_myloc_no_fix: bool = False
         # Pointer into the heard+groups cycle so successive ↑/↓ keypresses
         # walk the list in order rather than jumping back to position 0.
         # None means "no cycle position yet" — next press lands on index 0
@@ -1620,16 +1630,28 @@ class UIState:
     def compose_cycle_cmd(self, *, forward: bool) -> None:
         """Cycle the CMD dropdown one step.
 
-        ``forward=True`` means ↓ (next in COMPOSE_CMD_ORDER, wraps to
-        first). ``forward=False`` means ↑ (previous, wraps to last).
+        ``forward=True`` means down (next in COMPOSE_CMD_ORDER, wraps to
+        first). ``forward=False`` means up (previous, wraps to last).
         Operators cycle this when CMD is the focused field; other
-        fields don't consume ↑/↓.
+        fields don't consume up/down.
 
         Phase 14b: if the new CMD does not use the FOR field (i.e.
         is anything other than MSG_TO), and the current focus index
         is out of range for the smaller cycle, we clamp it back to
         CMD (index 1). This keeps the focus index sensible across
         CMD changes that remove the FOR field from the cycle.
+
+        v0.0.19: MYLOC is now an interactive action rather than a
+        one-shot grid broadcast. When the cycle lands on MYLOC:
+          - If we have a current GPS fix with position: fill the TEXT
+            field with "MYLOC <lat>,<lon>" (4 decimal places) and
+            advance the cycle by one more step so the visible CMD is
+            MSG -- i.e., MYLOC becomes a "pre-fill action that switches
+            to MSG", not a verb the operator can keep selected.
+          - If we have no current GPS fix: stay on MYLOC and set
+            ``_compose_myloc_no_fix`` so the renderer can surface
+            "NO GPS FIX PLEASE WAIT" in the TX warning area. The
+            operator can cycle to another verb to dismiss.
         """
         try:
             idx = COMPOSE_CMD_ORDER.index(self._compose_cmd)
@@ -1637,9 +1659,22 @@ class UIState:
             idx = 0
         n = len(COMPOSE_CMD_ORDER)
         idx = (idx + 1) % n if forward else (idx - 1) % n
-        self._compose_cmd = COMPOSE_CMD_ORDER[idx]
+        candidate = COMPOSE_CMD_ORDER[idx]
+        # v0.0.19: intercept MYLOC selection.
+        if candidate is ComposeCmd.MYLOC:
+            self._apply_myloc_action()
+            # _apply_myloc_action sets _compose_cmd to MSG on success
+            # or leaves it at MYLOC on no-fix; either way _dirty has
+            # been set inside the helper, so we return without falling
+            # through to the default cycle-advance logic below.
+            return
+        # Default path: settle on candidate.
+        self._compose_cmd = candidate
+        # Clear any stale MYLOC warning when leaving MYLOC.
+        if self._compose_myloc_no_fix:
+            self._compose_myloc_no_fix = False
         # If we just stepped away from MSG TO, the FOR field is no
-        # longer in the focus cycle — clamp the focus index to CMD
+        # longer in the focus cycle -- clamp the focus index to CMD
         # (index 1) so the next Tab lands on TEXT, not in undefined
         # territory.
         if self._compose_cmd is not ComposeCmd.MSG_TO:
@@ -1647,6 +1682,43 @@ class UIState:
             cycle = _compose_focus_cycle(self._compose_cmd)
             if cur_focus >= len(cycle):
                 self._focus_index[Screen.COMPOSE] = 1  # park on CMD
+        self._dirty.set()
+
+    def _apply_myloc_action(self) -> None:
+        """v0.0.19: MYLOC interactive pre-fill.
+
+        Called from ``compose_cycle_cmd`` when the cycle lands on
+        ``ComposeCmd.MYLOC``. Behavior per the v0.0.19 spec:
+
+          - If we have a current GPS fix with position (lat/lon
+            present and ``has_position`` is True): pre-fill
+            ``_compose_text`` with "MYLOC <lat>,<lon>" formatted to
+            4 decimal places (~10 m precision -- higher precision than
+            the JS8 community-default 3 decimal places, per operator
+            preference for finer positioning), switch ``_compose_cmd``
+            to ``MSG`` so the outgoing wire is a MSG envelope, and
+            clear the no-fix warning. The operator can edit or extend
+            the text before sending.
+
+          - If we have no current GPS fix: leave ``_compose_text``
+            untouched, leave ``_compose_cmd`` at MYLOC (the cycle
+            landed there), and set ``_compose_myloc_no_fix`` so the
+            renderer can show "NO GPS FIX PLEASE WAIT" in the warning
+            band. Operator must cycle away (up/down) to escape.
+
+        We deliberately do NOT use the SETUP-configured grid as a
+        fallback: the operator chose 3C (GPS-only) explicitly.
+        """
+        fix = self._gps
+        if fix is not None and fix.has_position:
+            self._compose_text = (
+                f"MYLOC {fix.lat:.4f},{fix.lon:.4f}"
+            )
+            self._compose_cmd = ComposeCmd.MSG
+            self._compose_myloc_no_fix = False
+        else:
+            self._compose_cmd = ComposeCmd.MYLOC
+            self._compose_myloc_no_fix = True
         self._dirty.set()
 
     # ── TO field ↑/↓ cycle (heard stations + groups) ──────────────────
@@ -1768,6 +1840,8 @@ class UIState:
         self._compose_for = ""
         self._compose_to_heard_index = None
         self._compose_for_heard_index = None
+        # v0.0.19: clear the MYLOC no-fix warning on reset.
+        self._compose_myloc_no_fix = False
         # Reset focus to the TO field (index 0 in COMPOSE focusables).
         self._focus_index[Screen.COMPOSE] = 0
         self._editing_field = None
@@ -1952,6 +2026,7 @@ class UIState:
             compose_focused_field=self.compose_focused_field(),
             compose_to_heard_index=self._compose_to_heard_index,
             compose_for_heard_index=self._compose_for_heard_index,
+            compose_myloc_no_fix=self._compose_myloc_no_fix,
             hb_mode=self._hb_mode,
             allcall_focus=self._allcall_focus,
             hb_select_focus=self._hb_select_focus,

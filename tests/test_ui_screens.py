@@ -9,6 +9,7 @@ renderer painted nothing).
 
 from __future__ import annotations
 
+import time
 import pytest
 from PIL import Image
 
@@ -774,7 +775,7 @@ def test_directed_log_outbound_body_renders_in_fg_bad_red(fonts):
     the body text region of an outbound row and confirm there's a
     red pixel — meaning the renderer used the red color, not the
     default FG."""
-    out = _activity_out(to_call="K1ABC", verb="MSG", body="hello dave")
+    out = _activity_out(to_call="K1ABC", verb="MSG", body="hello dave", at_unix=time.time())
     img = _render_directed_log(_directed_snapshot((out,)), fonts)
     # The body text starts at x=18 (PAD_X + 14 chevron) and lives
     # in the row band starting around BODY_Y0. Sample a strip to

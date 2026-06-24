@@ -703,6 +703,28 @@ def _age_color(age_seconds: float) -> tuple[int, int, int]:
     return theme.FG_DIM
 
 
+def _age_color_tx(age_seconds: float) -> tuple[int, int, int]:
+    """v0.0.19: age palette for TRANSMITTED rows in the DIRECTED log.
+
+    Uses the same thresholds as _age_color (30 min / 4 h) but a
+    different palette so the operator can distinguish at a glance
+    whether an aging row was received OR transmitted:
+
+        Transmitted: red (<30 min) -> orange (30 min-4 h) -> blue (>4 h)
+        Received:    green         -> yellow              -> gray
+
+    The transmitted palette starts at FG_BAD (red, attention-getting
+    for our own recent traffic), warms through FG_TX_AGING (orange,
+    still warm but no longer "live"), then cools to ACCENT (blue,
+    historical -- visually distant from the active conversation).
+    """
+    if age_seconds < _AGE_GREEN_S:
+        return theme.FG_BAD
+    if age_seconds < _AGE_YELLOW_S:
+        return theme.FG_TX_AGING
+    return theme.ACCENT
+
+
 def _render_directed(state: UISnapshot, fonts: Fonts) -> Image.Image:
     """Render the directed-activity log (chat-style).
 
@@ -942,12 +964,22 @@ def _render_directed(state: UISnapshot, fonts: Fonts) -> Image.Image:
     # so we render directly without re-reversing.
     y = theme.BODY_Y0 + 6
 
+    # v0.0.19: row body color is now age-based, matching the HEARD
+    # screen pattern. We compute the per-row age once (from now)
+    # and pick the right palette based on direction.
+    now_unix = time.time()
+
     for entry, lines, meta, meta_w, is_in in rendered:
         # First line: chevron + body + meta.
         arrow = "▸" if is_in else "◂"
         arrow_color = theme.FG_GOOD if is_in else theme.FG
         draw.text((arrow_x, y), arrow, font=fonts.body, fill=arrow_color)
-        body_fill = theme.FG if is_in else theme.FG_BAD
+        # v0.0.19: body color tracks entry age.
+        age_s = max(0.0, now_unix - entry.at_unix)
+        if is_in:
+            body_fill = _age_color(age_s)
+        else:
+            body_fill = _age_color_tx(age_s)
         draw.text((text_x, y), lines[0], font=fonts.small, fill=body_fill)
         if meta:
             draw.text(
@@ -1383,6 +1415,7 @@ def _render_compose(state: UISnapshot, fonts: Fonts) -> Image.Image:
       - The SEND button inverts when focused.
 
     TX warning priority (highest first):
+      0. MYLOC selected + no GPS fix → "NO GPS FIX PLEASE WAIT"  (v0.0.19)
       1. TO empty                    → "TO callsign required"
       2. FOR empty (MSG TO only)     → "FOR callsign required"
       3. TO == our own call (non-STORE) → "TO cannot be your own call"
@@ -1596,7 +1629,14 @@ def _render_compose(state: UISnapshot, fonts: Fonts) -> Image.Image:
     text_stripped = (state.compose_text or "").strip()
 
     tx_warning: Optional[str] = None
-    if not to_upper:
+    if state.compose_myloc_no_fix:
+        # v0.0.19: operator cycled CMD to MYLOC but we have no GPS
+        # position. Highest-priority warning -- this is the action
+        # they just took, so they should see the result immediately.
+        # Cleared when they cycle to another CMD value (compose_cycle_cmd
+        # in state.py clears the flag on any non-MYLOC selection).
+        tx_warning = "NO GPS FIX PLEASE WAIT"
+    elif not to_upper:
         tx_warning = "TO callsign required"
     elif is_msg_to and not for_upper:
         tx_warning = "FOR callsign required"

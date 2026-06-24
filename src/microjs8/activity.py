@@ -28,9 +28,13 @@ changing the call sites — the API surface here is intentionally small.
 Bounds
 ======
 
-Max 200 entries. At a typical ~5 directed exchanges per active hour
-that's ~40 hours of working memory. Tunable via the constructor for
-tests; production constructs it with the default.
+Max 2000 entries (raised from 200 in v0.0.19 per operator request:
+DIRECTED rows should stay visible until the session ends rather than
+being silently FIFO'd off the bottom of the list during busy decode
+periods). At a typical ~5 directed exchanges per active hour that's
+~400 hours of working memory -- effectively "the whole session" for
+any normal deployment. Memory cost is bounded (~400 KB at the cap
+with average body lengths). Tunable via the constructor for tests.
 
 Concurrency
 ===========
@@ -53,9 +57,13 @@ from enum import Enum
 from typing import Optional
 
 
-# Default cap. Sized so the deque uses well under 100 KB even with
-# long bodies — fine on a Pi Zero 2W's 512 MB.
-DEFAULT_MAX_ENTRIES = 200
+# Default cap. v0.0.19: raised from 200 to 2000 per operator request
+# ("DIRECTED rows should remain visible until the session ends").
+# A bounded ring buffer is still the right shape -- a runaway decode
+# loop should not OOM the daemon -- but 2000 is high enough that a
+# normal full-day session never hits the bound. At max it uses well
+# under 1 MB even with long bodies, fine on a Pi Zero 2W's 512 MB.
+DEFAULT_MAX_ENTRIES = 2000
 
 
 class Direction(str, Enum):

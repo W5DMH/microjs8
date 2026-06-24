@@ -73,6 +73,17 @@ FG_BAD: Final      = (220, 60, 60)     # not configured, error states
 ACCENT: Final      = (60, 160, 220)    # focused field, selected row
 ACCENT_BG: Final   = (20, 60, 100)     # selected-row background
 
+# DIRECTED-screen transmitted-row middle-age color (v0.0.19).
+# Per the operator-defined aging palette:
+#   Received: green (<30 min) -> yellow (30 min-4 h) -> gray (>4 h)
+#                                = FG_GOOD -> FG_WARN -> FG_DIM
+#   Transmitted: red (<30 min) -> orange (30 min-4 h) -> blue (>4 h)
+#                                = FG_BAD -> FG_TX_AGING -> ACCENT
+# FG_WARN (240,180,40) reads as yellow-orange; FG_TX_AGING (240,130,40)
+# is a more saturated orange so a yellow received-row and an orange
+# transmitted-row are distinguishable at a glance.
+FG_TX_AGING: Final = (240, 130, 40)
+
 EMERGENCY_BG: Final = (140, 0, 0)      # full-screen emergency banner
 EMERGENCY_FG: Final = (255, 255, 255)
 
