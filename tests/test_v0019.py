@@ -138,14 +138,17 @@ class TestMylocWithFix(unittest.TestCase):
         )
         _cycle_to_myloc(state)
         snap = state.snapshot()
-        # 4-decimal-place format per v0.0.19 spec (~10 m precision).
-        self.assertEqual(snap.compose_text, "MYLOC 43.2793,-83.3389")
+        # v0.0.20: body is just "<lat>,<lon>" (no "MYLOC" prefix).
+        # 4-decimal-place format (~10 m precision).
+        self.assertEqual(snap.compose_text, "43.2793,-83.3389")
 
-    def test_with_fix_cmd_becomes_msg(self) -> None:
+    def test_with_fix_cmd_stays_at_myloc(self) -> None:
+        # v0.0.20: CMD label stays at MYLOC (operator-visible
+        # selection) even though the wire builder substitutes MSG.
         state = _make_state_with_fix(lat=43.279, lon=-83.339)
         _cycle_to_myloc(state)
         snap = state.snapshot()
-        self.assertIs(snap.compose_cmd, ComposeCmd.MSG)
+        self.assertIs(snap.compose_cmd, ComposeCmd.MYLOC)
 
     def test_with_fix_no_warning(self) -> None:
         state = _make_state_with_fix(lat=43.279, lon=-83.339)
@@ -160,8 +163,9 @@ class TestMylocWithFix(unittest.TestCase):
         )
         _cycle_to_myloc(state)
         snap = state.snapshot()
-        self.assertEqual(snap.compose_text, "MYLOC 43.2790,-83.3390")
-        self.assertIs(snap.compose_cmd, ComposeCmd.MSG)
+        # v0.0.20: no "MYLOC" prefix; CMD stays at MYLOC.
+        self.assertEqual(snap.compose_text, "43.2790,-83.3390")
+        self.assertIs(snap.compose_cmd, ComposeCmd.MYLOC)
 
 
 class TestMylocNoFix(unittest.TestCase):
@@ -200,6 +204,67 @@ class TestMylocNoFix(unittest.TestCase):
         snap = state.snapshot()
         self.assertFalse(snap.compose_myloc_no_fix)
         self.assertIs(snap.compose_cmd, ComposeCmd.QUERY_MSG)
+
+
+class TestMylocWireFormat(unittest.TestCase):
+    """v0.0.20: MYLOC's over-air verb is MSG (JS8Call has no MYLOC verb).
+
+    The CMD label stays at MYLOC for the operator but
+    ``build_compose_wire`` substitutes MSG when assembling the
+    transmit-side wire string.
+    """
+
+    def test_myloc_wire_uses_msg_verb(self) -> None:
+        # After cycling to MYLOC with a GPS fix, the wire builder
+        # should emit "<TO> MSG <lat>,<lon>" -- MYLOC is never on air.
+        from microjs8.ui.state import build_compose_wire
+        state = _make_state_with_fix(lat=43.279, lon=-83.339)
+        _cycle_to_myloc(state)
+        snap = state.snapshot()
+        wire = build_compose_wire(
+            to="K1ABC",
+            cmd=snap.compose_cmd,        # ComposeCmd.MYLOC
+            text=snap.compose_text,       # "43.2790,-83.3390"
+            my_grid="EN83",
+            my_call="W5DMH",
+            for_call=None,
+        )
+        self.assertEqual(wire, "K1ABC MSG 43.2790,-83.3390")
+
+    def test_myloc_wire_includes_operator_added_text(self) -> None:
+        # Operator can edit/append after the pre-fill. The added
+        # text rides along in the MSG body.
+        from microjs8.ui.state import build_compose_wire
+        state = _make_state_with_fix(lat=43.279, lon=-83.339)
+        _cycle_to_myloc(state)
+        # Simulate the operator appending text after the pre-fill.
+        state.compose_set_text("43.2790,-83.3390 HEADED HOME")
+        snap = state.snapshot()
+        wire = build_compose_wire(
+            to="K1ABC",
+            cmd=snap.compose_cmd,
+            text=snap.compose_text,
+            my_grid="EN83",
+            my_call="W5DMH",
+            for_call=None,
+        )
+        self.assertEqual(wire, "K1ABC MSG 43.2790,-83.3390 HEADED HOME")
+
+    def test_myloc_wire_empty_body_returns_none(self) -> None:
+        # Defense in depth: if somehow MYLOC is reached with empty
+        # text (e.g. the operator deleted the pre-filled body), the
+        # wire builder refuses rather than transmitting "<TO> MSG "
+        # with a trailing space.
+        from microjs8.ui.state import build_compose_wire
+        wire = build_compose_wire(
+            to="K1ABC",
+            cmd=ComposeCmd.MYLOC,
+            text="",
+            my_grid="EN83",
+            my_call="W5DMH",
+            for_call=None,
+        )
+        self.assertIsNone(wire)
 
 
 class TestMylocSourceFileIsAscii(unittest.TestCase):

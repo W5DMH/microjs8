@@ -64,13 +64,20 @@ def test_compose_send_verb_only_command_skips_text():
     assert app._outbound_queue.calls == [("K1ABC SNR?", None, "K1ABC")]
 
 
-def test_compose_send_myloc_uses_station_grid():
-    """MYLOC expands to 'TO GRID <my_grid>' using the station's
-    configured grid — operator doesn't have to type it."""
+def test_compose_send_myloc_emits_msg_with_body():
+    """v0.0.20: MYLOC's over-air verb is MSG. The compose layer
+    pre-fills the body with "<lat>,<lon>" when the operator cycles
+    to MYLOC; the send-sync handler treats it like any other MSG
+    with a body. The station's configured grid is not consulted
+    for MYLOC anymore (was the v0.0.18-and-earlier mechanism)."""
     app = _make_app(grid="FN42")
-    ok = app._compose_send_sync("K1ABC", ComposeCmd.MYLOC, "")
+    ok = app._compose_send_sync(
+        "K1ABC", ComposeCmd.MYLOC, "43.2793,-83.3389",
+    )
     assert ok is True
-    assert app._outbound_queue.calls == [("K1ABC GRID FN42", None, "K1ABC")]
+    assert app._outbound_queue.calls == [
+        ("K1ABC MSG 43.2793,-83.3389", None, "K1ABC"),
+    ]
 
 
 def test_compose_send_query_msgs():
@@ -136,10 +143,17 @@ def test_compose_send_msg_to_rejects_empty_for():
     assert app._outbound_queue.calls == []
 
 
-def test_compose_send_rejects_myloc_with_unconfigured_grid():
-    """If station has no grid, MYLOC can't fire — better to reject
-    than to broadcast a malformed 'GRID '."""
-    app = _make_app(grid="")
+def test_compose_send_rejects_myloc_with_empty_body():
+    """v0.0.20: MYLOC sends as MSG with a body. An empty body
+    returns None from the wire builder (defense in depth). The
+    compose-state handler also blocks the operator with
+    "NO GPS FIX PLEASE WAIT" when there's no GPS to populate
+    the body, so this is rarely reached in practice.
+
+    Note: my_grid is no longer relevant to MYLOC; this test
+    leaves the app's configured grid as the default rather than
+    setting it to empty (which was the v0.0.18 rejection trigger)."""
+    app = _make_app()
     ok = app._compose_send_sync("K1ABC", ComposeCmd.MYLOC, "")
     assert ok is False
     assert app._outbound_queue.calls == []

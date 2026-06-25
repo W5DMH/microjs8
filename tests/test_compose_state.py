@@ -82,26 +82,43 @@ def test_build_wire_verb_only_commands():
     """AGN?/SNR?/GRID? are verb-only — TEXT is ignored, no body on wire."""
     assert build_compose_wire("K1ABC", ComposeCmd.AGN_Q, "", "EN83") == "K1ABC AGN?"
     assert build_compose_wire("K1ABC", ComposeCmd.SNR_Q, "", "EN83") == "K1ABC SNR?"
-    # GRID? is the question form (JS8Call requires the ? — bare GRID
-    # is ignored). The reply form is MYLOC, which emits 'GRID <grid>'.
+    # GRID? is the question form (JS8Call requires the ? -- bare GRID
+    # is ignored). v0.0.20: MYLOC is now a UI pre-fill (see
+    # test_build_wire_myloc_emits_msg_envelope below), not a
+    # GRID-reply shortcut.
     assert build_compose_wire("K1ABC", ComposeCmd.GRID_Q, "", "EN83") == "K1ABC GRID?"
     # Even if the operator typed something, verb-only commands ignore
     # TEXT — keeps the protocol semantics clean.
     assert build_compose_wire("K1ABC", ComposeCmd.AGN_Q, "ignored", "EN83") == "K1ABC AGN?"
 
 
-def test_build_wire_myloc_substitutes_grid_from_config():
-    """MYLOC is UI-only — wire form is 'TO GRID <my_grid>'. The
-    operator doesn't have to type their grid; it comes from station
-    config so it's always current."""
-    assert build_compose_wire("K1ABC", ComposeCmd.MYLOC, "", "EN83") == "K1ABC GRID EN83"
-    assert build_compose_wire("K1ABC", ComposeCmd.MYLOC, "ignored", "FN42") == "K1ABC GRID FN42"
+def test_build_wire_myloc_emits_msg_envelope():
+    """v0.0.20: MYLOC's over-air verb is MSG (JS8Call has no MYLOC
+    verb). The compose-state handler pre-fills the body with
+    "<lat>,<lon>" from the current GPS fix; the wire builder
+    then assembles "<TO> MSG <body>". The my_grid parameter is
+    no longer consulted for MYLOC (it's still accepted for ABI
+    stability with app.py's single caller)."""
+    assert build_compose_wire(
+        "K1ABC", ComposeCmd.MYLOC, "43.2793,-83.3389", "EN83",
+    ) == "K1ABC MSG 43.2793,-83.3389"
+    # Operator-added text rides along in the MSG body.
+    assert build_compose_wire(
+        "K1ABC", ComposeCmd.MYLOC,
+        "43.2793,-83.3389 HEADED HOME", "FN42",
+    ) == "K1ABC MSG 43.2793,-83.3389 HEADED HOME"
 
 
-def test_build_wire_myloc_rejects_missing_grid():
-    """If the station hasn't been configured with a grid, MYLOC can't
-    fire — we shouldn't broadcast a half-formed 'GRID ' with no
-    locator. Returns None so the caller knows to surface an error."""
+def test_build_wire_myloc_rejects_empty_body():
+    """v0.0.20: MYLOC requires a body (the pre-filled lat/lon, plus
+    any operator additions). Empty body returns None so the caller
+    knows there's nothing to transmit -- avoids broadcasting a
+    half-formed "<TO> MSG " with a trailing space. Defense in
+    depth: the compose-state MYLOC handler also blocks the operator
+    with "NO GPS FIX PLEASE WAIT" when there's no fix to pre-fill
+    from, so this code path is rarely reached in practice."""
+    assert build_compose_wire("K1ABC", ComposeCmd.MYLOC, "", "EN83") is None
+    # my_grid no longer matters for MYLOC; only body presence does.
     assert build_compose_wire("K1ABC", ComposeCmd.MYLOC, "", "") is None
 
 

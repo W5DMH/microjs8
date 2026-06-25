@@ -127,10 +127,14 @@ class ComposeCmd(enum.Enum):
     The enum value is the on-air verb token (or empty for FREE-form
     directed messages, which carry no verb). ``MYLOC`` and ``STORE``
     are special cases:
-      - ``MYLOC`` is UI-only and renders as ``GRID <my_grid>`` on the
-        wire so the operator can broadcast their location with one
-        keypress instead of typing the grid square.
-      - ``STORE`` is a LOCAL action — it writes a row to our mailbox
+      - ``MYLOC`` is a UI sugar that pre-fills the TEXT field with
+        the operator's current GPS position ("<lat>,<lon>") so they
+        can broadcast their location without typing it. The wire
+        envelope is built as a MSG ("<TO> MSG <lat>,<lon> [more]")
+        because JS8Call has no MYLOC verb. v0.0.20 redesign per
+        operator feedback; v0.0.19 used a different MYLOC format
+        and v0.0.18 and earlier sent "GRID <my_grid>" instead.
+      - ``STORE`` is a LOCAL action -- it writes a row to our mailbox
         for later delivery to the TO callsign, and nothing goes on
         the air at compose time. When the TO station later sends us
         ``QUERY MSGS`` we deliver the stored body. The verb is held
@@ -142,22 +146,22 @@ class ComposeCmd(enum.Enum):
     FOR callsign is supplied via the extra COMPOSE field that only
     renders for this command.
 
-    Operators cycle through these with ↑/↓ when CMD is focused, in
-    the order declared here (most-common first). FREE is the default
-    so that a fresh COMPOSE behaves like a chat-window: type a body
-    and send.
+    Operators cycle through these with up/down when CMD is focused,
+    in the order declared here (most-common first). FREE is the
+    default so that a fresh COMPOSE behaves like a chat-window:
+    type a body and send.
     """
 
-    FREE = ""               # no verb — wire is "<TO> <TEXT>"
+    FREE = ""               # no verb -- wire is "<TO> <TEXT>"
     MSG = "MSG"             # buffered, CRC-checksummed mail item
     MSG_TO = "MSG TO"       # relay via TO: hold for FOR. Wire: "<TO> MSG TO:<FOR> <TEXT>"
-    STORE = "STORE"         # LOCAL action — store for TO in our mailbox; no wire
-    AGN_Q = "AGN?"          # "again?" — ask peer to retransmit last
+    STORE = "STORE"         # LOCAL action -- store for TO in our mailbox; no wire
+    AGN_Q = "AGN?"          # "again?" -- ask peer to retransmit last
     SNR_Q = "SNR?"          # request signal report
     GRID_Q = "GRID?"        # ask "what's your grid?"  (JS8Call ignores GRID without the ?)
     QUERY_MSGS = "QUERY MSGS"   # ask if peer holds messages for us
     QUERY_MSG = "QUERY MSG"     # fetch a specific buffered message by id; TEXT is the integer id
-    MYLOC = "MYLOC"         # UI-only; expands to "GRID <my_grid>" on wire
+    MYLOC = "MYLOC"         # UI sugar; pre-fills "<lat>,<lon>" in TEXT, wire is "<TO> MSG <body>"
 
 
 # Display order for the CMD dropdown — controls cycle direction.
@@ -210,7 +214,7 @@ def build_compose_wire(
       SNR?        "<TO> SNR?"                        — verb-only
       GRID?       "<TO> GRID?"                       — verb-only (JS8Call requires the ?)
       QUERY MSGS  "<TO> QUERY MSGS"                  — verb-only, ask peer for held msgs
-      MYLOC       "<TO> GRID <my_grid>"              — broadcast our grid
+      MYLOC       "<TO> MSG <TEXT>"                 -- UI sugar: TEXT pre-filled with "<lat>,<lon>"
 
     The TO field is uppercased on output (JS8Call protocol
     convention) and stripped of leading/trailing whitespace. TEXT is
@@ -279,6 +283,12 @@ def build_compose_wire(
     body_required = cmd in (
         ComposeCmd.FREE,
         ComposeCmd.MSG,
+        # v0.0.20: MYLOC now requires a body too. The compose-state
+        # MYLOC handler pre-fills "<lat>,<lon>" when GPS has a fix,
+        # so this is satisfied automatically; with no fix the
+        # handler also blocks the operator with a warning so the
+        # wire builder never runs. Defense in depth.
+        ComposeCmd.MYLOC,
     )
     if body_required and not text:
         return None
@@ -286,10 +296,13 @@ def build_compose_wire(
     if cmd is ComposeCmd.FREE:
         return f"{to} {text}"
     if cmd is ComposeCmd.MYLOC:
-        grid = (my_grid or "").strip()
-        if not grid:
-            return None  # can't broadcast a grid we don't have
-        return f"{to} GRID {grid}"
+        # v0.0.20: MYLOC is a UI sugar -- pre-fills the text field
+        # with the operator's current GPS position. The over-air
+        # verb is MSG; JS8Call has no MYLOC verb. ``my_grid`` is
+        # no longer consulted (was used in v0.0.19 and earlier to
+        # broadcast the SETUP grid; superseded by the GPS-driven
+        # text pre-fill in the compose-state handler).
+        return f"{to} MSG {text}"
     verb = cmd.value
     if body_required:
         return f"{to} {verb} {text}"
@@ -1641,13 +1654,14 @@ class UIState:
         CMD (index 1). This keeps the focus index sensible across
         CMD changes that remove the FOR field from the cycle.
 
-        v0.0.19: MYLOC is now an interactive action rather than a
-        one-shot grid broadcast. When the cycle lands on MYLOC:
-          - If we have a current GPS fix with position: fill the TEXT
-            field with "MYLOC <lat>,<lon>" (4 decimal places) and
-            advance the cycle by one more step so the visible CMD is
-            MSG -- i.e., MYLOC becomes a "pre-fill action that switches
-            to MSG", not a verb the operator can keep selected.
+        v0.0.20: MYLOC is a UI sugar for "compose a position
+        message". When the cycle lands on MYLOC:
+          - If we have a current GPS fix with position: pre-fill
+            TEXT with "<lat>,<lon>" (4 decimal places, no MYLOC
+            prefix) and leave CMD on MYLOC so the operator sees
+            their selection. The wire builder substitutes MSG for
+            MYLOC at transmit time since JS8Call has no MYLOC verb;
+            the over-air result is "<TO> MSG <lat>,<lon> [more]".
           - If we have no current GPS fix: stay on MYLOC and set
             ``_compose_myloc_no_fix`` so the renderer can surface
             "NO GPS FIX PLEASE WAIT" in the TX warning area. The
@@ -1660,12 +1674,14 @@ class UIState:
         n = len(COMPOSE_CMD_ORDER)
         idx = (idx + 1) % n if forward else (idx - 1) % n
         candidate = COMPOSE_CMD_ORDER[idx]
-        # v0.0.19: intercept MYLOC selection.
+        # v0.0.20: intercept MYLOC selection so we can pre-fill the
+        # text field with the current GPS position (or show the
+        # no-fix warning). MYLOC remains the visible CMD; the wire
+        # builder handles the MSG substitution at transmit time.
         if candidate is ComposeCmd.MYLOC:
             self._apply_myloc_action()
-            # _apply_myloc_action sets _compose_cmd to MSG on success
-            # or leaves it at MYLOC on no-fix; either way _dirty has
-            # been set inside the helper, so we return without falling
+            # _apply_myloc_action already set _compose_cmd to MYLOC
+            # and called self._dirty.set(); return without falling
             # through to the default cycle-advance logic below.
             return
         # Default path: settle on candidate.
@@ -1685,20 +1701,28 @@ class UIState:
         self._dirty.set()
 
     def _apply_myloc_action(self) -> None:
-        """v0.0.19: MYLOC interactive pre-fill.
+        """v0.0.20: MYLOC pre-fills lat/lon into the TEXT field.
 
         Called from ``compose_cycle_cmd`` when the cycle lands on
-        ``ComposeCmd.MYLOC``. Behavior per the v0.0.19 spec:
+        ``ComposeCmd.MYLOC``. v0.0.20 redesign per operator feedback:
+        MYLOC is purely a UI sugar that pre-fills the body with our
+        current position so the operator doesn't have to type it.
+        The over-air verb is MSG -- JS8Call has no MYLOC verb, so the
+        wire builder substitutes MSG when CMD is MYLOC (see
+        ``build_compose_wire``).
+
+        Behavior:
 
           - If we have a current GPS fix with position (lat/lon
             present and ``has_position`` is True): pre-fill
-            ``_compose_text`` with "MYLOC <lat>,<lon>" formatted to
-            4 decimal places (~10 m precision -- higher precision than
-            the JS8 community-default 3 decimal places, per operator
-            preference for finer positioning), switch ``_compose_cmd``
-            to ``MSG`` so the outgoing wire is a MSG envelope, and
-            clear the no-fix warning. The operator can edit or extend
-            the text before sending.
+            ``_compose_text`` with "<lat>,<lon>" formatted to 4
+            decimal places (~10 m precision -- finer than the JS8
+            community-default 3 decimals, per operator preference).
+            No "MYLOC" prefix in the body itself; the operator can
+            edit or append to the text before sending.
+            ``_compose_cmd`` stays at ``MYLOC`` so the operator sees
+            their selection reflected in the dropdown; only the wire
+            envelope says MSG. Clear the no-fix warning.
 
           - If we have no current GPS fix: leave ``_compose_text``
             untouched, leave ``_compose_cmd`` at MYLOC (the cycle
@@ -1707,14 +1731,12 @@ class UIState:
             band. Operator must cycle away (up/down) to escape.
 
         We deliberately do NOT use the SETUP-configured grid as a
-        fallback: the operator chose 3C (GPS-only) explicitly.
+        fallback: the operator chose GPS-only explicitly.
         """
         fix = self._gps
         if fix is not None and fix.has_position:
-            self._compose_text = (
-                f"MYLOC {fix.lat:.4f},{fix.lon:.4f}"
-            )
-            self._compose_cmd = ComposeCmd.MSG
+            self._compose_text = f"{fix.lat:.4f},{fix.lon:.4f}"
+            self._compose_cmd = ComposeCmd.MYLOC
             self._compose_myloc_no_fix = False
         else:
             self._compose_cmd = ComposeCmd.MYLOC
